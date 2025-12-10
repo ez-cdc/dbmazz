@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
 use reqwest::Client;
-use serde_json::{Value, Map, json};
+use sonic_rs::{Value, Object as Map, json, JsonValueTrait};
 use std::collections::HashMap;
 use std::time::Duration;
 use chrono::Utc;
@@ -29,6 +29,9 @@ impl StarRocksSink {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(30))
+                .pool_max_idle_per_host(10)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .tcp_keepalive(Duration::from_secs(60))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             base_url,
@@ -43,17 +46,17 @@ impl StarRocksSink {
         &self,
         tuple: &Tuple,
         schema: &TableSchema
-    ) -> Result<Map<String, Value>> {
+    ) -> Result<Map> {
         let mut row = Map::new();
         
         // Iterar sobre columnas y datos en paralelo
         for (column, data) in schema.columns.iter().zip(tuple.0.iter()) {
             let value = match data {
-                TupleData::Null => Value::Null,
+                TupleData::Null => json!(null),
                 TupleData::Toast => {
                     // TOAST = dato muy grande no incluido en el WAL
                     // Usamos null por ahora (el valor no cambió)
-                    Value::Null
+                    json!(null)
                 },
                 TupleData::Text(bytes) => {
                     // Convertir bytes a string y luego al tipo apropiado
@@ -62,7 +65,7 @@ impl StarRocksSink {
                 }
             };
             
-            row.insert(column.name.clone(), value);
+            row.insert(column.name.as_str(), value);
         }
         
         Ok(row)
@@ -74,30 +77,28 @@ impl StarRocksSink {
             // Boolean
             16 => {
                 match text.to_lowercase().as_str() {
-                    "t" | "true" | "1" => Value::Bool(true),
-                    _ => Value::Bool(false),
+                    "t" | "true" | "1" => json!(true),
+                    _ => json!(false),
                 }
             },
             // Integer types (INT2, INT4, INT8)
             21 | 23 | 20 => {
                 text.parse::<i64>()
                     .map(|n| json!(n))
-                    .unwrap_or(Value::String(text.to_string()))
+                    .unwrap_or_else(|_| json!(text))
             },
             // Float types (FLOAT4, FLOAT8)
             700 | 701 => {
                 text.parse::<f64>()
-                    .ok()
-                    .and_then(|f| serde_json::Number::from_f64(f))
-                    .map(Value::Number)
-                    .unwrap_or(Value::String(text.to_string()))
+                    .map(|f| json!(f))
+                    .unwrap_or_else(|_| json!(text))
             },
             // NUMERIC/DECIMAL - mantener como string para precisión
-            1700 => Value::String(text.to_string()),
+            1700 => json!(text),
             // Timestamp types
-            1114 | 1184 => Value::String(text.to_string()),
+            1114 | 1184 => json!(text),
             // Default: string
-            _ => Value::String(text.to_string()),
+            _ => json!(text),
         }
     }
     
@@ -105,7 +106,7 @@ impl StarRocksSink {
     async fn send_to_starrocks(
         &self,
         table_name: &str,
-        rows: Vec<Map<String, Value>>
+        rows: Vec<Map>
     ) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
@@ -116,8 +117,8 @@ impl StarRocksSink {
             self.base_url, self.database, table_name
         );
         
-        let json_values: Vec<Value> = rows.into_iter().map(Value::Object).collect();
-        let body = serde_json::to_string(&json_values)?;
+        let json_values: Vec<Value> = rows.into_iter().map(|obj| Value::from(obj)).collect();
+        let body = sonic_rs::to_string(&json_values)?;
         
         let response = self.client
             .put(&url)
@@ -143,7 +144,7 @@ impl StarRocksSink {
         }
         
         // Parsear respuesta JSON de StarRocks
-        let resp_json: Value = serde_json::from_str(&resp_text)
+        let resp_json: Value = sonic_rs::from_str(&resp_text)
             .unwrap_or(json!({"Status": "Unknown"}));
             
         let sr_status = resp_json["Status"].as_str().unwrap_or("Unknown");
@@ -175,7 +176,7 @@ impl StarRocksSink {
     async fn send_with_retry(
         &self,
         table_name: &str,
-        rows: Vec<Map<String, Value>>,
+        rows: Vec<Map>,
         max_retries: u32
     ) -> Result<()> {
         let mut attempt = 0;
@@ -221,7 +222,7 @@ impl Sink for StarRocksSink {
         lsn: u64
     ) -> Result<()> {
         // Agrupar mensajes por tabla (relation_id)
-        let mut tables: HashMap<u32, Vec<Map<String, Value>>> = HashMap::new();
+        let mut tables: HashMap<u32, Vec<Map>> = HashMap::new();
         
         for msg in batch {
             match msg {
@@ -230,11 +231,11 @@ impl Sink for StarRocksSink {
                         let mut row = self.tuple_to_json(tuple, schema)?;
                         
                         // Columnas de auditoría CDC
-                        row.insert("dbmazz_op_type".to_string(), json!(0)); // 0 = INSERT
-                        row.insert("dbmazz_is_deleted".to_string(), json!(false));
-                        row.insert("dbmazz_synced_at".to_string(), 
+                        row.insert("dbmazz_op_type", json!(0)); // 0 = INSERT
+                        row.insert("dbmazz_is_deleted", json!(false));
+                        row.insert("dbmazz_synced_at", 
                             json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
-                        row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                        row.insert("dbmazz_cdc_version", json!(lsn as i64));
                         
                         tables.entry(*relation_id)
                             .or_insert_with(Vec::new)
@@ -247,11 +248,11 @@ impl Sink for StarRocksSink {
                         let mut row = self.tuple_to_json(new_tuple, schema)?;
                         
                         // Columnas de auditoría CDC
-                        row.insert("dbmazz_op_type".to_string(), json!(1)); // 1 = UPDATE
-                        row.insert("dbmazz_is_deleted".to_string(), json!(false));
-                        row.insert("dbmazz_synced_at".to_string(), 
+                        row.insert("dbmazz_op_type", json!(1)); // 1 = UPDATE
+                        row.insert("dbmazz_is_deleted", json!(false));
+                        row.insert("dbmazz_synced_at", 
                             json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
-                        row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                        row.insert("dbmazz_cdc_version", json!(lsn as i64));
                         
                         tables.entry(*relation_id)
                             .or_insert_with(Vec::new)
@@ -265,11 +266,11 @@ impl Sink for StarRocksSink {
                             let mut row = self.tuple_to_json(old, schema)?;
                             
                             // Columnas de auditoría CDC
-                            row.insert("dbmazz_op_type".to_string(), json!(2)); // 2 = DELETE
-                            row.insert("dbmazz_is_deleted".to_string(), json!(true)); // Soft delete
-                            row.insert("dbmazz_synced_at".to_string(), 
+                            row.insert("dbmazz_op_type", json!(2)); // 2 = DELETE
+                            row.insert("dbmazz_is_deleted", json!(true)); // Soft delete
+                            row.insert("dbmazz_synced_at", 
                                 json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
-                            row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                            row.insert("dbmazz_cdc_version", json!(lsn as i64));
                             
                             tables.entry(*relation_id)
                                 .or_insert_with(Vec::new)
