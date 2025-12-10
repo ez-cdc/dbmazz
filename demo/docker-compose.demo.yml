@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:14
+    container_name: dbmazz-demo-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: demo_db
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./postgres/seed-data.sql:/docker-entrypoint-initdb.d/02-seed-data.sql
+      - postgres_data:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dbmazz-demo
+
+  starrocks:
+    image: starrocks/allin1-ubuntu:latest
+    container_name: dbmazz-demo-starrocks
+    environment:
+      - TZ=UTC
+    ports:
+      - "8030:8030"  # FE HTTP (Stream Load)
+      - "9030:9030"  # FE MySQL
+      - "8040:8040"  # BE HTTP
+    volumes:
+      - starrocks_data:/data
+      - ./starrocks/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9030"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks:
+      - dbmazz-demo
+
+  dbmazz:
+    image: debian:bookworm-slim
+    container_name: dbmazz-demo-cdc
+    volumes:
+      - ../target/release/dbmazz:/usr/local/bin/dbmazz:ro
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db?replication=database"
+      SLOT_NAME: "dbmazz_demo_slot"
+      PUBLICATION_NAME: "dbmazz_pub"
+      STARROCKS_URL: "http://starrocks:8040"
+      STARROCKS_DB: "demo_db"
+      STARROCKS_USER: "root"
+      STARROCKS_PASS: ""
+      FLUSH_INTERVAL_MS: "5000"
+      RUST_LOG: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # StarRocks tarda mucho, no esperamos su health check
+      starrocks:
+        condition: service_started
+    networks:
+      - dbmazz-demo
+    restart: unless-stopped
+    command: ["/usr/local/bin/dbmazz"]
+
+  traffic-generator:
+    build:
+      context: ./traffic-generator
+    container_name: dbmazz-demo-traffic
+    environment:
+      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dbmazz-demo
+    restart: unless-stopped
+
+  monitor:
+    build:
+      context: ./monitor
+    container_name: dbmazz-demo-monitor
+    environment:
+      POSTGRES_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
+      STARROCKS_HOST: "starrocks"
+      STARROCKS_PORT: "9030"
+      STARROCKS_USER: "root"
+    depends_on:
+      - postgres
+      - starrocks
+    networks:
+      - dbmazz-demo
+    stdin_open: true
+    tty: true
+
+networks:
+  dbmazz-demo:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  starrocks_data:
+

@@ -1,0 +1,27 @@
+# Rust
+/target/
+**/target/
+**/*.rs.bk
+Cargo.lock
+Cargo.*
+**/*.rs.bk
+
+# Byproducts
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Test & coverage
+coverage/
+*.profraw
+
+# Misc
+*.old
