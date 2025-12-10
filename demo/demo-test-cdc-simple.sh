@@ -72,3 +72,4 @@ echo -e "\n${GREEN}🎉 CDC validation complete!${NC}"
 echo -e "${CYAN}PostgreSQL is properly configured for logical replication.${NC}"
 echo -e "${CYAN}dbmazz can connect and stream CDC events.${NC}"
 
+

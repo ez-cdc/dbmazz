@@ -79,23 +79,47 @@ def get_pg_counts(conn):
 def get_sr_counts(conn):
     """Get counts from StarRocks"""
     if conn is None:
-        return 0, 0, 0
+        return 0, 0, 0, None, None, None
         
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT COUNT(*) FROM orders WHERE op_type = 0 OR op_type IS NULL")
+        # Contar registros activos (no eliminados)
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE dbmazz_is_deleted = FALSE")
         orders = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM order_items WHERE op_type = 0 OR op_type IS NULL")
+        cursor.execute("SELECT COUNT(*) FROM order_items WHERE dbmazz_is_deleted = FALSE")
         items = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM orders WHERE op_type = 1")
+        
+        # Contar registros eliminados (soft delete)
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE dbmazz_is_deleted = TRUE")
         deleted = cursor.fetchone()[0]
-        return orders, items, deleted
+        
+        # Obtener última sincronización, LSN y latencia de replicación real
+        # Obtener el último registro sincronizado y calcular su latencia
+        cursor.execute("""
+            SELECT 
+                dbmazz_synced_at as last_sync,
+                dbmazz_cdc_version as latest_lsn,
+                TIMESTAMPDIFF(SECOND, 
+                    GREATEST(IFNULL(created_at, '1970-01-01'), IFNULL(updated_at, '1970-01-01')), 
+                    dbmazz_synced_at
+                ) as replication_latency
+            FROM orders
+            WHERE dbmazz_synced_at IS NOT NULL
+            ORDER BY dbmazz_synced_at DESC
+            LIMIT 1
+        """)
+        result = cursor.fetchone()
+        last_sync = result[0] if result and result[0] else None
+        latest_lsn = result[1] if result and result[1] else None
+        lag_seconds = result[2] if result and result[2] is not None else None
+        
+        return orders, items, deleted, last_sync, latest_lsn, lag_seconds
     except Exception as e:
-        return 0, 0, 0
+        return 0, 0, 0, None, None, None
     finally:
         cursor.close()
 
-def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, cycle):
+def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, last_sync, latest_lsn, lag_seconds, cycle):
     """Create dashboard layout"""
     layout = Layout()
     
@@ -112,36 +136,67 @@ def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, cycle
     table.add_column("StarRocks (Target)", justify="right", style="yellow")
     table.add_column("Estado", justify="center")
     
-    # Calculate sync status
+    # Calculate sync status and lag
+    orders_lag = pg_orders - sr_orders
+    items_lag = pg_items - sr_items
     orders_synced = "✅" if pg_orders == sr_orders else f"⏳ ({sr_orders}/{pg_orders})"
     items_synced = "✅" if pg_items == sr_items else f"⏳ ({sr_items}/{pg_items})"
     
+    # Color code for lag
+    orders_lag_color = "green" if orders_lag < 100 else "yellow" if orders_lag < 1000 else "red"
+    items_lag_color = "green" if items_lag < 300 else "yellow" if items_lag < 3000 else "red"
+    
     table.add_row(
-        "📦 Orders",
+        "📦 Orders (Active)",
         f"{pg_orders:,}",
         f"{sr_orders:,}",
         orders_synced
     )
     table.add_row(
-        "📋 Order Items",
+        "📋 Order Items (Active)",
         f"{pg_items:,}",
         f"{sr_items:,}",
         items_synced
     )
     table.add_row(
-        "🗑️  Deleted Orders",
+        "🗑️  Soft Deleted Orders",
         "-",
         f"{sr_deleted:,}",
         "ℹ️"
     )
+    table.add_row(
+        "⏱️  Replication Lag",
+        "-",
+        f"[{orders_lag_color}]{orders_lag:,} orders[/{orders_lag_color}]",
+        f"[{items_lag_color}]{items_lag:,} items[/{items_lag_color}]"
+    )
     
-    # Stats panel
+    # Stats panel with audit columns
     sync_rate = ((sr_orders / pg_orders * 100) if pg_orders > 0 else 0)
+    
+    # Format audit info
+    last_sync_str = last_sync.strftime('%H:%M:%S') if last_sync else "N/A"
+    lsn_str = f"0x{latest_lsn:X}" if latest_lsn else "N/A"
+    
+    # Replication latency (tiempo real desde created_at hasta synced_at)
+    replication_lag_str = f"{lag_seconds}s" if lag_seconds is not None else "N/A"
+    replication_lag_color = "green" if lag_seconds is not None and lag_seconds < 5 else "yellow" if lag_seconds is not None and lag_seconds < 30 else "red"
+    
+    # Records lag (rezago de registros)
+    total_lag = orders_lag + items_lag
+    records_lag_str = f"{total_lag:,} registros"
+    records_lag_color = "green" if total_lag < 500 else "yellow" if total_lag < 5000 else "red"
+    
     stats = f"""
 [bold]Estado de Sincronización:[/bold]
 • Tasa de Sync: {sync_rate:.1f}%
-• Ciclo: {cycle}
-• Timestamp: {datetime.now().strftime('%H:%M:%S')}
+• Rezago de Registros: [{records_lag_color}]{records_lag_str}[/{records_lag_color}]
+• Latencia de Replicación: [{replication_lag_color}]{replication_lag_str}[/{replication_lag_color}]
+
+[bold]Auditoría CDC:[/bold]
+• Última Sync: {last_sync_str}
+• LSN Actual: {lsn_str}
+• Ciclo: {cycle} | {datetime.now().strftime('%H:%M:%S')}
 
 [bold green]✅ Sistema Operativo[/bold green]
 """
@@ -180,12 +235,13 @@ def main():
             while True:
                 try:
                     pg_orders, pg_items = get_pg_counts(pg_conn)
-                    sr_orders, sr_items, sr_deleted = get_sr_counts(sr_conn)
+                    sr_orders, sr_items, sr_deleted, last_sync, latest_lsn, lag_seconds = get_sr_counts(sr_conn)
                     
                     cycle += 1
                     dashboard = create_dashboard(
                         pg_orders, pg_items,
                         sr_orders, sr_items, sr_deleted,
+                        last_sync, latest_lsn, lag_seconds,
                         cycle
                     )
                     

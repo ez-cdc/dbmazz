@@ -26,6 +26,11 @@ CREATE INDEX idx_orders_customer ON orders(customer_id);
 CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_order_items_order ON order_items(order_id);
 
+-- Configure REPLICA IDENTITY FULL for CDC with soft deletes
+-- This is required for StarRocks/ClickHouse to capture all column values in DELETEs
+ALTER TABLE orders REPLICA IDENTITY FULL;
+ALTER TABLE order_items REPLICA IDENTITY FULL;
+
 -- Create publication for CDC (only orders and order_items, not checkpoints)
 CREATE PUBLICATION dbmazz_pub FOR TABLE orders, order_items;
 

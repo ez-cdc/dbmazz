@@ -137,3 +137,4 @@ echo -e "${CYAN}You can now run the full demo with: ./demo-start.sh${NC}"
 
 # Cleanup will run automatically via trap
 
+

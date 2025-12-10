@@ -11,3 +11,4 @@ COPY dashboard.py .
 
 CMD ["python", "dashboard.py"]
 
+

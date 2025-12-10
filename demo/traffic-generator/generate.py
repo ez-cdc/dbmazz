@@ -115,7 +115,7 @@ def main():
                 print(f"📈 {operations:,} ops | {ops_per_sec:.1f} ops/sec | Last: {op_type}")
             
             # Sleep to control rate (adjust for demo speed)
-            time.sleep(0.01)  # 100 ops/sec
+            time.sleep(0.001)  # 100 ops/sec
             
     except KeyboardInterrupt:
         print("\n✋ Traffic generator stopped")
@@ -127,4 +127,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

@@ -68,6 +68,44 @@ if [ $ELAPSED -ge $TIMEOUT ]; then
     exit 1
 fi
 
+# Limpiar datos previos para demo fresco
+echo -e "\n${CYAN}🧹 Cleaning previous demo data...${NC}"
+docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -c "
+    TRUNCATE TABLE order_items CASCADE;
+    TRUNCATE TABLE orders CASCADE;
+    DELETE FROM dbmazz_checkpoints WHERE slot_name = 'dbmazz_demo_slot';
+" 2>/dev/null || echo -e "${YELLOW}  Note: Some tables may not exist yet (normal on first run)${NC}"
+
+# Recrear replication slot desde cero
+echo -e "${CYAN}🔄 Resetting replication slot...${NC}"
+docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -c "
+    SELECT pg_drop_replication_slot('dbmazz_demo_slot') 
+    WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'dbmazz_demo_slot');
+" 2>/dev/null || echo -e "${YELLOW}  Note: Slot may not exist (normal on first run)${NC}"
+
+echo -e "${GREEN}✅ Demo data cleaned - starting fresh${NC}"
+
+# Verificar y reportar REPLICA IDENTITY de las tablas
+echo -e "\n${CYAN}🔍 Checking REPLICA IDENTITY configuration...${NC}"
+REPLICA_CHECK=$(docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -t -A -c \
+    "SELECT tablename, CASE relreplident 
+        WHEN 'f' THEN 'FULL' 
+        WHEN 'd' THEN 'DEFAULT' 
+        WHEN 'n' THEN 'NOTHING' 
+        WHEN 'i' THEN 'INDEX' 
+     END as replica_identity 
+     FROM pg_tables t 
+     JOIN pg_class c ON t.tablename = c.relname 
+     WHERE schemaname = 'public' AND tablename IN ('orders', 'order_items');" 2>/dev/null)
+
+echo "$REPLICA_CHECK" | while IFS='|' read -r table identity; do
+    if [ "$identity" = "FULL" ]; then
+        echo -e "${GREEN}  ✅ $table: REPLICA IDENTITY $identity${NC}"
+    else
+        echo -e "${YELLOW}  ⚠️  $table: REPLICA IDENTITY $identity (should be FULL for soft deletes)${NC}"
+    fi
+done
+
 echo -e "${YELLOW}⏳ Waiting for StarRocks FE to be ready...${NC}"
 TIMEOUT=300  # 5 minutos máximo para StarRocks
 ELAPSED=0
@@ -106,8 +144,16 @@ if [ $ELAPSED -ge $TIMEOUT ]; then
     exit 1
 fi
 
+# Limpiar tablas previas de StarRocks
+echo -e "\n${CYAN}🧹 Cleaning previous StarRocks tables...${NC}"
+docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root demo_db -e "
+    DROP TABLE IF EXISTS order_items;
+    DROP TABLE IF EXISTS orders;
+" 2>/dev/null || echo -e "${YELLOW}  Note: Tables may not exist (normal on first run)${NC}"
+echo -e "${GREEN}✅ StarRocks tables cleaned${NC}"
+
 # Initialize StarRocks schema (manual execution needed as allin1 doesn't auto-run init scripts)
-echo -e "${CYAN}📝 Initializing StarRocks schema...${NC}"
+echo -e "\n${CYAN}📝 Initializing StarRocks schema...${NC}"
 # Ejecutar script de inicialización
 docker exec -i dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root < starrocks/init.sql 2>&1
 
