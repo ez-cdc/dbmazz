@@ -62,6 +62,14 @@ async fn main() -> Result<()> {
     // 2. Init Source con LSN de checkpoint
     let source =
         PostgresSource::new(&database_url, slot_name.clone(), publication_name).await?;
+    
+    // 2.1. Validar REPLICA IDENTITY de las tablas (opcional, solo warning)
+    let tables_to_validate = vec!["orders".to_string(), "order_items".to_string()];
+    if let Err(e) = source.validate_replica_identity(&tables_to_validate).await {
+        eprintln!("⚠️  REPLICA IDENTITY validation failed: {}", e);
+        eprintln!("    Continuing anyway, but soft deletes may not work correctly.");
+    }
+    
     let replication_stream = source.start_replication_from(start_lsn).await?;
     tokio::pin!(replication_stream);
 

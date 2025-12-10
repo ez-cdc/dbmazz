@@ -4,6 +4,7 @@ use reqwest::Client;
 use serde_json::{Value, Map, json};
 use std::collections::HashMap;
 use std::time::Duration;
+use chrono::Utc;
 
 use crate::sink::Sink;
 use crate::source::parser::{CdcMessage, TupleData, Tuple};
@@ -163,7 +164,7 @@ impl StarRocksSink {
         println!(
             "✅ Sent {} rows to StarRocks ({}.{})", 
             loaded_rows,
-            self.database, 
+            self.database,
             table_name
         );
         
@@ -216,7 +217,8 @@ impl Sink for StarRocksSink {
     async fn push_batch(
         &mut self, 
         batch: &[CdcMessage],
-        schema_cache: &SchemaCache
+        schema_cache: &SchemaCache,
+        lsn: u64
     ) -> Result<()> {
         // Agrupar mensajes por tabla (relation_id)
         let mut tables: HashMap<u32, Vec<Map<String, Value>>> = HashMap::new();
@@ -226,7 +228,14 @@ impl Sink for StarRocksSink {
                 CdcMessage::Insert { relation_id, tuple } => {
                     if let Some(schema) = schema_cache.get(*relation_id) {
                         let mut row = self.tuple_to_json(tuple, schema)?;
-                        row.insert("op_type".to_string(), json!(0)); // 0 = UPSERT
+                        
+                        // Columnas de auditoría CDC
+                        row.insert("dbmazz_op_type".to_string(), json!(0)); // 0 = INSERT
+                        row.insert("dbmazz_is_deleted".to_string(), json!(false));
+                        row.insert("dbmazz_synced_at".to_string(), 
+                            json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+                        row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                        
                         tables.entry(*relation_id)
                             .or_insert_with(Vec::new)
                             .push(row);
@@ -236,7 +245,14 @@ impl Sink for StarRocksSink {
                 CdcMessage::Update { relation_id, new_tuple, .. } => {
                     if let Some(schema) = schema_cache.get(*relation_id) {
                         let mut row = self.tuple_to_json(new_tuple, schema)?;
-                        row.insert("op_type".to_string(), json!(0)); // 0 = UPSERT
+                        
+                        // Columnas de auditoría CDC
+                        row.insert("dbmazz_op_type".to_string(), json!(1)); // 1 = UPDATE
+                        row.insert("dbmazz_is_deleted".to_string(), json!(false));
+                        row.insert("dbmazz_synced_at".to_string(), 
+                            json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+                        row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                        
                         tables.entry(*relation_id)
                             .or_insert_with(Vec::new)
                             .push(row);
@@ -247,7 +263,14 @@ impl Sink for StarRocksSink {
                     if let Some(old) = old_tuple {
                         if let Some(schema) = schema_cache.get(*relation_id) {
                             let mut row = self.tuple_to_json(old, schema)?;
-                            row.insert("op_type".to_string(), json!(1)); // 1 = DELETE
+                            
+                            // Columnas de auditoría CDC
+                            row.insert("dbmazz_op_type".to_string(), json!(2)); // 2 = DELETE
+                            row.insert("dbmazz_is_deleted".to_string(), json!(true)); // Soft delete
+                            row.insert("dbmazz_synced_at".to_string(), 
+                                json!(Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()));
+                            row.insert("dbmazz_cdc_version".to_string(), json!(lsn as i64));
+                            
                             tables.entry(*relation_id)
                                 .or_insert_with(Vec::new)
                                 .push(row);

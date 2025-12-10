@@ -66,7 +66,7 @@ impl Pipeline {
     }
 
     async fn flush_batch(&mut self, batch: &[CdcMessage], lsn: u64) {
-        match self.sink.push_batch(batch, &self.schema_cache).await {
+        match self.sink.push_batch(batch, &self.schema_cache, lsn).await {
             Ok(_) => {
                 // Enviar LSN al canal de feedback para confirmar checkpoint
                 if let Some(ref tx) = self.feedback_tx {

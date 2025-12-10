@@ -73,3 +73,4 @@ ERROR: syntax error at or near "START_REPLICATION"
 **Fecha**: 2025-12-09  
 **Estado**: PostgreSQL y demo infrastructure ✅ | CDC nativo ⚠️ (en progreso)
 
+

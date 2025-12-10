@@ -83,6 +83,11 @@ services:
     container_name: dbmazz-demo-traffic
     environment:
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
+      TARGET_EVENTS_PER_SECOND: "4500"  # Configurable: target events/sec (ajustado para overhead)
+      INSERT_RATIO: "0.70"               # 70% inserts
+      UPDATE_RATIO: "0.25"               # 25% updates
+      DELETE_RATIO: "0.05"               # 5% deletes
+      PYTHONUNBUFFERED: "1"              # Unbuffered logs for real-time output
     depends_on:
       postgres:
         condition: service_healthy

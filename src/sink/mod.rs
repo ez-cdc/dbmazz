@@ -10,7 +10,8 @@ pub trait Sink: Send + Sync {
     async fn push_batch(
         &mut self, 
         batch: &[CdcMessage],
-        schema_cache: &SchemaCache
+        schema_cache: &SchemaCache,
+        lsn: u64
     ) -> Result<()>;
 }
 

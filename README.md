@@ -52,17 +52,29 @@ Ver [DEMO-QUICKSTART.md](DEMO-QUICKSTART.md) para instrucciones completas o [dem
 1.  **Rust**: Versión reciente de Rust y Cargo instalados.
 2.  **PostgreSQL**:
     -   `wal_level = logical` en `postgresql.conf`
+    -   **REPLICA IDENTITY FULL** (requerido para soft deletes en StarRocks):
+        ```sql
+        ALTER TABLE my_table REPLICA IDENTITY FULL;
+        ```
+        > ⚠️ **Importante**: StarRocks/ClickHouse necesitan todas las columnas (incluyendo particiones) para DELETEs.
+        > REPLICA IDENTITY FULL garantiza que el WAL incluya todos los valores de la fila eliminada.
     -   Crear publicación:
         ```sql
         CREATE PUBLICATION dbmazz_pub FOR ALL TABLES;
         ```
 3.  **StarRocks**:
-    -   Tabla destino con Primary Key:
+    -   Tabla destino con Primary Key y columnas de auditoría CDC:
         ```sql
         CREATE TABLE my_table (
             id INT,
             name STRING,
-            ...
+            -- ... tus columnas ...
+            
+            -- Columnas de auditoría CDC (agregadas automáticamente por dbmazz)
+            dbmazz_op_type TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE',
+            dbmazz_is_deleted BOOLEAN COMMENT 'Soft delete flag',
+            dbmazz_synced_at DATETIME COMMENT 'Timestamp de sincronización',
+            dbmazz_cdc_version BIGINT COMMENT 'PostgreSQL LSN'
         ) PRIMARY KEY (id)
         DISTRIBUTED BY HASH(id);
         ```
@@ -126,11 +138,3 @@ src/
 -   [ ] Configuración vía YAML + env vars
 -   [ ] Benchmarks con PostgreSQL real
 -   [ ] Snapshot inicial (antes de CDC)
-
-## Diferencias con PeerDB
-
-`dbmazz` es una versión simplificada y optimizada de PeerDB enfocada en:
--   **Solo Rust nativo** (sin Go, sin binarios externos)
--   **Arquitectura minimalista** para máximo rendimiento
--   **Source fijo**: PostgreSQL
--   **Target inicial**: StarRocks (extensible a otros via trait Sink)

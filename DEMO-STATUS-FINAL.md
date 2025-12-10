@@ -228,3 +228,4 @@ async fn push_batch(&mut self, batch: &[CdcMessage]) -> Result<()> {
 
 La implementación del sink es trabajo mecánico que completa la funcionalidad end-to-end.
 
+

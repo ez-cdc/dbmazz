@@ -1,0 +1,28 @@
+[package]
+name = "dbmazz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Fork de Materialize con soporte completo para replicación lógica
+tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master", features = ["with-chrono-0_4", "with-serde_json-1"] }
+tokio = { version = "1.36", features = ["full"] }
+postgres-protocol = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master" }
+postgres-types = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master", features = ["derive", "with-chrono-0_4", "with-serde_json-1"] }
+reqwest = { version = "0.11.24", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.114"
+anyhow = "1.0.81"
+chrono = { version = "0.4.35", features = ["serde"] }
+dotenvy = "0.15.7"
+bytes = "1.5.0"
+futures = "0.3.30"
+log = "0.4.21"
+env_logger = "0.11.3"
+hex = "0.4.3"
+tokio-stream = "0.1.17"
+hashbrown = "0.16.1"
+async-trait = "0.1.89"
+memchr = "2.7.6"
+simdutf8 = "0.1.5"
+
