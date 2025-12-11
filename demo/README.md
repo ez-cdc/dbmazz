@@ -1,219 +1,212 @@
-# 🚀 dbmazz - Demo Comercial
+# Demo de dbmazz
 
-**Change Data Capture (CDC) de alto rendimiento** de PostgreSQL a StarRocks.
-
-> **Prueba dbmazz en menos de 2 minutos** con este demo totalmente automatizado.
+**CDC en vivo**: PostgreSQL → StarRocks en 2 minutos.
 
 ---
 
-## ⚡ Quick Start (1 Comando)
+## 🚀 Iniciar Demo
 
 ```bash
-cd demo
 ./demo-start.sh
 ```
 
-El script automáticamente:
-- ✅ Levanta PostgreSQL y StarRocks en Docker
-- ✅ Crea esquema de e-commerce realista
-- ✅ Inserta 1,000 órdenes de ejemplo
-- ✅ Inicia dbmazz CDC
-- ✅ Genera tráfico en vivo
-- ✅ Muestra dashboard con métricas en tiempo real
-
-**Presiona Ctrl+C** para detener el demo cuando hayas terminado.
+**Presiona `Ctrl+C` para detener**
 
 ---
 
 ## 📊 ¿Qué Verás?
 
-Un dashboard en tiempo real mostrando:
+El demo incluye:
+
+1. **PostgreSQL**: Base transaccional con tablas de e-commerce
+2. **StarRocks**: Base analítica recibiendo datos en tiempo real
+3. **dbmazz CDC**: Motor de replicación
+4. **Traffic Generator**: Simula 72 ops/seg (287 eventos/seg)
+5. **TOAST Generator**: Prueba columnas grandes (JSONs de 100KB)
+6. **Monitor Dashboard**: Métricas en vivo
+
+### Dashboard en Vivo
 
 ```
-╔══════════════════════════════════════════════════════════╗
-║          dbmazz - CDC Demo en Vivo                       ║
-╠══════════════════════════════════════════════════════════╣
-║ PostgreSQL → StarRocks                                   ║
-║                                                          ║
-║ 📊 Eventos Procesados:    45,234 eventos               ║
-║ ⚡ Throughput:            12,500 eventos/seg            ║
-║ ⏱️  Latencia Promedio:     3.2 ms                       ║
-║                                                          ║
-║ ✅ Sincronización: 100% (Sin pérdidas)                 ║
-╚══════════════════════════════════════════════════════════╝
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃ Tabla           ┃ PostgreSQL┃ StarRocks ┃ Estado     ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ orders          │     20309 │     20309 │ ✅ (100%) │
+│ order_items     │     61488 │     61488 │ ✅ (100%) │
+│ toast_test      │        10 │        10 │ ✅ (100%) │
+└─────────────────┴───────────┴───────────┴────────────┘
+
+Lag: 0s | LSN: 0x9B972820 | Sync: hace 2s
 ```
 
 ---
 
-## 💡 ¿Por qué dbmazz?
+## 🔧 Comandos Útiles
 
-### Rendimiento Superior
-- **10x más rápido** que Debezium y alternativas JVM
-- **>100,000 eventos/segundo** en hardware commodity
-- **< 10ms de latencia** (p99) desde PostgreSQL WAL hasta el destino
-- **< 100MB de memoria** para 100k eventos en buffer
+### Ver Logs del CDC
 
-### Simplicidad
-- **Setup en minutos**, no días
-- **Cero dependencias externas** (solo Rust nativo)
-- **Sin JVM**, sin heap tuning, sin garbage collection pauses
-
-### Confiabilidad
-- **Zero data loss** garantizado mediante checkpointing
-- **At-least-once** delivery (exactly-once donde el destino lo soporte)
-- **Auto-recovery** ante fallos
-- **Graceful shutdown** con flush garantizado
-
-### Extensibilidad
-- **Multi-destino**: StarRocks, Kafka, S3, Webhooks (más por venir)
-- **API extensible** para agregar tus propios sinks
-- **Strategy Pattern** para máxima flexibilidad
-
----
-
-## 📦 Casos de Uso
-
-### 1. **Real-Time Analytics**
-Replica cambios de tu base OLTP (PostgreSQL) a tu warehouse OLAP (StarRocks) para dashboards en tiempo real sin impactar producción.
-
-### 2. **Data Lake Sync**
-Mantén tu data lake (S3, GCS) sincronizado automáticamente con cada cambio en PostgreSQL.
-
-### 3. **Event Streaming**
-Publica eventos de base de datos a Kafka para arquitecturas event-driven.
-
-### 4. **Multi-Cloud Sync**
-Replica datos entre clouds (AWS → GCP, Azure → AWS) para disaster recovery o compliance.
-
----
-
-## 🛠️ Comandos Útiles
-
-### Verificar Sincronización
-```bash
-./demo-verify.sh
-```
-
-### Ver Logs de dbmazz
 ```bash
 docker logs -f dbmazz-demo-cdc
 ```
 
 ### Conectarse a PostgreSQL
+
 ```bash
 docker exec -it dbmazz-demo-postgres psql -U postgres -d demo_db
+
+# Consultas útiles
+SELECT COUNT(*) FROM orders;
+SELECT * FROM orders LIMIT 5;
 ```
 
 ### Conectarse a StarRocks
+
 ```bash
-docker exec -it dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -D demo_db
+docker exec -it dbmazz-demo-starrocks mysql -h127.0.0.1 -P9030 -uroot -Ddemo_db
+
+# Ver datos replicados
+SELECT COUNT(*) FROM orders WHERE dbmazz_is_deleted = FALSE;
+SELECT * FROM orders LIMIT 5;
 ```
 
-### Detener Todo
+### Verificar Sincronización
+
 ```bash
-./demo-stop.sh
+# PostgreSQL
+docker exec dbmazz-demo-postgres psql -U postgres -d demo_db \
+  -c "SELECT COUNT(*) FROM orders"
+
+# StarRocks
+docker exec dbmazz-demo-starrocks mysql -h127.0.0.1 -P9030 -uroot \
+  -e "SELECT COUNT(*) FROM demo_db.orders WHERE dbmazz_is_deleted = FALSE"
+```
+
+Ambos deben retornar el mismo número.
+
+### API gRPC
+
+> **Nota**: Instalar `grpcurl` primero: `go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest`
+
+```bash
+# Health Check (sin necesidad de archivos .proto, reflection habilitado)
+grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
+
+# Listar todos los servicios disponibles
+grpcurl -plaintext localhost:50051 list
+
+# Estado actual
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
+
+# Pausar CDC
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
+
+# Resumir CDC
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Resume
+
+# Ver métricas en tiempo real (cada 5 segundos)
+grpcurl -plaintext -d '{"interval_ms": 5000}' localhost:50051 \
+  dbmazz.CdcMetricsService/StreamMetrics
 ```
 
 ---
 
-## 🏗️ Arquitectura del Demo
+## ⚙️ Configuración
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Docker Network                        │
-│                                                          │
-│  ┌──────────────┐    ┌───────────┐    ┌─────────────┐ │
-│  │  PostgreSQL  │───▶│  dbmazz   │───▶│  StarRocks  │ │
-│  │  (Source)    │WAL │  (Rust)   │HTTP│  (Target)   │ │
-│  │  Port 5432   │    │           │    │  Port 8030  │ │
-│  └──────────────┘    └───────────┘    └─────────────┘ │
-│         │                                      │        │
-│         ▼                                      ▼        │
-│  ┌──────────────┐                      ┌─────────────┐ │
-│  │   Traffic    │                      │   Monitor   │ │
-│  │  Generator   │                      │  Dashboard  │ │
-│  └──────────────┘                      └─────────────┘ │
-└─────────────────────────────────────────────────────────┘
+### Ajustar Throughput
+
+Editar `docker-compose.demo.yml`:
+
+```yaml
+traffic-generator:
+  environment:
+    TARGET_EVENTS_PER_SECOND: "72"  # Cambiar este valor
 ```
 
----
+### Ajustar Batching
 
-## 📈 Benchmarks
+Editar `docker-compose.demo.yml`:
 
-Probado en hardware commodity:
-- **CPU**: AMD Ryzen 5 / Intel i5 (1 core)
-- **RAM**: 8GB
-- **Network**: Localhost
-
-Resultados:
-- ✅ **120,000 eventos/segundo** sustained
-- ✅ **2.8ms latencia promedio** (p99 < 10ms)
-- ✅ **75MB de memoria** con 100k eventos en buffer
-- ✅ **Zero data loss** en 48h de prueba continua
+```yaml
+dbmazz:
+  environment:
+    FLUSH_SIZE: "1500"           # Eventos por batch
+    FLUSH_INTERVAL_MS: "5000"    # Milisegundos entre flushes
+```
 
 ---
 
-## 🔒 Seguridad y Compliance
+## 🐛 Troubleshooting
 
-- ✅ **Encriptación** en tránsito (TLS soportado)
-- ✅ **Credenciales seguras** vía variables de entorno
-- ✅ **Audit logs** estructurados para compliance
-- ✅ **No almacena datos** sensibles en disco (solo checkpoints)
+### El demo no arranca
 
----
+```bash
+# Verificar Docker
+docker --version
 
-## 💰 Pricing (Indicativo)
+# Limpiar contenedores anteriores
+docker-compose down -v
+./demo-start.sh
+```
 
-| Plan | Eventos/mes | Precio/mes | Soporte |
-|------|-------------|------------|---------|
-| **Starter** | 10M | $49 | Email |
-| **Professional** | 100M | $199 | Email + Chat |
-| **Enterprise** | Ilimitado | Custom | 24/7 + SLA |
+### StarRocks no responde
 
-**Self-hosted también disponible** (licencia anual).
+```bash
+# StarRocks tarda ~30s en arrancar
+# Esperar hasta ver: "✅ StarRocks BE is ready"
+```
 
----
+### No hay datos en StarRocks
 
-## 🆚 Comparación con Alternativas
+```bash
+# Verificar que dbmazz está corriendo
+docker logs dbmazz-demo-cdc | grep "Connected"
 
-| Feature | dbmazz | Debezium | Airbyte | StreamSets |
-|---------|--------|----------|---------|------------|
-| **Lenguaje** | Rust | Java | Python/Java | Java |
-| **Latencia (p99)** | < 10ms | ~50ms | ~100ms | ~80ms |
-| **Memoria** | < 100MB | ~2GB | ~1.5GB | ~2GB |
-| **Setup Time** | 2 min | 30 min | 15 min | 45 min |
-| **Throughput** | 100k/s | 20k/s | 10k/s | 25k/s |
+# Debe mostrar: "Connected! Streaming CDC events..."
+```
 
----
+### Monitor muestra 0 registros
 
-## 📞 Contacto y Soporte
-
-- **Email**: sales@dbmazz.io
-- **Website**: https://dbmazz.io
-- **Docs**: https://docs.dbmazz.io
-- **GitHub**: https://github.com/dbmazz/dbmazz
+```bash
+# Esperar ~10 segundos para que los datos se repliquen
+# Verificar logs: docker logs dbmazz-demo-cdc | grep "Sent"
+```
 
 ---
 
-## 📝 Notas del Demo
+## 📁 Estructura del Demo
 
-Este demo usa:
-- **PostgreSQL 14** con replicación lógica
-- **StarRocks** (allin1-ubuntu) como target OLAP
-- **Datos sintéticos** de e-commerce (orders + order_items)
-- **Tráfico simulado** (10 ops/seg) para demostración
-
-Para **producción**, dbmazz soporta:
-- Múltiples tablas simultáneas
-- Filtrado de columnas y transformaciones
-- Múltiples destinos en paralelo
-- Métricas Prometheus
-- Health checks y alerting
+```
+demo/
+├── demo-start.sh              # Iniciar todo
+├── demo-stop.sh               # Detener todo
+├── docker-compose.demo.yml    # Servicios Docker
+├── postgres/
+│   ├── init.sql               # Schema PostgreSQL
+│   └── seed-data.sql          # Datos iniciales
+├── starrocks/
+│   └── init.sql               # Schema StarRocks
+├── monitor/
+│   ├── dashboard.py           # Dashboard TUI
+│   └── requirements.txt
+├── traffic-generator/
+│   ├── generate.py            # Generador de tráfico
+│   └── requirements.txt
+└── toast-generator/
+    ├── generate.py            # Generador de TOAST
+    └── requirements.txt
+```
 
 ---
 
-**¿Listo para revolucionar tu pipeline de datos?** 🚀
+## 🎯 Próximos Pasos
 
-Programa una demo personalizada: **sales@dbmazz.io**
+Después de probar el demo:
 
+1. **Evaluar Performance**: ¿Cumple con tus requisitos de throughput?
+2. **Probar tus Datos**: Configura con tu schema real
+3. **Escalar**: Prueba con volúmenes de producción
+4. **Contactar**: Agenda demo personalizada → sales@dbmazz.io
 
+---
+
+**¿Preguntas?** Revisa el [README principal](../README.md) o contacta al equipo de soporte.
