@@ -25,4 +25,10 @@ hashbrown = "0.16.1"
 async-trait = "0.1.89"
 memchr = "2.7.6"
 simdutf8 = "0.1.5"
+tonic = "0.12"
+prost = "0.13"
+tonic-reflection = "0.12"
+
+[build-dependencies]
+tonic-build = "0.12"
 

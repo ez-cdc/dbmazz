@@ -1,9 +1,11 @@
 pub mod schema_cache;
 
 use crate::source::parser::{CdcMessage, CdcEvent};
+use crate::grpc::state::SharedState;
 use tokio::sync::mpsc;
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::sink::Sink;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Pipeline {
@@ -13,6 +15,7 @@ pub struct Pipeline {
     batch_size: usize,
     batch_timeout: Duration,
     feedback_tx: Option<mpsc::Sender<u64>>,
+    shared_state: Option<Arc<SharedState>>,
 }
 
 impl Pipeline {
@@ -29,12 +32,19 @@ impl Pipeline {
             batch_size,
             batch_timeout,
             feedback_tx: None,
+            shared_state: None,
         }
     }
 
     /// Configura el canal de feedback para enviar LSNs confirmados al main loop
     pub fn with_feedback_channel(mut self, feedback_tx: mpsc::Sender<u64>) -> Self {
         self.feedback_tx = Some(feedback_tx);
+        self
+    }
+
+    /// Configura el estado compartido para métricas
+    pub fn with_shared_state(mut self, shared_state: Arc<SharedState>) -> Self {
+        self.shared_state = Some(shared_state);
         self
     }
 
@@ -68,6 +78,11 @@ impl Pipeline {
     async fn flush_batch(&mut self, batch: &[CdcMessage], lsn: u64) {
         match self.sink.push_batch(batch, &self.schema_cache, lsn).await {
             Ok(_) => {
+                // Actualizar métrica de batches enviados
+                if let Some(ref state) = self.shared_state {
+                    state.increment_batches();
+                }
+
                 // Enviar LSN al canal de feedback para confirmar checkpoint
                 if let Some(ref tx) = self.feedback_tx {
                     if let Err(e) = tx.send(lsn).await {

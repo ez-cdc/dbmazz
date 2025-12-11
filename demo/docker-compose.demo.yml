@@ -56,6 +56,8 @@ services:
     container_name: dbmazz-demo-cdc
     volumes:
       - ../target/release/dbmazz:/usr/local/bin/dbmazz:ro
+    ports:
+      - "50051:50051"  # gRPC API
     environment:
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db?replication=database"
       SLOT_NAME: "dbmazz_demo_slot"
@@ -65,7 +67,8 @@ services:
       STARROCKS_USER: "root"
       STARROCKS_PASS: ""
       FLUSH_INTERVAL_MS: "5000"
-      FLUSH_SIZE: "25000"
+      FLUSH_SIZE: "1500"
+      GRPC_PORT: "50051"
       RUST_LOG: "info"
     depends_on:
       postgres:
