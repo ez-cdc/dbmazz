@@ -60,7 +60,56 @@ pub struct Column {
 }
 
 #[derive(Debug, Clone)]
-pub struct Tuple(pub Vec<TupleData>);
+pub struct Tuple {
+    pub cols: Vec<TupleData>,
+    pub toast_bitmap: u64,  // Bitmap SIMD-friendly (hasta 64 columnas)
+}
+
+impl Tuple {
+    /// O(1) - single CPU instruction (test bitmap != 0)
+    #[inline]
+    pub fn has_toast(&self) -> bool {
+        self.toast_bitmap != 0
+    }
+    
+    /// POPCNT instruction - cuenta bits en 1 ciclo
+    #[inline]
+    pub fn toast_count(&self) -> u32 {
+        self.toast_bitmap.count_ones()
+    }
+    
+    /// Verifica si columna especifica es TOAST - O(1)
+    #[inline]
+    pub fn is_toast_column(&self, idx: usize) -> bool {
+        if idx >= 64 { return false; }
+        self.toast_bitmap & (1u64 << idx) != 0
+    }
+    
+    /// Itera solo columnas TOAST usando trailing_zeros (CTZ) - O(k) donde k = columnas TOAST
+    pub fn toast_indices(&self) -> ToastIterator {
+        ToastIterator { bitmap: self.toast_bitmap }
+    }
+}
+
+/// Iterator que usa CTZ (Count Trailing Zeros) para encontrar bits eficientemente
+pub struct ToastIterator {
+    bitmap: u64,
+}
+
+impl Iterator for ToastIterator {
+    type Item = usize;
+    
+    fn next(&mut self) -> Option<usize> {
+        if self.bitmap == 0 {
+            return None;
+        }
+        // CTZ: encuentra el bit mas bajo en O(1) con instruccion SIMD
+        let idx = self.bitmap.trailing_zeros() as usize;
+        // Clear lowest bit: x & (x-1) elimina el bit mas bajo
+        self.bitmap &= self.bitmap - 1;
+        Some(idx)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum TupleData {
@@ -179,11 +228,19 @@ impl PgOutputParser {
     fn read_tuple(data: &mut Bytes) -> Result<Tuple> {
         let num_cols = data.get_u16();
         let mut cols = Vec::with_capacity(num_cols as usize);
-        for _ in 0..num_cols {
+        let mut toast_bitmap: u64 = 0;
+        
+        for idx in 0..num_cols {
             let tag = data.get_u8();
             match tag {
                 b'n' => cols.push(TupleData::Null),
-                b'u' => cols.push(TupleData::Toast),
+                b'u' => {
+                    cols.push(TupleData::Toast);
+                    // Marcar bit en bitmap si idx < 64 (limite de u64)
+                    if idx < 64 {
+                        toast_bitmap |= 1u64 << idx;
+                    }
+                },
                 b't' => {
                     let len = data.get_u32() as usize;
                     let val = data.split_to(len); // Zero-copy slice
@@ -192,7 +249,8 @@ impl PgOutputParser {
                 _ => return Err(anyhow!("Unknown column tag {}", tag)),
             }
         }
-        Ok(Tuple(cols))
+        
+        Ok(Tuple { cols, toast_bitmap })
     }
 }
 

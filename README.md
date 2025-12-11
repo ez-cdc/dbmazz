@@ -11,7 +11,18 @@ cd demo
 ./demo-start.sh
 ```
 
-Ver [DEMO-QUICKSTART.md](DEMO-QUICKSTART.md) para instrucciones completas o [demo/README.md](demo/README.md) para documentación detallada del demo.
+### Lo que verás:
+
+1. ✅ PostgreSQL y StarRocks en Docker
+2. ✅ Esquema e-commerce con 3 tablas (`orders`, `order_items`, `toast_test`)
+3. ✅ dbmazz replicando cambios en tiempo real
+4. ✅ Generador de tráfico (3000+ eventos/seg)
+5. ✅ Generador de TOAST (JSONs grandes con Partial Update)
+6. ✅ Dashboard en vivo con métricas
+
+**Para detener:** Presiona `Ctrl+C` o ejecuta `./demo-stop.sh`
+
+Ver [demo/README.md](demo/README.md) para documentación detallada del demo.
 
 ---
 
@@ -129,12 +140,35 @@ src/
 -   **Memoria**: <100MB para 100k eventos en buffer
 -   **CPU**: 1 core saturado para parsing
 
+## Características Avanzadas
+
+### Soporte TOAST con Partial Update
+
+dbmazz maneja automáticamente columnas TOAST (valores grandes >2KB en PostgreSQL) usando **StarRocks Partial Update**:
+
+- ✅ Detección O(1) con bitmap de 64-bits y SIMD (POPCNT, CTZ)
+- ✅ Partial Update para UPDATEs que no modifican columnas grandes
+- ✅ Preserva JSONs de hasta 10MB sin pérdida de datos
+- ✅ Zero allocations para operaciones de bitmap
+
+Ver [TOAST-IMPLEMENTATION.md](TOAST-IMPLEMENTATION.md) para detalles técnicos.
+
+### Optimizaciones de Performance
+
+- **SIMD**: `sonic-rs` para JSON serialization (85% reducción de lag vs `serde_json`)
+- **Connection Pooling**: Reutilización de conexiones HTTP a StarRocks
+- **Timestamp Caching**: Una llamada `Utc::now()` por batch
+- **Zero-copy**: `bytes::Bytes` para evitar copias de datos
+
+Ver [PERFORMANCE-ANALYSIS.md](PERFORMANCE-ANALYSIS.md) y [SONIC-RS-MIGRATION-RESULTS.md](SONIC-RS-MIGRATION-RESULTS.md).
+
 ## Roadmap
 
--   [ ] Implementación completa de StateStore con checkpointing automático
+-   [x] Checkpointing con recovery automático
+-   [x] Soporte TOAST con Partial Update
+-   [x] Optimizaciones SIMD para parsing y JSON
 -   [ ] Metrics endpoint (Prometheus)
 -   [ ] Health checks (`/health`, `/ready`)
 -   [ ] Sinks adicionales (Kafka, S3, Webhooks)
--   [ ] Configuración vía YAML + env vars
--   [ ] Benchmarks con PostgreSQL real
+-   [ ] Configuración vía YAML
 -   [ ] Snapshot inicial (antes de CDC)

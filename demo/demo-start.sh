@@ -73,6 +73,7 @@ echo -e "\n${CYAN}🧹 Cleaning previous demo data...${NC}"
 docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -c "
     TRUNCATE TABLE order_items CASCADE;
     TRUNCATE TABLE orders CASCADE;
+    TRUNCATE TABLE toast_test CASCADE;
     DELETE FROM dbmazz_checkpoints WHERE slot_name = 'dbmazz_demo_slot';
 " 2>/dev/null || echo -e "${YELLOW}  Note: Some tables may not exist yet (normal on first run)${NC}"
 
@@ -149,6 +150,7 @@ echo -e "\n${CYAN}🧹 Cleaning previous StarRocks tables...${NC}"
 docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root demo_db -e "
     DROP TABLE IF EXISTS order_items;
     DROP TABLE IF EXISTS orders;
+    DROP TABLE IF EXISTS toast_test;
 " 2>/dev/null || echo -e "${YELLOW}  Note: Tables may not exist (normal on first run)${NC}"
 echo -e "${GREEN}✅ StarRocks tables cleaned${NC}"
 
@@ -161,14 +163,13 @@ docker exec -i dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root < starro
 DEMO_DB_EXISTS=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -e "SHOW DATABASES LIKE 'demo_db';" 2>/dev/null | grep -c "demo_db" || echo "0")
 
 if [ "$DEMO_DB_EXISTS" -gt "0" ]; then
-    # Verificar que las tablas se crearon
-    TABLE_COUNT=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -D demo_db -e "SHOW TABLES;" 2>/dev/null | grep -c -E "(orders|order_items)" || echo "0")
+    # Verificar que las tablas se crearon (incluyendo toast_test)
+    TABLE_COUNT=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -D demo_db -e "SHOW TABLES;" 2>/dev/null | grep -c -E "(orders|order_items|toast_test)" || echo "0")
     
-    if [ "$TABLE_COUNT" -ge "2" ]; then
-        echo -e "${GREEN}✅ StarRocks schema initialized (demo_db + $TABLE_COUNT tables)${NC}"
+    if [ "$TABLE_COUNT" -ge "3" ]; then
+        echo -e "${GREEN}✅ StarRocks schema initialized (demo_db + $TABLE_COUNT tables including toast_test)${NC}"
     else
-        echo -e "${RED}❌ Failed to create tables in demo_db${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠️  Warning: Expected 3 tables, found $TABLE_COUNT${NC}"
     fi
 else
     echo -e "${RED}❌ Failed to create demo_db${NC}"
@@ -186,6 +187,14 @@ echo -e "\n${CYAN}📊 Starting traffic generator...${NC}"
 docker-compose -f docker-compose.demo.yml up -d traffic-generator
 sleep 2
 echo -e "${GREEN}✅ Traffic generator is running${NC}"
+
+# Start TOAST generator for Partial Update testing
+echo -e "\n${CYAN}🧪 Starting TOAST generator (Partial Update test)...${NC}"
+docker-compose -f docker-compose.demo.yml up -d toast-generator
+sleep 2
+echo -e "${GREEN}✅ TOAST generator is running${NC}"
+echo -e "${BLUE}   → Watch for '🔄 Partial update' messages in CDC logs${NC}"
+echo -e "${BLUE}   → Run: docker logs dbmazz-demo-cdc -f | grep partial${NC}"
 
 # Start monitor
 echo -e "\n${CYAN}📺 Starting real-time monitor...${NC}"

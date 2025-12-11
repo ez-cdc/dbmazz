@@ -26,13 +26,24 @@ CREATE INDEX idx_orders_customer ON orders(customer_id);
 CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_order_items_order ON order_items(order_id);
 
+-- TOAST Test Table (for testing large JSON replication)
+CREATE TABLE IF NOT EXISTS toast_test (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    large_json JSONB,  -- Esta columna será TOASTed cuando >2KB
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Configure REPLICA IDENTITY FULL for CDC with soft deletes
 -- This is required for StarRocks/ClickHouse to capture all column values in DELETEs
 ALTER TABLE orders REPLICA IDENTITY FULL;
 ALTER TABLE order_items REPLICA IDENTITY FULL;
+ALTER TABLE toast_test REPLICA IDENTITY FULL;
 
--- Create publication for CDC (only orders and order_items, not checkpoints)
-CREATE PUBLICATION dbmazz_pub FOR TABLE orders, order_items;
+-- Create publication for CDC
+CREATE PUBLICATION dbmazz_pub FOR TABLE orders, order_items, toast_test;
 
 -- Grant necessary permissions
 GRANT ALL ON ALL TABLES IN SCHEMA public TO postgres;

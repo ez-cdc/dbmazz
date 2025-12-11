@@ -65,6 +65,7 @@ services:
       STARROCKS_USER: "root"
       STARROCKS_PASS: ""
       FLUSH_INTERVAL_MS: "5000"
+      FLUSH_SIZE: "25000"
       RUST_LOG: "info"
     depends_on:
       postgres:
@@ -83,7 +84,7 @@ services:
     container_name: dbmazz-demo-traffic
     environment:
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
-      TARGET_EVENTS_PER_SECOND: "4500"  # Configurable: target events/sec (ajustado para overhead)
+      TARGET_EVENTS_PER_SECOND: "500"  # Configurable: target events/sec (ajustado para overhead)
       INSERT_RATIO: "0.70"               # 70% inserts
       UPDATE_RATIO: "0.25"               # 25% updates
       DELETE_RATIO: "0.05"               # 5% deletes
@@ -91,6 +92,30 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - dbmazz-demo
+    restart: unless-stopped
+
+  # TOAST Generator - Para probar Partial Update con JSONs grandes
+  toast-generator:
+    build:
+      context: ./toast-generator
+    container_name: dbmazz-demo-toast
+    environment:
+      PG_HOST: "postgres"
+      PG_PORT: "5432"
+      PG_USER: "postgres"
+      PG_PASSWORD: "postgres"
+      PG_DATABASE: "demo_db"
+      JSON_SIZE_KB: "100"        # Tamaño del JSON en KB (100KB es suficiente para TOAST)
+      NUM_RECORDS: "10"          # Número de registros iniciales
+      UPDATE_INTERVAL: "10"      # Segundos entre UPDATEs
+      PYTHONUNBUFFERED: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dbmazz:
+        condition: service_started
     networks:
       - dbmazz-demo
     restart: unless-stopped

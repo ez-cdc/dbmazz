@@ -64,63 +64,115 @@ def connect_sr():
     console.print(f"[yellow]Continuing without StarRocks connection...[/yellow]")
     return None
 
-def get_pg_counts(conn):
-    """Get counts from PostgreSQL"""
-    cursor = conn.cursor()
+def discover_tables(pg_conn, sr_conn):
+    """Descubre tablas replicadas (existen en ambas DBs)"""
+    # Tablas en PostgreSQL (excluyendo sistema)
+    pg_tables = set()
+    cursor = pg_conn.cursor()
     try:
-        cursor.execute("SELECT COUNT(*) FROM orders")
-        orders = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM order_items")
-        items = cursor.fetchone()[0]
-        return orders, items
-    finally:
-        cursor.close()
-
-def get_sr_counts(conn):
-    """Get counts from StarRocks"""
-    if conn is None:
-        return 0, 0, 0, None, None, None
-        
-    cursor = conn.cursor()
-    try:
-        # Contar registros activos (no eliminados)
-        cursor.execute("SELECT COUNT(*) FROM orders WHERE dbmazz_is_deleted = FALSE")
-        orders = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM order_items WHERE dbmazz_is_deleted = FALSE")
-        items = cursor.fetchone()[0]
-        
-        # Contar registros eliminados (soft delete)
-        cursor.execute("SELECT COUNT(*) FROM orders WHERE dbmazz_is_deleted = TRUE")
-        deleted = cursor.fetchone()[0]
-        
-        # Obtener última sincronización, LSN y latencia de replicación real
-        # Obtener el último registro sincronizado y calcular su latencia
         cursor.execute("""
-            SELECT 
-                dbmazz_synced_at as last_sync,
-                dbmazz_cdc_version as latest_lsn,
-                TIMESTAMPDIFF(SECOND, 
-                    GREATEST(IFNULL(created_at, '1970-01-01'), IFNULL(updated_at, '1970-01-01')), 
-                    dbmazz_synced_at
-                ) as replication_latency
-            FROM orders
-            WHERE dbmazz_synced_at IS NOT NULL
-            ORDER BY dbmazz_synced_at DESC
-            LIMIT 1
+            SELECT tablename FROM pg_tables 
+            WHERE schemaname = 'public' 
+            AND tablename NOT LIKE 'pg_%'
+            AND tablename != 'dbmazz_checkpoints'
         """)
-        result = cursor.fetchone()
-        last_sync = result[0] if result and result[0] else None
-        latest_lsn = result[1] if result and result[1] else None
-        lag_seconds = result[2] if result and result[2] is not None else None
-        
-        return orders, items, deleted, last_sync, latest_lsn, lag_seconds
-    except Exception as e:
-        return 0, 0, 0, None, None, None
+        pg_tables = {row[0] for row in cursor.fetchall()}
     finally:
         cursor.close()
+    
+    # Tablas en StarRocks
+    sr_tables = set()
+    if sr_conn:
+        cursor = sr_conn.cursor()
+        try:
+            cursor.execute("SHOW TABLES")
+            sr_tables = {row[0] for row in cursor.fetchall()}
+        finally:
+            cursor.close()
+    
+    # Interseccion: tablas que existen en ambos
+    return sorted(pg_tables & sr_tables)
 
-def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, last_sync, latest_lsn, lag_seconds, cycle):
-    """Create dashboard layout"""
+def get_table_counts(pg_conn, sr_conn, tables):
+    """Obtiene counts de todas las tablas"""
+    results = {}
+    
+    for table in tables:
+        pg_count = 0
+        sr_count = 0
+        sr_deleted = 0
+        
+        # PostgreSQL
+        cursor = pg_conn.cursor()
+        try:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            pg_count = cursor.fetchone()[0]
+        finally:
+            cursor.close()
+        
+        # StarRocks (con audit columns)
+        if sr_conn:
+            cursor = sr_conn.cursor()
+            try:
+                cursor.execute(f"""
+                    SELECT 
+                        COUNT(*) as total,
+                        SUM(CASE WHEN dbmazz_is_deleted = TRUE THEN 1 ELSE 0 END) as deleted
+                    FROM {table}
+                """)
+                row = cursor.fetchone()
+                sr_count = row[0] - (row[1] or 0)  # Active = total - deleted
+                sr_deleted = row[1] or 0
+            except:
+                # Tabla puede no tener columnas audit
+                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                sr_count = cursor.fetchone()[0]
+            finally:
+                cursor.close()
+        
+        results[table] = {
+            'pg': pg_count,
+            'sr': sr_count,
+            'deleted': sr_deleted
+        }
+    
+    return results
+
+def get_audit_info(sr_conn, tables):
+    """Obtiene informacion de auditoria CDC"""
+    if not sr_conn or not tables:
+        return None, None, None
+    
+    # Intentar obtener de la primera tabla con audit columns
+    for table in tables:
+        cursor = sr_conn.cursor()
+        try:
+            cursor.execute(f"""
+                SELECT 
+                    dbmazz_synced_at as last_sync,
+                    dbmazz_cdc_version as latest_lsn,
+                    TIMESTAMPDIFF(SECOND, 
+                        GREATEST(IFNULL(created_at, '1970-01-01'), IFNULL(updated_at, '1970-01-01')), 
+                        dbmazz_synced_at
+                    ) as replication_latency
+                FROM {table}
+                WHERE dbmazz_synced_at IS NOT NULL
+                ORDER BY dbmazz_synced_at DESC
+                LIMIT 1
+            """)
+            result = cursor.fetchone()
+            if result:
+                return result[0], result[1], result[2]
+        except:
+            # Tabla no tiene audit columns, probar siguiente
+            pass
+        finally:
+            cursor.close()
+    
+    return None, None, None
+
+def create_dashboard(table_counts, last_sync, latest_lsn, lag_seconds, cycle):
+    """Create dashboard layout dinamicamente para N tablas"""
     layout = Layout()
     
     # Header
@@ -131,48 +183,73 @@ def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, last_
     
     # Main table
     table = Table(show_header=True, header_style="bold cyan", expand=True)
-    table.add_column("Métrica", style="cyan", width=30)
-    table.add_column("PostgreSQL (Source)", justify="right", style="green")
-    table.add_column("StarRocks (Target)", justify="right", style="yellow")
+    table.add_column("Tabla", style="cyan", width=25)
+    table.add_column("PostgreSQL", justify="right", style="green")
+    table.add_column("StarRocks", justify="right", style="yellow")
     table.add_column("Estado", justify="center")
     
-    # Calculate sync status and lag
-    orders_lag = pg_orders - sr_orders
-    items_lag = pg_items - sr_items
-    orders_synced = "✅" if pg_orders == sr_orders else f"⏳ ({sr_orders}/{pg_orders})"
-    items_synced = "✅" if pg_items == sr_items else f"⏳ ({sr_items}/{pg_items})"
+    # Iconos por tabla
+    table_icons = {
+        'orders': '📦',
+        'order_items': '📋',
+        'toast_test': '🧪',
+    }
     
-    # Color code for lag
-    orders_lag_color = "green" if orders_lag < 100 else "yellow" if orders_lag < 1000 else "red"
-    items_lag_color = "green" if items_lag < 300 else "yellow" if items_lag < 3000 else "red"
+    # Agregar filas dinamicamente
+    total_pg = 0
+    total_sr = 0
+    total_deleted = 0
     
-    table.add_row(
-        "📦 Orders (Active)",
-        f"{pg_orders:,}",
-        f"{sr_orders:,}",
-        orders_synced
-    )
-    table.add_row(
-        "📋 Order Items (Active)",
-        f"{pg_items:,}",
-        f"{sr_items:,}",
-        items_synced
-    )
-    table.add_row(
-        "🗑️  Soft Deleted Orders",
-        "-",
-        f"{sr_deleted:,}",
-        "ℹ️"
-    )
-    table.add_row(
-        "⏱️  Replication Lag",
-        "-",
-        f"[{orders_lag_color}]{orders_lag:,} orders[/{orders_lag_color}]",
-        f"[{items_lag_color}]{items_lag:,} items[/{items_lag_color}]"
-    )
+    for table_name, counts in sorted(table_counts.items()):
+        pg_count = counts['pg']
+        sr_count = counts['sr']
+        deleted = counts['deleted']
+        
+        total_pg += pg_count
+        total_sr += sr_count
+        total_deleted += deleted
+        
+        # Calcular estado
+        lag = pg_count - sr_count
+        if lag == 0:
+            status = "✅"
+        elif lag < 100:
+            status = f"⏳ ({sr_count}/{pg_count})"
+        else:
+            status = f"[yellow]⏳ ({sr_count}/{pg_count})[/yellow]"
+        
+        # Icono
+        icon = table_icons.get(table_name, '📊')
+        
+        table.add_row(
+            f"{icon} {table_name}",
+            f"{pg_count:,}",
+            f"{sr_count:,}",
+            status
+        )
+    
+    # Fila resumen
+    if len(table_counts) > 1:
+        total_lag = total_pg - total_sr
+        lag_color = "green" if total_lag < 500 else "yellow" if total_lag < 5000 else "red"
+        table.add_row(
+            "[bold]Total[/bold]",
+            f"[bold]{total_pg:,}[/bold]",
+            f"[bold]{total_sr:,}[/bold]",
+            f"[{lag_color}]Δ {total_lag:,}[/{lag_color}]"
+        )
+    
+    # Fila de soft deletes si hay
+    if total_deleted > 0:
+        table.add_row(
+            "🗑️  Soft Deleted",
+            "-",
+            f"{total_deleted:,}",
+            "ℹ️"
+        )
     
     # Stats panel with audit columns
-    sync_rate = ((sr_orders / pg_orders * 100) if pg_orders > 0 else 0)
+    sync_rate = ((total_sr / total_pg * 100) if total_pg > 0 else 0)
     
     # Format audit info
     last_sync_str = last_sync.strftime('%H:%M:%S') if last_sync else "N/A"
@@ -183,12 +260,16 @@ def create_dashboard(pg_orders, pg_items, sr_orders, sr_items, sr_deleted, last_
     replication_lag_color = "green" if lag_seconds is not None and lag_seconds < 5 else "yellow" if lag_seconds is not None and lag_seconds < 30 else "red"
     
     # Records lag (rezago de registros)
-    total_lag = orders_lag + items_lag
-    records_lag_str = f"{total_lag:,} registros"
-    records_lag_color = "green" if total_lag < 500 else "yellow" if total_lag < 5000 else "red"
+    total_lag_count = total_pg - total_sr
+    records_lag_str = f"{total_lag_count:,} registros"
+    records_lag_color = "green" if total_lag_count < 500 else "yellow" if total_lag_count < 5000 else "red"
+    
+    # Tablas monitoreadas
+    num_tables = len(table_counts)
     
     stats = f"""
 [bold]Estado de Sincronización:[/bold]
+• Tablas: {num_tables}
 • Tasa de Sync: {sync_rate:.1f}%
 • Rezago de Registros: [{records_lag_color}]{records_lag_str}[/{records_lag_color}]
 • Latencia de Replicación: [{replication_lag_color}]{replication_lag_str}[/{replication_lag_color}]
@@ -226,7 +307,16 @@ def main():
     sr_conn = connect_sr()
     
     console.print("[green]✅ Connected to all databases[/green]")
+    
+    # Descubrir tablas al inicio
+    console.print("[cyan]🔍 Discovering tables...[/cyan]")
+    tables = discover_tables(pg_conn, sr_conn)
+    console.print(f"[green]✅ Found {len(tables)} replicated tables: {', '.join(tables)}[/green]")
     console.print()
+    
+    if not tables:
+        console.print("[yellow]⚠️  No tables found to monitor[/yellow]")
+        return
     
     cycle = 0
     
@@ -234,13 +324,15 @@ def main():
         with Live(console=console, refresh_per_second=1) as live:
             while True:
                 try:
-                    pg_orders, pg_items = get_pg_counts(pg_conn)
-                    sr_orders, sr_items, sr_deleted, last_sync, latest_lsn, lag_seconds = get_sr_counts(sr_conn)
+                    # Obtener counts de todas las tablas
+                    table_counts = get_table_counts(pg_conn, sr_conn, tables)
+                    
+                    # Obtener info de auditoria
+                    last_sync, latest_lsn, lag_seconds = get_audit_info(sr_conn, tables)
                     
                     cycle += 1
                     dashboard = create_dashboard(
-                        pg_orders, pg_items,
-                        sr_orders, sr_items, sr_deleted,
+                        table_counts,
                         last_sync, latest_lsn, lag_seconds,
                         cycle
                     )
@@ -256,7 +348,8 @@ def main():
         console.print("\n[yellow]✋ Monitor stopped[/yellow]")
     finally:
         pg_conn.close()
-        sr_conn.close()
+        if sr_conn:
+            sr_conn.close()
 
 if __name__ == "__main__":
     main()
