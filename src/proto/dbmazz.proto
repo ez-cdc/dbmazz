@@ -1,0 +1,94 @@
+syntax = "proto3";
+package dbmazz;
+
+// Health Check (compatible con grpc-health-probe)
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  
+  enum Stage {
+    STAGE_UNKNOWN = 0;
+    STAGE_INIT = 1;
+    STAGE_SETUP = 2;
+    STAGE_CDC = 3;
+  }
+  
+  ServingStatus status = 1;
+  Stage stage = 2;              // Etapa actual del ciclo de vida
+  string stage_detail = 3;      // Detalle de la etapa actual
+}
+
+// Control del CDC
+service CdcControlService {
+  rpc Pause(PauseRequest) returns (ControlResponse);
+  rpc Resume(ResumeRequest) returns (ControlResponse);
+  rpc DrainAndStop(DrainRequest) returns (ControlResponse);
+  rpc Stop(StopRequest) returns (ControlResponse);
+  rpc ReloadConfig(ReloadConfigRequest) returns (ControlResponse);
+}
+
+message PauseRequest {}
+message ResumeRequest {}
+message DrainRequest {}
+message StopRequest {}
+message ReloadConfigRequest {
+  uint64 flush_size = 1;           // 0 = no change
+  uint64 flush_interval_ms = 2;    // 0 = no change
+  repeated string tables = 3;      // empty = no change
+}
+message ControlResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Status del CDC
+service CdcStatusService {
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+}
+
+message StatusRequest {}
+message StatusResponse {
+  enum CdcState {
+    RUNNING = 0;
+    PAUSED = 1;
+    DRAINING = 2;
+    STOPPED = 3;
+  }
+  CdcState state = 1;
+  uint64 current_lsn = 2;
+  uint64 confirmed_lsn = 3;
+  uint64 pending_events = 4;
+  string slot_name = 5;
+  repeated string tables = 6;
+}
+
+// Metricas en streaming
+service CdcMetricsService {
+  rpc StreamMetrics(MetricsRequest) returns (stream MetricsResponse);
+}
+
+message MetricsRequest {
+  uint32 interval_ms = 1; // Intervalo entre updates
+}
+
+message MetricsResponse {
+  uint64 timestamp = 1;
+  double events_per_second = 2;
+  uint64 lag_bytes = 3;        // current_lsn - confirmed_lsn
+  uint64 lag_events = 4;       // eventos pendientes
+  uint64 memory_bytes = 5;
+  uint64 total_events_processed = 6;
+  uint64 total_batches_sent = 7;
+}
+
