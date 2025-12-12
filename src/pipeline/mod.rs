@@ -54,6 +54,21 @@ impl Pipeline {
         let mut last_lsn: u64 = 0;
 
         loop {
+            // Check if paused before processing
+            if let Some(ref state) = self.shared_state {
+                let current_state = state.get_state();
+                if current_state == crate::grpc::state::CdcState::Paused {
+                    // Flush pending batch before pausing
+                    if !batch.is_empty() {
+                        self.flush_batch(&batch, last_lsn).await;
+                        batch.clear();
+                    }
+                    // Sleep while paused
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
+
             tokio::select! {
                 Some(event) = self.rx.recv() => {
                     last_lsn = event.lsn; // Actualizar LSN
