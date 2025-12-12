@@ -36,9 +36,10 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
             let wal_end = bytes.get_u64();
             let _timestamp = bytes.get_u64();
             
+            // Usar slice en lugar de clone para zero-copy
             Some(WalMessage::XLogData {
                 lsn: wal_end,
-                data: bytes.clone(),
+                data: bytes.slice(..),
             })
         }
         b'k' => {

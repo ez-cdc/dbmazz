@@ -40,30 +40,29 @@ cargo build --release
 ALTER SYSTEM SET wal_level = 'logical';
 -- Reiniciar PostgreSQL
 
--- Configurar tabla (IMPORTANTE para soft deletes)
-ALTER TABLE my_table REPLICA IDENTITY FULL;
-
--- Crear publicación
-CREATE PUBLICATION dbmazz_pub FOR TABLE my_table;
+-- ✅ TODO LO DEMÁS ES AUTOMÁTICO:
+-- - REPLICA IDENTITY FULL se configura automáticamente
+-- - Publication se crea automáticamente
+-- - Replication Slot se crea automáticamente
 ```
 
 ### 3. Configurar StarRocks
 
 ```sql
--- Crear tabla con columnas de auditoría
+-- Crear tabla (estructura básica solamente)
 CREATE TABLE my_table (
     id INT,
-    name VARCHAR(100),
+    name VARCHAR(100)
     -- ... tus columnas ...
-    
-    -- Columnas CDC (agregadas automáticamente por dbmazz)
-    dbmazz_op_type TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE',
-    dbmazz_is_deleted BOOLEAN COMMENT 'Soft delete',
-    dbmazz_synced_at DATETIME COMMENT 'Timestamp CDC',
-    dbmazz_cdc_version BIGINT COMMENT 'LSN PostgreSQL'
 )
 PRIMARY KEY (id)
 DISTRIBUTED BY HASH(id);
+
+-- ✅ COLUMNAS DE AUDITORÍA SE AGREGAN AUTOMÁTICAMENTE:
+-- - dbmazz_op_type (TINYINT): 0=INSERT, 1=UPDATE, 2=DELETE
+-- - dbmazz_is_deleted (BOOLEAN): Soft delete flag
+-- - dbmazz_synced_at (DATETIME): Timestamp CDC
+-- - dbmazz_cdc_version (BIGINT): LSN PostgreSQL
 ```
 
 ### 4. Variables de Entorno
@@ -109,19 +108,32 @@ dbmazz expone una API gRPC para control y monitoreo:
 grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 ```
 
-**Respuesta**:
+**Respuesta (exitosa)**:
 ```json
 {
   "status": "SERVING",
   "stage": "STAGE_CDC",
-  "stageDetail": "Replicating"
+  "stageDetail": "Replicating",
+  "errorDetail": ""
+}
+```
+
+**Respuesta (con error)**:
+```json
+{
+  "status": "NOT_SERVING",
+  "stage": "STAGE_SETUP",
+  "stageDetail": "Setup failed",
+  "errorDetail": "Table 'my_table' not found in PostgreSQL. Verify the table exists and is accessible."
 }
 ```
 
 **Stages**:
 - `STAGE_INIT`: Inicializando
-- `STAGE_SETUP`: Conectando y validando
+- `STAGE_SETUP`: Configurando PostgreSQL y StarRocks automáticamente
 - `STAGE_CDC`: Replicando activamente
+
+**Error Detail**: Mensajes descriptivos cuando `status: NOT_SERVING`
 
 ### Control Remoto
 
@@ -226,6 +238,45 @@ PostgreSQL WAL
 ---
 
 ## 🎯 Características Destacadas
+
+### ⚙️ Setup Automático (Configuración Cero)
+
+**dbmazz configura todo automáticamente**, sin necesidad de intervención manual:
+
+#### PostgreSQL
+- ✅ Crea **Publication** automáticamente
+- ✅ Crea **Replication Slot** automáticamente
+- ✅ Configura **REPLICA IDENTITY FULL** en todas las tablas
+- ✅ Valida que las tablas existen
+- ✅ **Recovery mode**: Detecta recursos existentes tras caídas
+
+#### StarRocks
+- ✅ Valida conectividad y existencia de tablas
+- ✅ Agrega **columnas de auditoría** automáticamente:
+  - `dbmazz_op_type` (TINYINT): Tipo de operación (0/1/2)
+  - `dbmazz_is_deleted` (BOOLEAN): Flag de soft delete
+  - `dbmazz_synced_at` (DATETIME): Timestamp de sincronización
+  - `dbmazz_cdc_version` (BIGINT): LSN de PostgreSQL
+
+**Antes vs Ahora**:
+```bash
+# ❌ Antes: Configuración manual (5+ comandos SQL)
+psql -c "ALTER TABLE orders REPLICA IDENTITY FULL;"
+psql -c "CREATE PUBLICATION dbmazz_pub FOR TABLE orders;"
+# ... más comandos ...
+
+# ✅ Ahora: Solo especifica las tablas
+export TABLES="orders,order_items"
+./dbmazz  # ¡Todo se configura automáticamente!
+```
+
+**Error Handling**: Si algo falla, el Health Check retorna mensajes descriptivos:
+```json
+{
+  "status": "NOT_SERVING",
+  "errorDetail": "Table 'orders' not found in StarRocks. Create the table before starting CDC."
+}
+```
 
 ### Soporte TOAST (Columnas Grandes)
 

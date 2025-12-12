@@ -47,12 +47,18 @@ impl HealthService for HealthServiceImpl {
         &self,
         _request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
-        let state = *self.shared_state.state.read().await;
+        let state = self.shared_state.get_state();
         let (stage, stage_detail) = self.shared_state.get_stage().await;
+        let error_detail = self.shared_state.get_setup_error().await.unwrap_or_default();
         
-        let status = match state {
-            CdcState::Running | CdcState::Paused | CdcState::Draining => ServingStatus::Serving,
-            CdcState::Stopped => ServingStatus::NotServing,
+        // Si hay un error de setup, retornar NOT_SERVING
+        let status = if !error_detail.is_empty() {
+            ServingStatus::NotServing
+        } else {
+            match state {
+                CdcState::Running | CdcState::Paused | CdcState::Draining => ServingStatus::Serving,
+                CdcState::Stopped => ServingStatus::NotServing,
+            }
         };
 
         let proto_stage = match stage {
@@ -65,6 +71,7 @@ impl HealthService for HealthServiceImpl {
             status: status as i32,
             stage: proto_stage,
             stage_detail,
+            error_detail,
         }))
     }
 }
@@ -93,26 +100,26 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<PauseRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        let mut state = self.shared_state.state.write().await;
-        match *state {
-            CdcState::Running => {
-                *state = CdcState::Paused;
-                Ok(Response::new(ControlResponse {
-                    success: true,
-                    message: "CDC paused successfully".to_string(),
-                }))
-            }
-            CdcState::Paused => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: "CDC is already paused".to_string(),
-                }))
-            }
-            _ => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: format!("Cannot pause CDC in state: {:?}", *state),
-                }))
+        if self.shared_state.compare_and_set_state(CdcState::Running, CdcState::Paused) {
+            Ok(Response::new(ControlResponse {
+                success: true,
+                message: "CDC paused successfully".to_string(),
+            }))
+        } else {
+            let current = self.shared_state.get_state();
+            match current {
+                CdcState::Paused => {
+                    Ok(Response::new(ControlResponse {
+                        success: false,
+                        message: "CDC is already paused".to_string(),
+                    }))
+                }
+                _ => {
+                    Ok(Response::new(ControlResponse {
+                        success: false,
+                        message: format!("Cannot pause CDC in state: {:?}", current),
+                    }))
+                }
             }
         }
     }
@@ -121,26 +128,26 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<ResumeRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        let mut state = self.shared_state.state.write().await;
-        match *state {
-            CdcState::Paused => {
-                *state = CdcState::Running;
-                Ok(Response::new(ControlResponse {
-                    success: true,
-                    message: "CDC resumed successfully".to_string(),
-                }))
-            }
-            CdcState::Running => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: "CDC is already running".to_string(),
-                }))
-            }
-            _ => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: format!("Cannot resume CDC in state: {:?}", *state),
-                }))
+        if self.shared_state.compare_and_set_state(CdcState::Paused, CdcState::Running) {
+            Ok(Response::new(ControlResponse {
+                success: true,
+                message: "CDC resumed successfully".to_string(),
+            }))
+        } else {
+            let current = self.shared_state.get_state();
+            match current {
+                CdcState::Running => {
+                    Ok(Response::new(ControlResponse {
+                        success: false,
+                        message: "CDC is already running".to_string(),
+                    }))
+                }
+                _ => {
+                    Ok(Response::new(ControlResponse {
+                        success: false,
+                        message: format!("Cannot resume CDC in state: {:?}", current),
+                    }))
+                }
             }
         }
     }
@@ -149,10 +156,10 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<DrainRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        let mut state = self.shared_state.state.write().await;
-        match *state {
+        let current = self.shared_state.get_state();
+        match current {
             CdcState::Running | CdcState::Paused => {
-                *state = CdcState::Draining;
+                self.shared_state.set_state(CdcState::Draining);
                 // Enviar señal de shutdown
                 let _ = self.shared_state.shutdown_tx.send(true);
                 Ok(Response::new(ControlResponse {
@@ -179,8 +186,8 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<StopRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        let mut state = self.shared_state.state.write().await;
-        match *state {
+        let current = self.shared_state.get_state();
+        match current {
             CdcState::Stopped => {
                 Ok(Response::new(ControlResponse {
                     success: false,
@@ -188,7 +195,7 @@ impl CdcControlService for CdcControlServiceImpl {
                 }))
             }
             _ => {
-                *state = CdcState::Stopped;
+                self.shared_state.set_state(CdcState::Stopped);
                 // Enviar señal de shutdown inmediato
                 let _ = self.shared_state.shutdown_tx.send(true);
                 Ok(Response::new(ControlResponse {
@@ -264,7 +271,7 @@ impl CdcStatusService for CdcStatusServiceImpl {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let state = *self.shared_state.state.read().await;
+        let state = self.shared_state.get_state();
         let config = self.shared_state.config.read().await;
 
         let proto_state = match state {

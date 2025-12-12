@@ -5,6 +5,19 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 ## [Unreleased]
 
 ### Added
+- **Setup Automático PostgreSQL**: Configuración cero, `dbmazz` configura todo automáticamente
+  - Verifica que las tablas existen
+  - Configura `REPLICA IDENTITY FULL` automáticamente
+  - Crea/verifica Publication y Replication Slot
+  - Modo recovery: detecta recursos existentes tras caídas
+- **Setup Automático StarRocks**: Columnas de auditoría agregadas automáticamente
+  - `dbmazz_op_type`, `dbmazz_is_deleted`, `dbmazz_synced_at`, `dbmazz_cdc_version`
+  - Valida conectividad y existencia de tablas
+  - Idempotente: detecta columnas existentes
+- **Error Handling Mejorado**: Mensajes descriptivos para el control plane
+  - Nuevo campo `error_detail` en Health Check
+  - `status: NOT_SERVING` cuando hay errores de setup
+  - gRPC server sigue corriendo para consultas incluso con errores
 - **gRPC Reflection**: Servidor gRPC con reflection habilitado para uso simple de `grpcurl` sin archivos `.proto`
 - **Schema Evolution básico**: Detección automática de nuevas columnas y `ALTER TABLE ADD COLUMN` en StarRocks
 
@@ -12,6 +25,9 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 - Migración de `reqwest` a `curl` crate (libcurl bindings) para StarRocks Stream Load
   - Manejo correcto del protocolo `Expect: 100-continue`
   - Soporte nativo para redirects FE → BE con autenticación
+- **BREAKING**: Ya no se requiere configurar PostgreSQL manualmente
+  - Publication, Slot y REPLICA IDENTITY ahora son automáticos
+  - Simplifica deployment: solo especifica las tablas
 
 ### Fixed
 - Clarificación comportamiento TOAST:

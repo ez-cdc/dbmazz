@@ -76,8 +76,9 @@ impl StarRocksSink {
         schema: &TableSchema,
         exclude_toast: bool
     ) -> Result<(Map, Vec<String>)> {
-        let mut row = Map::new();
-        let mut included_columns = Vec::new();
+        let column_count = schema.columns.len();
+        let mut row = Map::with_capacity(column_count);
+        let mut included_columns = Vec::with_capacity(column_count);
         
         // Iterar sobre columnas y datos en paralelo
         for (idx, (column, data)) in schema.columns.iter().zip(tuple.cols.iter()).enumerate() {
@@ -172,8 +173,12 @@ impl StarRocksSink {
             return Ok(());
         }
         
-        // Serializar rows a JSON
-        let json_values: Vec<Value> = rows.into_iter().map(|obj| Value::from(obj)).collect();
+        // Serializar rows a JSON con pre-allocación
+        let row_count = rows.len();
+        let mut json_values = Vec::with_capacity(row_count);
+        for obj in rows {
+            json_values.push(Value::from(obj));
+        }
         let body = sonic_rs::to_string(&json_values)?;
         
         // Convertir a Vec<u8> y Option<Vec<String>> para curl_loader
