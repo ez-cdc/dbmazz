@@ -248,7 +248,10 @@ impl<'a> PostgresSetup<'a> {
 /// Helper para crear cliente PostgreSQL normal (no replicación)
 pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupError> {
     // Remover parámetro de replicación para conexión normal
-    let clean_url = database_url.replace("?replication=database", "");
+    let clean_url = database_url
+        .replace("?replication=database", "")
+        .replace("&replication=database", "")
+        .replace("replication=database&", "");
     
     let (client, connection) = tokio_postgres::connect(&clean_url, NoTls)
         .await
@@ -266,4 +269,3 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
 
     Ok(client)
 }
-

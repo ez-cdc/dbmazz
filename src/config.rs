@@ -12,6 +12,7 @@ pub struct Config {
     
     // StarRocks
     pub starrocks_url: String,
+    pub starrocks_port: u16,
     pub starrocks_db: String,
     pub starrocks_user: String,
     pub starrocks_pass: String,
@@ -44,6 +45,10 @@ impl Config {
             // StarRocks
             starrocks_url: env::var("STARROCKS_URL")
                 .context("STARROCKS_URL must be set")?,
+            starrocks_port: env::var("STARROCKS_PORT")
+                .unwrap_or_else(|_| "9030".to_string())
+                .parse()
+                .unwrap_or(9030),
             starrocks_db: env::var("STARROCKS_DB")
                 .context("STARROCKS_DB must be set")?,
             starrocks_user: env::var("STARROCKS_USER")
