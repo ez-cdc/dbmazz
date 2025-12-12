@@ -6,6 +6,18 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 
 ### Added
 - **gRPC Reflection**: Servidor gRPC con reflection habilitado para uso simple de `grpcurl` sin archivos `.proto`
+- **Schema Evolution básico**: Detección automática de nuevas columnas y `ALTER TABLE ADD COLUMN` en StarRocks
+
+### Changed
+- Migración de `reqwest` a `curl` crate (libcurl bindings) para StarRocks Stream Load
+  - Manejo correcto del protocolo `Expect: 100-continue`
+  - Soporte nativo para redirects FE → BE con autenticación
+
+### Fixed
+- Clarificación comportamiento TOAST:
+  - INSERTs siempre reciben datos completos (incluso > 2KB)
+  - Solo UPDATEs que no modifican columna TOAST envían marcador 'u'
+  - Partial Update preserva valores existentes en StarRocks
 
 ---
 
@@ -127,7 +139,8 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 - `tokio-postgres` (Materialize fork): Replicación lógica
 - `tonic` + `prost`: Servidor gRPC
 - `sonic-rs`: JSON con SIMD
-- `reqwest`: Cliente HTTP con pooling
+- `curl`: Bindings a libcurl para Stream Load
+- `mysql_async`: Cliente MySQL para DDL en StarRocks
 - `hashbrown`: HashMap de alto rendimiento
 - `memchr` + `simdutf8`: Optimizaciones SIMD
 
@@ -173,6 +186,6 @@ dbmazz/
 - [ ] Multi-tenant: múltiples sources → múltiples destinos
 - [ ] UI web para monitoreo
 - [ ] Alerting integrado (Slack, PagerDuty)
-- [ ] Schema evolution automático
+- [x] Schema evolution automático (parcial: agregar columnas funciona, pendiente cambio de tipos y eliminación)
 - [ ] Compresión de payloads
 

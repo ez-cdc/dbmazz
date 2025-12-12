@@ -219,7 +219,7 @@ PostgreSQL WAL
 | **Parser** | `bytes` + SIMD | Zero-copy parsing del protocolo `pgoutput` |
 | **Schema Cache** | `hashbrown` | Lookup O(1) de definiciones de tablas |
 | **Pipeline** | `tokio::mpsc` | Batching y backpressure |
-| **Sink** | `reqwest` + pooling | HTTP Stream Load a StarRocks |
+| **Sink** | `curl` (libcurl) | HTTP Stream Load con 100-continue |
 | **State Store** | PostgreSQL | Persistencia de checkpoints |
 | **gRPC Server** | `tonic` | API de control y métricas |
 

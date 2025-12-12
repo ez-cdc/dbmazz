@@ -1,9 +1,10 @@
+pub mod curl_loader;
 pub mod starrocks;
 
 use async_trait::async_trait;
 use anyhow::Result;
 use crate::source::parser::CdcMessage;
-use crate::pipeline::schema_cache::SchemaCache;
+use crate::pipeline::schema_cache::{SchemaCache, SchemaDelta};
 
 #[async_trait]
 pub trait Sink: Send + Sync {
@@ -13,5 +14,7 @@ pub trait Sink: Send + Sync {
         schema_cache: &SchemaCache,
         lsn: u64
     ) -> Result<()>;
+    
+    async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()>;
 }
 
