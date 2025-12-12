@@ -57,7 +57,17 @@ impl Pipeline {
             tokio::select! {
                 Some(event) = self.rx.recv() => {
                     last_lsn = event.lsn; // Actualizar LSN
-                    self.schema_cache.update(&event.message);
+                    
+                    // Detectar cambios de schema
+                    if let Some(delta) = self.schema_cache.update(&event.message) {
+                        println!("🔧 Schema change detected for table {}: {} new columns", 
+                            delta.table_name, delta.added_columns.len());
+                        if let Err(e) = self.sink.apply_schema_delta(&delta).await {
+                            eprintln!("❌ Schema evolution failed: {}", e);
+                            // Continuar procesando - no detener el pipeline por errores de DDL
+                        }
+                    }
+                    
                     batch.push(event.message);
                     
                     if batch.len() >= self.batch_size {

@@ -1,21 +1,20 @@
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
-use reqwest::Client;
 use sonic_rs::{Value, Object as Map, json, JsonValueTrait};
 use std::collections::HashMap;
 use std::time::Duration;
 use chrono::Utc;
+use mysql_async::{Pool, Conn, OptsBuilder, prelude::Queryable};
 
 use crate::sink::Sink;
+use crate::sink::curl_loader::CurlStreamLoader;
 use crate::source::parser::{CdcMessage, TupleData, Tuple};
-use crate::pipeline::schema_cache::{SchemaCache, TableSchema};
+use crate::pipeline::schema_cache::{SchemaCache, TableSchema, SchemaDelta};
 
 pub struct StarRocksSink {
-    client: Client,
-    base_url: String,  // e.g., http://starrocks:8030
+    curl_loader: CurlStreamLoader,
     database: String,
-    user: String,
-    pass: String,
+    mysql_pool: Option<Pool>,  // Pool MySQL para DDL (puerto 9030)
 }
 
 impl StarRocksSink {
@@ -26,18 +25,37 @@ impl StarRocksSink {
         println!("  base_url: {}", base_url);
         println!("  database: {}", database);
         
+        // Extraer host del base_url para conexión MySQL
+        let mysql_host = base_url
+            .replace("http://", "")
+            .replace("https://", "")
+            .split(':')
+            .next()
+            .unwrap_or("starrocks")
+            .to_string();
+        
+        // Crear pool MySQL para DDL (puerto 9030)
+        // StarRocks no soporta todas las variables de MySQL, usar prefer_socket=false
+        let mysql_opts = OptsBuilder::default()
+            .ip_or_hostname(mysql_host)
+            .tcp_port(9030)
+            .user(Some(user.clone()))
+            .pass(Some(pass.clone()))
+            .db_name(Some(database.clone()))
+            .prefer_socket(false);  // Evita el error "Unknown system variable 'socket'"
+        
+        // Crear CurlStreamLoader para Stream Load (usa libcurl con 100-continue)
+        let curl_loader = CurlStreamLoader::new(
+            base_url.clone(),
+            database.clone(),
+            user.clone(),
+            pass.clone(),
+        );
+        
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(30))
-                .pool_max_idle_per_host(10)
-                .pool_idle_timeout(Duration::from_secs(90))
-                .tcp_keepalive(Duration::from_secs(60))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
-            base_url,
+            curl_loader,
             database,
-            user,
-            pass,
+            mysql_pool: Some(Pool::new(mysql_opts)),
         }
     }
     
@@ -154,74 +172,20 @@ impl StarRocksSink {
             return Ok(());
         }
         
-        let url = format!(
-            "{}/api/{}/{}/_stream_load",
-            self.base_url, self.database, table_name
-        );
-        
+        // Serializar rows a JSON
         let json_values: Vec<Value> = rows.into_iter().map(|obj| Value::from(obj)).collect();
         let body = sonic_rs::to_string(&json_values)?;
         
-        let mut request = self.client
-            .put(&url)
-            .basic_auth(&self.user, Some(&self.pass))
-            .header("Expect", "100-continue")  // Requerido por StarRocks
-            .header("format", "json")
-            .header("strip_outer_array", "true")
-            .header("ignore_json_size", "true")
-            .header("max_filter_ratio", "0.2");  // Tolera hasta 20% de errores
+        // Convertir a Vec<u8> y Option<Vec<String>> para curl_loader
+        let body_bytes = body.into_bytes();
+        let partial_cols = partial_columns.map(|cols| cols.to_vec());
         
-        // Si hay partial_columns, agregar headers de partial update
-        if let Some(cols) = partial_columns {
-            let columns_str = cols.join(",");
-            request = request
-                .header("partial_update", "true")
-                .header("partial_update_mode", "row")  // Modo optimizado para CDC
-                .header("columns", columns_str);
-            
-            println!("🔄 Partial update for {}: {} columns", table_name, cols.len());
-        }
-        
-        let response = request.body(body).send().await?;
-        
-        let status = response.status();
-        let resp_text = response.text().await?;
-        
-        if !status.is_success() {
-            return Err(anyhow!(
-                "StarRocks Stream Load failed ({}): {}", 
-                status, 
-                resp_text
-            ));
-        }
-        
-        // Parsear respuesta JSON de StarRocks
-        let resp_json: Value = sonic_rs::from_str(&resp_text)
-            .unwrap_or(json!({"Status": "Unknown"}));
-            
-        let sr_status = resp_json["Status"].as_str().unwrap_or("Unknown");
-        
-        if sr_status != "Success" && sr_status != "Publish Timeout" {
-            // "Publish Timeout" es OK - los datos se escribieron
-            return Err(anyhow!(
-                "StarRocks Stream Load error ({}): {}", 
-                sr_status, 
-                resp_text
-            ));
-        }
-        
-        let loaded_rows = resp_json["NumberLoadedRows"]
-            .as_u64()
-            .unwrap_or(json_values.len() as u64);
-        
-        let update_type = if partial_columns.is_some() { "partial" } else { "full" };
-        println!(
-            "✅ Sent {} rows ({}) to StarRocks ({}.{})", 
-            loaded_rows,
-            update_type,
-            self.database,
-            table_name
-        );
+        // Usar CurlStreamLoader (maneja 100-continue y redirects automáticamente)
+        let _result = self.curl_loader.send(
+            table_name,
+            body_bytes,
+            partial_cols,
+        ).await?;
         
         Ok(())
     }
@@ -264,6 +228,77 @@ impl StarRocksSink {
                 }
             }
         }
+    }
+    
+    /// Ejecuta DDL en StarRocks via MySQL protocol
+    async fn execute_ddl(&self, sql: &str) -> Result<()> {
+        let pool = self.mysql_pool.as_ref()
+            .ok_or_else(|| anyhow!("MySQL pool not initialized"))?;
+        
+        let mut conn: Conn = pool.get_conn().await
+            .map_err(|e| anyhow!("Failed to get MySQL connection: {}", e))?;
+        
+        conn.query_drop(sql).await
+            .map_err(|e| anyhow!("DDL execution failed: {}", e))?;
+        
+        Ok(())
+    }
+    
+    /// Convierte tipo PostgreSQL a tipo StarRocks
+    fn pg_type_to_starrocks(&self, pg_type: u32) -> &'static str {
+        match pg_type {
+            16 => "BOOLEAN",           // bool
+            21 => "SMALLINT",          // int2
+            23 => "INT",               // int4
+            20 => "BIGINT",            // int8
+            700 => "FLOAT",            // float4
+            701 => "DOUBLE",           // float8
+            1700 => "DECIMAL(38,9)",   // numeric
+            1114 => "DATETIME",        // timestamp
+            1184 => "DATETIME",        // timestamptz
+            25 => "STRING",            // text
+            1043 => "STRING",          // varchar
+            1042 => "STRING",          // char
+            3802 => "JSON",            // jsonb
+            _ => "STRING",             // default
+        }
+    }
+    
+    /// Aplica cambios de schema (agrega columnas nuevas)
+    pub async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()> {
+        for col in &delta.added_columns {
+            let sr_type = self.pg_type_to_starrocks(col.pg_type_id);
+            let sql = format!(
+                "ALTER TABLE {}.{} ADD COLUMN {} {}",
+                self.database, delta.table_name, col.name, sr_type
+            );
+            
+            // Intentar ejecutar DDL, ignorar error si columna ya existe
+            match self.execute_ddl(&sql).await {
+                Ok(_) => {
+                    println!(
+                        "✅ Schema evolution: added column {} ({}) to {}", 
+                        col.name, sr_type, delta.table_name
+                    );
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    // StarRocks retorna "Duplicate column name" si columna ya existe
+                    if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
+                        println!(
+                            "⚠️  Column {} already exists in {}, skipping",
+                            col.name, delta.table_name
+                        );
+                    } else {
+                        return Err(anyhow!(
+                            "Failed to add column {} to {}: {}",
+                            col.name, delta.table_name, err_msg
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     
     /// Envía partial update con reintentos en caso de fallo
@@ -434,5 +469,9 @@ impl Sink for StarRocksSink {
         }
         
         Ok(())
+    }
+    
+    async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()> {
+        self.apply_schema_delta(delta).await
     }
 }
