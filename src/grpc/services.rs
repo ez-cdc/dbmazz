@@ -49,10 +49,16 @@ impl HealthService for HealthServiceImpl {
     ) -> Result<Response<HealthCheckResponse>, Status> {
         let state = *self.shared_state.state.read().await;
         let (stage, stage_detail) = self.shared_state.get_stage().await;
+        let error_detail = self.shared_state.get_setup_error().await.unwrap_or_default();
         
-        let status = match state {
-            CdcState::Running | CdcState::Paused | CdcState::Draining => ServingStatus::Serving,
-            CdcState::Stopped => ServingStatus::NotServing,
+        // Si hay un error de setup, retornar NOT_SERVING
+        let status = if !error_detail.is_empty() {
+            ServingStatus::NotServing
+        } else {
+            match state {
+                CdcState::Running | CdcState::Paused | CdcState::Draining => ServingStatus::Serving,
+                CdcState::Stopped => ServingStatus::NotServing,
+            }
         };
 
         let proto_stage = match stage {
@@ -65,6 +71,7 @@ impl HealthService for HealthServiceImpl {
             status: status as i32,
             stage: proto_stage,
             stage_detail,
+            error_detail,
         }))
     }
 }

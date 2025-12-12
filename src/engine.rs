@@ -9,6 +9,7 @@ use crate::grpc::{self, CdcConfig, CdcState, Stage};
 use crate::grpc::state::SharedState;
 use crate::pipeline::Pipeline;
 use crate::replication::{parse_replication_message, handle_xlog_data, handle_keepalive, WalMessage};
+use crate::setup::SetupManager;
 use crate::sink::starrocks::StarRocksSink;
 use crate::source::postgres::{PostgresSource, build_standby_status_update};
 use crate::state_store::StateStore;
@@ -44,13 +45,26 @@ impl CdcEngine {
 
     /// Ejecutar el motor CDC
     pub async fn run(self) -> Result<()> {
-        // Stage: SETUP - Checkpoint
-        self.shared_state.set_stage(Stage::Setup, "Loading checkpoint").await;
-        let start_lsn = self.load_checkpoint().await?;
-
         // Stage: SETUP - gRPC Server
         self.shared_state.set_stage(Stage::Setup, "Starting gRPC server").await;
         self.start_grpc_server();
+
+        // Stage: SETUP - Ejecutar setup automático
+        self.shared_state.set_stage(Stage::Setup, "Running automatic setup").await;
+        if let Err(e) = self.run_setup().await {
+            // Guardar error en SharedState para Health Check
+            self.shared_state.set_setup_error(Some(e.to_string())).await;
+            self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
+            eprintln!("❌ Setup failed: {}", e);
+            // Mantener gRPC server corriendo para que el control plane pueda consultar el error
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+
+        // Stage: SETUP - Checkpoint
+        self.shared_state.set_stage(Stage::Setup, "Loading checkpoint").await;
+        let start_lsn = self.load_checkpoint().await?;
 
         // Stage: SETUP - Source Connection
         self.shared_state.set_stage(Stage::Setup, "Connecting to PostgreSQL").await;
@@ -80,6 +94,12 @@ impl CdcEngine {
             feedback_rx,
             start_lsn,
         ).await
+    }
+
+    /// Ejecutar setup automático (PostgreSQL + StarRocks)
+    async fn run_setup(&self) -> Result<(), crate::setup::SetupError> {
+        let setup_manager = SetupManager::new(self.config.clone());
+        setup_manager.run().await
     }
 
     /// Cargar checkpoint desde StateStore
@@ -118,12 +138,6 @@ impl CdcEngine {
             self.config.slot_name.clone(),
             self.config.publication_name.clone(),
         ).await?;
-        
-        // Validar REPLICA IDENTITY
-        if let Err(e) = source.validate_replica_identity(&self.config.tables).await {
-            eprintln!("⚠️  REPLICA IDENTITY validation failed: {}", e);
-            eprintln!("    Continuing anyway, but soft deletes may not work correctly.");
-        }
 
         Ok(source)
     }
@@ -174,7 +188,6 @@ impl CdcEngine {
             + Unpin,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        let mut current_lsn: u64 = start_lsn;
         let mut shutdown_rx = self.shared_state.shutdown_tx.subscribe();
 
         loop {
@@ -201,7 +214,7 @@ impl CdcEngine {
                     match data_res {
                         Some(Ok(mut data)) => {
                             if let Some(msg) = parse_replication_message(&mut data) {
-                                current_lsn = self.handle_replication_message(
+                                let _ = self.handle_replication_message(
                                     msg,
                                     &tx,
                                     &mut replication_stream,

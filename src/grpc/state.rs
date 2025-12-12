@@ -29,6 +29,7 @@ pub struct SharedState {
     pub state: RwLock<CdcState>,
     pub stage: RwLock<Stage>,
     pub stage_detail: RwLock<String>,
+    pub setup_error: RwLock<Option<String>>,  // Error descriptivo del setup
     pub current_lsn: AtomicU64,
     pub confirmed_lsn: AtomicU64,
     pub pending_events: AtomicU64,
@@ -48,6 +49,7 @@ impl SharedState {
             state: RwLock::new(CdcState::Running),
             stage: RwLock::new(Stage::Init),
             stage_detail: RwLock::new("Initializing".to_string()),
+            setup_error: RwLock::new(None),
             current_lsn: AtomicU64::new(0),
             confirmed_lsn: AtomicU64::new(0),
             pending_events: AtomicU64::new(0),
@@ -119,6 +121,14 @@ impl SharedState {
         let stage = *self.stage.read().await;
         let detail = self.stage_detail.read().await.clone();
         (stage, detail)
+    }
+
+    pub async fn set_setup_error(&self, error: Option<String>) {
+        *self.setup_error.write().await = error;
+    }
+
+    pub async fn get_setup_error(&self) -> Option<String> {
+        self.setup_error.read().await.clone()
     }
 }
 

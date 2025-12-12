@@ -27,6 +27,7 @@ message HealthCheckResponse {
   ServingStatus status = 1;
   Stage stage = 2;              // Etapa actual del ciclo de vida
   string stage_detail = 3;      // Detalle de la etapa actual
+  string error_detail = 4;      // Detalle del error si stage != CDC
 }
 
 // Control del CDC
