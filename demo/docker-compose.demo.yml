@@ -52,10 +52,10 @@ services:
       - dbmazz-demo
 
   dbmazz:
-    image: debian:bookworm-slim
+    build:
+      context: ..
+      dockerfile: demo/Dockerfile.dbmazz
     container_name: dbmazz-demo-cdc
-    volumes:
-      - ../target/release/dbmazz:/usr/local/bin/dbmazz:ro
     ports:
       - "50051:50051"  # gRPC API
     environment:
