@@ -6,7 +6,6 @@ mod grpc;
 mod config;
 mod engine;
 mod replication;
-mod setup;
 
 use anyhow::Result;
 use dotenvy::dotenv;

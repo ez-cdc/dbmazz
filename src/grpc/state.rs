@@ -1,13 +1,25 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CdcState {
-    Running,
-    Paused,
-    Draining,
-    Stopped,
+    Running = 0,
+    Paused = 1,
+    Draining = 2,
+    Stopped = 3,
+}
+
+impl CdcState {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => CdcState::Running,
+            1 => CdcState::Paused,
+            2 => CdcState::Draining,
+            _ => CdcState::Stopped,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,7 +38,7 @@ pub struct CdcConfig {
 }
 
 pub struct SharedState {
-    pub state: RwLock<CdcState>,
+    pub state: AtomicU8,
     pub stage: RwLock<Stage>,
     pub stage_detail: RwLock<String>,
     pub setup_error: RwLock<Option<String>>,  // Error descriptivo del setup
@@ -46,7 +58,7 @@ impl SharedState {
     pub fn new(config: CdcConfig) -> Arc<Self> {
         let (shutdown_tx, _) = watch::channel(false);
         Arc::new(Self {
-            state: RwLock::new(CdcState::Running),
+            state: AtomicU8::new(CdcState::Running as u8),
             stage: RwLock::new(Stage::Init),
             stage_detail: RwLock::new("Initializing".to_string()),
             setup_error: RwLock::new(None),
@@ -129,6 +141,24 @@ impl SharedState {
 
     pub async fn get_setup_error(&self) -> Option<String> {
         self.setup_error.read().await.clone()
+    }
+
+    // Métodos sincronos para estado CDC (sin await)
+    pub fn get_state(&self) -> CdcState {
+        CdcState::from_u8(self.state.load(Ordering::Acquire))
+    }
+
+    pub fn set_state(&self, state: CdcState) {
+        self.state.store(state as u8, Ordering::Release);
+    }
+
+    pub fn compare_and_set_state(&self, expected: CdcState, new: CdcState) -> bool {
+        self.state.compare_exchange(
+            expected as u8,
+            new as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ).is_ok()
     }
 }
 

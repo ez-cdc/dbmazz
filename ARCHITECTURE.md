@@ -36,7 +36,11 @@ CDC de alto rendimiento: PostgreSQL → StarRocks.
 |-----------------|-----------------|
 | `main.rs` | Entry point minimalista (< 30 líneas) |
 | `config.rs` | Carga de env vars centralizada |
-| `engine.rs` | Orquestador del lifecycle CDC (INIT → SETUP → CDC) |
+| **`engine/mod.rs`** | **Orquestador del lifecycle CDC (INIT → SETUP → CDC)** |
+| **`engine/setup/mod.rs`** | **Manager principal del setup automático** |
+| **`engine/setup/postgres.rs`** | **Setup PostgreSQL (REPLICA IDENTITY, Publication, Slot)** |
+| **`engine/setup/starrocks.rs`** | **Setup StarRocks (validación + columnas audit)** |
+| **`engine/setup/error.rs`** | **Tipos de error descriptivos para control plane** |
 | `source/postgres.rs` | Conexión y lectura del WAL stream |
 | `source/parser.rs` | Parser zero-copy con SIMD para `pgoutput` |
 | `sink/starrocks.rs` | Lógica de Stream Load a StarRocks |
@@ -56,6 +60,9 @@ CDC de alto rendimiento: PostgreSQL → StarRocks.
 |----------------|-----------|
 | Nuevo source (MySQL, MongoDB) | `src/source/<name>.rs` + implementar trait |
 | Nuevo sink (ClickHouse, Kafka) | `src/sink/<name>.rs` + implementar trait `Sink` |
+| **Validación de setup** | `src/engine/setup/postgres.rs` o `src/engine/setup/starrocks.rs` |
+| **Nuevo tipo de error setup** | `src/engine/setup/error.rs` → enum `SetupError` |
+| **Lógica del engine** | `src/engine/mod.rs` (fase del lifecycle) |
 | Nueva variable de entorno | Campo en `src/config.rs` → struct `Config` |
 | Nuevo servicio gRPC | `src/grpc/services.rs` + `src/proto/dbmazz.proto` |
 | Helper de parsing | Función en `src/source/parser.rs` |
@@ -93,6 +100,62 @@ CDC de alto rendimiento: PostgreSQL → StarRocks.
 6. **Checkpoint** (`state_store.rs`)
    - Persiste LSN en tabla `dbmazz_checkpoints`
    - Confirma a PostgreSQL con `StandbyStatusUpdate`
+
+---
+
+## Flujo de Setup Automático
+
+El módulo `engine/setup/` maneja la configuración automática en el stage `SETUP`:
+
+### 1. PostgreSQL Setup (`engine/setup/postgres.rs`)
+
+```
+Verify Tables Exist
+    ↓
+Configure REPLICA IDENTITY FULL
+    ↓
+Create/Verify Publication
+    ↓
+Add Missing Tables to Publication
+    ↓
+Create/Verify Replication Slot
+    ↓
+✅ PostgreSQL Ready
+```
+
+**Idempotencia**: Detecta recursos existentes (recovery mode) y continúa sin errores.
+
+### 2. StarRocks Setup (`engine/setup/starrocks.rs`)
+
+```
+Verify Connectivity
+    ↓
+Verify Tables Exist
+    ↓
+Get Existing Columns
+    ↓
+Add Missing Audit Columns:
+  - dbmazz_op_type
+  - dbmazz_is_deleted
+  - dbmazz_synced_at
+  - dbmazz_cdc_version
+    ↓
+✅ StarRocks Ready
+```
+
+### 3. Error Handling (`engine/setup/error.rs`)
+
+Si cualquier paso falla:
+- Error descriptivo guardado en `SharedState`
+- Health Check retorna `NOT_SERVING` con `errorDetail`
+- gRPC server sigue corriendo para consultas del control plane
+
+**Ejemplo**:
+```rust
+SetupError::PgTableNotFound { table: "orders" }
+  ↓
+errorDetail: "Table 'orders' not found in PostgreSQL. Verify the table exists..."
+```
 
 ---
 
