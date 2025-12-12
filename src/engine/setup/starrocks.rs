@@ -178,7 +178,7 @@ pub fn create_starrocks_pool(config: &Config) -> Result<Pool, SetupError> {
 
     let opts = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)
-        .tcp_port(9030) // Puerto MySQL de StarRocks
+        .tcp_port(config.starrocks_port) // Puerto MySQL de StarRocks desde config
         .user(Some(config.starrocks_user.clone()))
         .pass(Some(config.starrocks_pass.clone()))
         .db_name(Some(config.starrocks_db.clone()))
