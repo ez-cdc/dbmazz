@@ -62,7 +62,7 @@ services:
       DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db?replication=database"
       SLOT_NAME: "dbmazz_demo_slot"
       PUBLICATION_NAME: "dbmazz_pub"
-      STARROCKS_URL: "http://starrocks:8040"
+      STARROCKS_URL: "http://starrocks:8030"  # FE - con redirect inteligente
       STARROCKS_DB: "demo_db"
       STARROCKS_USER: "root"
       STARROCKS_PASS: ""
