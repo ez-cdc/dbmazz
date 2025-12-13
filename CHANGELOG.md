@@ -18,6 +18,13 @@ Todos los cambios notables de dbmazz serán documentados aquí.
   - Nuevo campo `error_detail` en Health Check
   - `status: NOT_SERVING` cuando hay errores de setup
   - gRPC server sigue corriendo para consultas incluso con errores
+- **Métricas de CPU en Millicores**: Monitoreo de consumo de CPU consistente entre entornos
+  - Nuevo campo `cpu_millicores` en `MetricsResponse`
+  - Lectura directa de `/proc/[pid]/stat` (mismo algoritmo que `ps` y `top`)
+  - Consistente entre bare metal, Docker y Kubernetes
+  - 1000 millicores = 100% de 1 core (estándar Kubernetes)
+  - Validado: 3000 ev/s → 45 millicores (4.5% de 1 core)
+  - Eficiencia: 66 eventos/milicore en bare metal
 - **gRPC Reflection**: Servidor gRPC con reflection habilitado para uso simple de `grpcurl` sin archivos `.proto`
 - **Schema Evolution básico**: Detección automática de nuevas columnas y `ALTER TABLE ADD COLUMN` en StarRocks
 
@@ -25,6 +32,11 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 - Migración de `reqwest` a `curl` crate (libcurl bindings) para StarRocks Stream Load
   - Manejo correcto del protocolo `Expect: 100-continue`
   - Soporte nativo para redirects FE → BE con autenticación
+- **Optimización de CPU**: Reducción del overhead del main loop
+  - Migración de `RwLock<CdcState>` a `AtomicU8` para acceso lock-free
+  - State checks reducidos de cada iteración a cada 256 iteraciones
+  - Zero-copy en WAL parsing (`bytes.slice(..)` en lugar de `clone()`)
+  - Pre-allocación de estructuras JSON con capacidad conocida
 - **BREAKING**: Ya no se requiere configurar PostgreSQL manualmente
   - Publication, Slot y REPLICA IDENTITY ahora son automáticos
   - Simplifica deployment: solo especifica las tablas
@@ -159,6 +171,7 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 - `mysql_async`: Cliente MySQL para DDL en StarRocks
 - `hashbrown`: HashMap de alto rendimiento
 - `memchr` + `simdutf8`: Optimizaciones SIMD
+- `libc`: Acceso a syscalls de Linux para métricas de CPU
 
 ### Estructura del Proyecto
 
@@ -167,8 +180,13 @@ dbmazz/
 ├── src/
 │   ├── main.rs              # Punto de entrada (28 líneas)
 │   ├── config.rs            # Configuración desde env vars
-│   ├── engine.rs            # Motor CDC orquestador
+│   ├── engine/              # Motor CDC y setup automático
+│   │   ├── mod.rs           # Orquestador principal
+│   │   └── setup/           # Configuración automática PG/SR
 │   ├── grpc/                # API gRPC (4 servicios)
+│   │   ├── services.rs      # Implementación de servicios
+│   │   ├── state.rs         # Estado compartido (AtomicU8)
+│   │   └── cpu_metrics.rs   # Tracker de CPU (/proc)
 │   ├── replication/         # Procesamiento WAL
 │   ├── pipeline/            # Batching y schema cache
 │   ├── sink/                # Destinos (StarRocks)

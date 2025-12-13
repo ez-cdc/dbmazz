@@ -4,6 +4,7 @@ use tokio::time::{interval, Duration};
 use tonic::{Request, Response, Status};
 
 use crate::grpc::state::{CdcState, SharedState, Stage};
+use crate::grpc::cpu_metrics::CpuTracker;
 
 // Include the generated protobuf code
 pub mod dbmazz {
@@ -332,6 +333,10 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
             let mut ticker = interval(Duration::from_millis(interval_ms as u64));
             let mut last_events = shared_state.get_events_processed();
             let mut last_time = std::time::Instant::now();
+            
+            // Inicializar CPU tracker que lee directamente de /proc
+            // Esto proporciona métricas consistentes entre Docker y bare metal
+            let mut cpu_tracker = CpuTracker::new();
 
             loop {
                 ticker.tick().await;
@@ -358,6 +363,10 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
                     .unwrap()
                     .as_secs();
 
+                // Leer CPU del proceso desde /proc/[pid]/stat
+                // Consistente entre Docker y bare metal
+                let cpu_millicores = cpu_tracker.get_cpu_millicores();
+
                 let metrics = MetricsResponse {
                     timestamp,
                     events_per_second,
@@ -366,6 +375,7 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
                     memory_bytes: shared_state.estimate_memory(),
                     total_events_processed: current_events,
                     total_batches_sent: shared_state.get_batches_sent(),
+                    cpu_millicores,
                 };
 
                 if tx.send(Ok(metrics)).await.is_err() {

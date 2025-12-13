@@ -3,7 +3,7 @@
 # Script para ejecutar dbmazz localmente conectándose a contenedores del demo
 # Usado para profiling con flamegraph
 
-export DATABASE_URL="postgres://postgres:postgres@localhost:5432/demo_db?replication=database"
+export DATABASE_URL="postgres://postgres:postgres@localhost:15432/demo_db?replication=database"
 export STARROCKS_URL="http://localhost:8040"
 export STARROCKS_DB="demo_db"
 export STARROCKS_USER="root"
