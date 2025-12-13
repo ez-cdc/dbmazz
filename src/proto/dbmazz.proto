@@ -91,5 +91,6 @@ message MetricsResponse {
   uint64 memory_bytes = 5;
   uint64 total_events_processed = 6;
   uint64 total_batches_sent = 7;
+  uint64 cpu_millicores = 8;   // CPU en milicores (1000 = 1 core)
 }
 
