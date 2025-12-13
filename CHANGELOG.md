@@ -32,6 +32,13 @@ Todos los cambios notables de dbmazz serán documentados aquí.
 - Migración de `reqwest` a `curl` crate (libcurl bindings) para StarRocks Stream Load
   - Manejo correcto del protocolo `Expect: 100-continue`
   - Soporte nativo para redirects FE → BE con autenticación
+- **Redirect Inteligente para Autoscaling**: Stream Load soporta StarRocks FE con autoscaling
+  - Conexión al Frontend (puerto 8030) en lugar de Backend directo
+  - Detección automática de redirects HTTP 307 a `127.0.0.1`
+  - Reescritura de hostname para compatibilidad con Docker/Kubernetes
+  - Soporte completo para balanceo de carga y failover entre múltiples BEs
+  - Funciona en bare metal, Docker Compose y Kubernetes sin configuración adicional
+  - **Nota**: Implementación actual no ha sido validada contra mejores prácticas de libcurl (TODO: benchmarks, connection pooling)
 - **Optimización de CPU**: Reducción del overhead del main loop
   - Migración de `RwLock<CdcState>` a `AtomicU8` para acceso lock-free
   - State checks reducidos de cada iteración a cada 256 iteraciones
@@ -46,6 +53,7 @@ Todos los cambios notables de dbmazz serán documentados aquí.
   - INSERTs siempre reciben datos completos (incluso > 2KB)
   - Solo UPDATEs que no modifican columna TOAST envían marcador 'u'
   - Partial Update preserva valores existentes en StarRocks
+- Compatibilidad Docker: Redirects FE→BE que apuntaban a `127.0.0.1` ahora se reescriben al hostname correcto
 
 ---
 
