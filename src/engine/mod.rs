@@ -1,3 +1,6 @@
+// Copyright 2025
+// Licensed under the Elastic License v2.0
+
 mod setup;
 
 use anyhow::Result;

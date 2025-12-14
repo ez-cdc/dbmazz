@@ -1,3 +1,6 @@
+// Copyright 2025
+// Licensed under the Elastic License v2.0
+
 use anyhow::{Context, Result};
 use std::env;
 

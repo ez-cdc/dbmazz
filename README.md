@@ -387,4 +387,4 @@ Para preguntas o issues, contactar al equipo de desarrollo.
 
 ## 📄 Licencia
 
-[Especificar licencia]
+Este proyecto está licenciado bajo la Elastic License v2.0. Consulta el archivo [LICENSE](../LICENSE) para más detalles.

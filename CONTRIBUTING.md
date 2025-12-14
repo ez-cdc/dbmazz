@@ -154,3 +154,17 @@ grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 docker logs -f dbmazz-demo-cdc
 ```
 
+---
+
+## Licencia
+
+Este proyecto está licenciado bajo la Elastic License v2.0.
+
+Al contribuir a este proyecto, aceptas que tus contribuciones serán licenciadas bajo la misma licencia (Elastic License v2.0). Esto significa que:
+
+- Tus contribuciones pueden ser usadas, copiadas, distribuidas y modificadas por el proyecto
+- Las contribuciones estarán sujetas a las mismas limitaciones de la ELv2
+- No puedes revocar la licencia una vez que tu contribución sea aceptada
+
+Para más detalles sobre los términos de la licencia, consulta el archivo [LICENSE](../LICENSE).
+
