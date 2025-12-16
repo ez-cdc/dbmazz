@@ -14,3 +14,5 @@ RUN chmod +x /usr/local/bin/dbmazz
 # Punto de entrada
 ENTRYPOINT ["/usr/local/bin/dbmazz"]
 
+
+

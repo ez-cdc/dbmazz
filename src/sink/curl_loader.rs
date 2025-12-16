@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use curl::easy::{Easy, List};
 use std::io::Read;
+use std::sync::Arc;
 
 // TODO: Este módulo maneja redirects FE→BE de StarRocks con reescritura de 127.0.0.1.
 // No se ha validado si esta implementación es óptima en términos de:
@@ -39,7 +40,7 @@ impl CurlStreamLoader {
     pub async fn send(
         &self,
         table_name: &str,
-        body: Vec<u8>,
+        body: Arc<Vec<u8>>,
         partial_columns: Option<Vec<String>>,
     ) -> Result<LoadResult> {
         let url = format!(
@@ -49,6 +50,7 @@ impl CurlStreamLoader {
         let user = self.user.clone();
         let pass = self.pass.clone();
         let table = table_name.to_string();
+        let body = body.clone();
         
         // spawn_blocking para no bloquear el runtime async
         tokio::task::spawn_blocking(move || {
@@ -63,7 +65,7 @@ impl CurlStreamLoader {
         user: &str,
         pass: &str,
         table_name: &str,
-        body: Vec<u8>,
+        body: Arc<Vec<u8>>,
         partial_columns: Option<Vec<String>>,
     ) -> Result<LoadResult> {
         // Extraer hostname original para reescribir redirects de 127.0.0.1
@@ -106,9 +108,17 @@ impl CurlStreamLoader {
         easy.post_field_size(body_len as u64)?;
         easy.upload(true)?;  // Habilitar modo upload para PUT
         
-        let mut body_cursor = std::io::Cursor::new(body.clone());
+        let body_for_read = body.clone();
+        let mut offset: usize = 0;
         easy.read_function(move |buf| {
-            body_cursor.read(buf).map_err(|_| curl::easy::ReadError::Abort)
+            let remaining = &body_for_read[offset..];
+            let to_copy = remaining.len().min(buf.len());
+            if to_copy == 0 {
+                return Ok(0);
+            }
+            buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+            offset += to_copy;
+            Ok(to_copy)
         })?;
         
         // Timeout
@@ -155,7 +165,7 @@ impl CurlStreamLoader {
                 };
                 
                 // Hacer segunda petición al BE (redirect)
-                return Self::send_to_be(&corrected_location, user, pass, partial_cols_clone, body);
+                return Self::send_to_be(&corrected_location, user, pass, partial_cols_clone, body.clone());
             }
         }
         
@@ -219,7 +229,7 @@ impl CurlStreamLoader {
         user: &str,
         pass: &str,
         partial_columns: Option<Vec<String>>,
-        body: Vec<u8>,
+        body: Arc<Vec<u8>>,
     ) -> Result<LoadResult> {
         let mut easy = Easy::new();
         
@@ -252,9 +262,17 @@ impl CurlStreamLoader {
         easy.post_field_size(body_len as u64)?;
         easy.upload(true)?;
         
-        let mut body_cursor = std::io::Cursor::new(body);
+        let body_for_read = body.clone();
+        let mut offset: usize = 0;
         easy.read_function(move |buf| {
-            body_cursor.read(buf).map_err(|_| curl::easy::ReadError::Abort)
+            let remaining = &body_for_read[offset..];
+            let to_copy = remaining.len().min(buf.len());
+            if to_copy == 0 {
+                return Ok(0);
+            }
+            buf[..to_copy].copy_from_slice(&remaining[..to_copy]);
+            offset += to_copy;
+            Ok(to_copy)
         })?;
         
         // Timeout
@@ -305,4 +323,3 @@ impl CurlStreamLoader {
         })
     }
 }
-

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
-use sonic_rs::{Value, Object as Map, json, JsonValueTrait};
+use sonic_rs::{Value, Object as Map, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use chrono::Utc;
 use mysql_async::{Pool, Conn, OptsBuilder, prelude::Queryable};
@@ -143,70 +144,33 @@ impl StarRocksSink {
         }
     }
     
-    /// Envía un batch de filas a StarRocks via Stream Load (full row)
-    async fn send_to_starrocks(
-        &self,
-        table_name: &str,
-        rows: Vec<Map>
-    ) -> Result<()> {
-        self.send_to_starrocks_internal(table_name, rows, None).await
-    }
-    
-    /// Envía un batch de filas a StarRocks via Stream Load con Partial Update
-    async fn send_partial_update(
-        &self,
-        table_name: &str,
-        rows: Vec<Map>,
-        columns: &[String]
-    ) -> Result<()> {
-        self.send_to_starrocks_internal(table_name, rows, Some(columns)).await
-    }
-    
-    /// Implementacion interna de Stream Load con soporte para partial update
-    async fn send_to_starrocks_internal(
-        &self,
-        table_name: &str,
-        rows: Vec<Map>,
-        partial_columns: Option<&[String]>  // Si Some, usa partial update
-    ) -> Result<()> {
+    /// Serializa un batch a JSON bytes sin duplicar buffers.
+    fn build_body(&self, rows: Vec<Map>) -> Result<Arc<Vec<u8>>> {
         if rows.is_empty() {
-            return Ok(());
+            return Ok(Arc::new(Vec::new()));
         }
-        
-        // Serializar rows a JSON con pre-allocación
+
         let row_count = rows.len();
         let mut json_values = Vec::with_capacity(row_count);
         for obj in rows {
             json_values.push(Value::from(obj));
         }
         let body = sonic_rs::to_string(&json_values)?;
-        
-        // Convertir a Vec<u8> y Option<Vec<String>> para curl_loader
-        let body_bytes = body.into_bytes();
-        let partial_cols = partial_columns.map(|cols| cols.to_vec());
-        
-        // Usar CurlStreamLoader (maneja 100-continue y redirects automáticamente)
-        let _result = self.curl_loader.send(
-            table_name,
-            body_bytes,
-            partial_cols,
-        ).await?;
-        
-        Ok(())
+        Ok(Arc::new(body.into_bytes()))
     }
-    
-    /// Envía con reintentos en caso de fallo (full row)
-    async fn send_with_retry(
+
+    /// Envía con reintentos en caso de fallo usando un body preconstruido.
+    async fn send_body_with_retry(
         &self,
         table_name: &str,
-        rows: Vec<Map>,
-        max_retries: u32
+        body: Arc<Vec<u8>>,
+        partial_columns: Option<Vec<String>>,
+        max_retries: u32,
     ) -> Result<()> {
         let mut attempt = 0;
-        let rows_clone = rows.clone();
         
         loop {
-            match self.send_to_starrocks(table_name, rows_clone.clone()).await {
+            match self.curl_loader.send(table_name, body.clone(), partial_columns.clone()).await {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     attempt += 1;
@@ -233,6 +197,20 @@ impl StarRocksSink {
                 }
             }
         }
+    }
+
+    /// Envía un batch de filas a StarRocks via Stream Load (full row) con reintentos.
+    async fn send_with_retry(
+        &self,
+        table_name: &str,
+        rows: Vec<Map>,
+        max_retries: u32
+    ) -> Result<()> {
+        let body = self.build_body(rows)?;
+        if body.is_empty() {
+            return Ok(());
+        }
+        self.send_body_with_retry(table_name, body, None, max_retries).await
     }
     
     /// Ejecuta DDL en StarRocks via MySQL protocol
@@ -314,38 +292,12 @@ impl StarRocksSink {
         columns: &[String],
         max_retries: u32
     ) -> Result<()> {
-        let mut attempt = 0;
-        let rows_clone = rows.clone();
-        let columns_vec = columns.to_vec();
-        
-        loop {
-            match self.send_partial_update(table_name, rows_clone.clone(), &columns_vec).await {
-                Ok(_) => return Ok(()),
-                Err(e) => {
-                    attempt += 1;
-                    if attempt >= max_retries {
-                        return Err(anyhow!(
-                            "Partial update failed after {} attempts: {}", 
-                            max_retries, 
-                            e
-                        ));
-                    }
-                    
-                    eprintln!(
-                        "⚠️  Retry partial update {}/{} for {}: {}", 
-                        attempt, 
-                        max_retries, 
-                        table_name, 
-                        e
-                    );
-                    
-                    // Backoff exponencial: 100ms, 200ms, 400ms...
-                    tokio::time::sleep(
-                        Duration::from_millis(100 * 2_u64.pow(attempt))
-                    ).await;
-                }
-            }
+        let body = self.build_body(rows)?;
+        if body.is_empty() {
+            return Ok(());
         }
+        let columns_vec = columns.to_vec();
+        self.send_body_with_retry(table_name, body, Some(columns_vec), max_retries).await
     }
 }
 
