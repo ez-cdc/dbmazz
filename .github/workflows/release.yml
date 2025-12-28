@@ -1,0 +1,67 @@
+name: Build and Release DBMazz
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build dbmazz
+        run: cargo build --release --verbose
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Upload versioned binary to S3
+        run: |
+          aws s3 cp target/release/dbmazz \
+            s3://ez-cdc-binaries/dbmazz-${{ steps.version.outputs.VERSION }}
+
+      - name: Update latest binary in S3
+        run: |
+          aws s3 cp target/release/dbmazz \
+            s3://ez-cdc-binaries/latest/dbmazz
+
+      - name: Print deployment info
+        run: |
+          echo "✅ Deployed dbmazz version: ${{ steps.version.outputs.VERSION }}"
+          echo "📦 Binaries available at:"
+          echo "   - s3://ez-cdc-binaries/dbmazz-${{ steps.version.outputs.VERSION }}"
+          echo "   - s3://ez-cdc-binaries/latest/dbmazz"
