@@ -13,9 +13,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc and musl tools
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -36,7 +38,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build dbmazz
-        run: cargo build --release --verbose
+        run: cargo build --release --target x86_64-unknown-linux-musl --verbose
 
       - name: Get version
         id: version
@@ -51,12 +53,12 @@ jobs:
 
       - name: Upload versioned binary to S3
         run: |
-          aws s3 cp target/release/dbmazz \
+          aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
             s3://ez-cdc-binaries/dbmazz-${{ steps.version.outputs.VERSION }}
 
       - name: Update latest binary in S3
         run: |
-          aws s3 cp target/release/dbmazz \
+          aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
             s3://ez-cdc-binaries/latest/dbmazz
 
       - name: Print deployment info
