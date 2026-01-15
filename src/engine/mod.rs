@@ -80,9 +80,21 @@ impl CdcEngine {
         let replication_stream = source.start_replication_from(start_lsn).await?;
         tokio::pin!(replication_stream);
 
-        // Stage: SETUP - Sink Connection
-        self.shared_state.set_stage(Stage::Setup, "Connecting to StarRocks").await;
+        // Stage: SETUP - Sink Connection (verificar HTTP antes de iniciar pipeline)
+        self.shared_state.set_stage(Stage::Setup, "Connecting to StarRocks HTTP endpoint").await;
         let sink = self.init_sink();
+
+        // Verificar conectividad HTTP ANTES de declarar CDC ready
+        if let Err(e) = sink.verify_http_connection().await {
+            let error_msg = format!("StarRocks HTTP connection failed: {}", e);
+            self.shared_state.set_setup_error(Some(error_msg.clone())).await;
+            self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
+            eprintln!("❌ {}", error_msg);
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+        println!("  ✓ StarRocks HTTP endpoint accessible");
 
         // Stage: SETUP - Pipeline
         self.shared_state.set_stage(Stage::Setup, "Initializing pipeline").await;

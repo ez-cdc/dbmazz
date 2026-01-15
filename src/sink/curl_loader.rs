@@ -36,6 +36,39 @@ impl CurlStreamLoader {
         }
     }
 
+    /// Verifica que el endpoint HTTP de StarRocks (puerto 8040) está accesible
+    /// Hace un GET simple al endpoint base para validar conectividad
+    pub async fn verify_connection(&self) -> Result<()> {
+        let url = self.base_url.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let mut easy = Easy::new();
+            easy.url(&url)?;
+            easy.timeout(std::time::Duration::from_secs(10))?;
+            easy.connect_timeout(std::time::Duration::from_secs(5))?;
+
+            // Solo queremos verificar conectividad, no nos importa la respuesta
+            let mut response = Vec::new();
+            {
+                let mut transfer = easy.transfer();
+                transfer.write_function(|data| {
+                    response.extend_from_slice(data);
+                    Ok(data.len())
+                })?;
+                transfer.perform()?;
+            }
+
+            let code = easy.response_code()?;
+            if code >= 500 {
+                return Err(anyhow!("StarRocks HTTP endpoint returned error: {}", code));
+            }
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow!("Task join error: {}", e))?
+    }
+
     /// Envía datos a StarRocks via Stream Load (ejecuta en thread pool para no bloquear async)
     pub async fn send(
         &self,

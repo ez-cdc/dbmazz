@@ -59,7 +59,13 @@ impl StarRocksSink {
             mysql_pool: Some(Pool::new(mysql_opts)),
         }
     }
-    
+
+    /// Verifica que el endpoint HTTP de StarRocks (puerto 8040) está accesible
+    /// Esto debe llamarse durante el setup para fallar temprano si hay problemas de red
+    pub async fn verify_http_connection(&self) -> Result<()> {
+        self.curl_loader.verify_connection().await
+    }
+
     /// Convierte un Tuple a JSON usando el schema de la tabla (incluye todas las columnas)
     fn tuple_to_json(
         &self,
