@@ -30,7 +30,7 @@ tonic = "0.12"
 prost = "0.13"
 tonic-reflection = "0.12"
 mysql_async = "0.34"
-curl = "0.4"
+curl = { version = "0.4", features = ["static-curl"] }
 serde_json = "1.0"
 sysinfo = "0.30"
 libc = "0.2"
