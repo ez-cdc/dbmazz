@@ -211,34 +211,68 @@ impl<'a> PostgresSetup<'a> {
     async fn ensure_replication_slot(&self) -> Result<(), SetupError> {
         let slot_name = &self.config.slot_name;
 
-        // Verificar si existe
-        let exists: bool = self.client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+        // Verificar si existe y si está activo
+        let slot_info = self.client
+            .query_opt(
+                "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
                 &[&slot_name],
             )
             .await
             .map_err(|e| SetupError::PgSlotFailed {
                 name: slot_name.clone(),
                 error: e.to_string(),
-            })?
-            .get(0);
+            })?;
 
-        if exists {
-            println!("  ✓ Replication slot {} exists (recovery mode)", slot_name);
-        } else {
-            println!("  🔧 Creating replication slot {}", slot_name);
-            self.client
-                .execute(
-                    "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-                    &[&slot_name],
-                )
-                .await
-                .map_err(|e| SetupError::PgSlotFailed {
-                    name: slot_name.clone(),
-                    error: e.to_string(),
-                })?;
-            println!("  ✅ Replication slot {} created", slot_name);
+        match slot_info {
+            Some(row) => {
+                let is_active: bool = row.get(0);
+                if is_active {
+                    // Slot exists and is active - another process is using it
+                    // This is recovery mode (same daemon restarting)
+                    println!("  ✓ Replication slot {} exists and is active (recovery mode)", slot_name);
+                } else {
+                    // Slot exists but is NOT active - orphaned from a previous run
+                    // Drop it and recreate to ensure clean state
+                    println!("  ⚠️  Replication slot {} exists but is inactive (orphaned), dropping...", slot_name);
+                    self.client
+                        .execute(
+                            "SELECT pg_drop_replication_slot($1)",
+                            &[&slot_name],
+                        )
+                        .await
+                        .map_err(|e| SetupError::PgSlotFailed {
+                            name: slot_name.clone(),
+                            error: format!("failed to drop orphaned slot: {}", e),
+                        })?;
+                    println!("  🔧 Creating replication slot {}", slot_name);
+                    self.client
+                        .execute(
+                            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+                            &[&slot_name],
+                        )
+                        .await
+                        .map_err(|e| SetupError::PgSlotFailed {
+                            name: slot_name.clone(),
+                            error: e.to_string(),
+                        })?;
+                    println!("  ✅ Replication slot {} created", slot_name);
+                }
+            }
+            None => {
+                // Slot doesn't exist - create it
+                println!("  🔧 Creating replication slot {}", slot_name);
+                self.client
+                    .execute(
+                        "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
+                        &[&slot_name],
+                    )
+                    .await
+                    .map_err(|e| SetupError::PgSlotFailed {
+                        name: slot_name.clone(),
+                        error: e.to_string(),
+                    })?;
+                println!("  ✅ Replication slot {} created", slot_name);
+            }
         }
 
         Ok(())
