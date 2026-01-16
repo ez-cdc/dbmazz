@@ -5,6 +5,7 @@ pub mod starrocks;
 use anyhow::Result;
 
 pub use error::SetupError;
+pub use postgres::cleanup_postgres_resources;
 use crate::config::Config;
 
 /// Manager principal del proceso de SETUP

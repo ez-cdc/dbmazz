@@ -18,6 +18,13 @@ pub struct StarRocksSink {
     mysql_pool: Option<Pool>,  // Pool MySQL para DDL (puerto 9030)
 }
 
+/// Check if a table is internal to dbmazz and should not be replicated
+fn is_internal_table(table_name: &str) -> bool {
+    table_name.starts_with("dbmazz_") ||
+    table_name.starts_with("_dbmazz_") ||
+    table_name == "dbmazz_checkpoints"
+}
+
 impl StarRocksSink {
     pub fn new(base_url: String, database: String, user: String, pass: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
@@ -332,6 +339,10 @@ impl Sink for StarRocksSink {
             match msg {
                 CdcMessage::Insert { relation_id, tuple } => {
                     if let Some(schema) = schema_cache.get(*relation_id) {
+                        // Skip internal dbmazz tables
+                        if is_internal_table(&schema.name) {
+                            continue;
+                        }
                         // INSERTs siempre son full row (aunque tengan TOAST, enviamos null)
                         let mut row = self.tuple_to_json(tuple, schema)?;
                         
@@ -353,6 +364,10 @@ impl Sink for StarRocksSink {
                 
                 CdcMessage::Update { relation_id, new_tuple, .. } => {
                     if let Some(schema) = schema_cache.get(*relation_id) {
+                        // Skip internal dbmazz tables
+                        if is_internal_table(&schema.name) {
+                            continue;
+                        }
                         // Usar POPCNT (SIMD) para detectar TOAST rapido: O(1)
                         let has_toast = new_tuple.has_toast();
                         
@@ -393,6 +408,10 @@ impl Sink for StarRocksSink {
                 CdcMessage::Delete { relation_id, old_tuple } => {
                     if let Some(old) = old_tuple {
                         if let Some(schema) = schema_cache.get(*relation_id) {
+                            // Skip internal dbmazz tables
+                            if is_internal_table(&schema.name) {
+                                continue;
+                            }
                             // DELETEs siempre son full row (necesitamos todos los campos)
                             let mut row = self.tuple_to_json(old, schema)?;
                             

@@ -303,3 +303,43 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
 
     Ok(client)
 }
+
+/// Cleanup de recursos PostgreSQL al hacer shutdown del daemon
+/// Dropea el replication slot para liberar el recurso
+pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> Result<(), SetupError> {
+    println!("🧹 Cleaning up PostgreSQL resources...");
+
+    let client = create_postgres_client(database_url).await?;
+
+    // Verificar si el slot existe antes de intentar dropearlo
+    let slot_exists: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+            &[&slot_name],
+        )
+        .await
+        .map_err(|e| SetupError::PgSlotFailed {
+            name: slot_name.to_string(),
+            error: e.to_string(),
+        })?
+        .get(0);
+
+    if slot_exists {
+        println!("  🗑️  Dropping replication slot: {}", slot_name);
+        client
+            .execute(
+                "SELECT pg_drop_replication_slot($1)",
+                &[&slot_name],
+            )
+            .await
+            .map_err(|e| SetupError::PgSlotFailed {
+                name: slot_name.to_string(),
+                error: format!("failed to drop slot: {}", e),
+            })?;
+        println!("  ✅ Replication slot {} dropped", slot_name);
+    } else {
+        println!("  ℹ️  Replication slot {} not found (already dropped?)", slot_name);
+    }
+
+    Ok(())
+}
