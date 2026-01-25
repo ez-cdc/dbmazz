@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
 
@@ -52,6 +52,8 @@ pub struct SharedState {
     // Timestamp del último evento procesado (para calcular events/sec)
     pub last_event_time: RwLock<std::time::Instant>,
     pub events_last_second: AtomicU64,
+    // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
+    pub skip_slot_cleanup: AtomicBool,
 }
 
 impl SharedState {
@@ -71,7 +73,16 @@ impl SharedState {
             config: RwLock::new(config),
             last_event_time: RwLock::new(std::time::Instant::now()),
             events_last_second: AtomicU64::new(0),
+            skip_slot_cleanup: AtomicBool::new(false),
         })
+    }
+
+    pub fn set_skip_slot_cleanup(&self, skip: bool) {
+        self.skip_slot_cleanup.store(skip, Ordering::Release);
+    }
+
+    pub fn should_skip_slot_cleanup(&self) -> bool {
+        self.skip_slot_cleanup.load(Ordering::Acquire)
     }
 
     pub fn update_lsn(&self, lsn: u64) {

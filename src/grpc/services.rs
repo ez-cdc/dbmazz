@@ -185,8 +185,9 @@ impl CdcControlService for CdcControlServiceImpl {
 
     async fn stop(
         &self,
-        _request: Request<StopRequest>,
+        request: Request<StopRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
+        let req = request.into_inner();
         let current = self.shared_state.get_state();
         match current {
             CdcState::Stopped => {
@@ -196,12 +197,20 @@ impl CdcControlService for CdcControlServiceImpl {
                 }))
             }
             _ => {
+                // Set cleanup flag before triggering shutdown
+                self.shared_state.set_skip_slot_cleanup(req.skip_slot_cleanup);
                 self.shared_state.set_state(CdcState::Stopped);
                 // Enviar señal de shutdown inmediato
                 let _ = self.shared_state.shutdown_tx.send(true);
+
+                let message = if req.skip_slot_cleanup {
+                    "CDC stopped (slot preserved for restart)".to_string()
+                } else {
+                    "CDC stopped (slot will be cleaned up)".to_string()
+                };
                 Ok(Response::new(ControlResponse {
                     success: true,
-                    message: "CDC stopped immediately".to_string(),
+                    message,
                 }))
             }
         }

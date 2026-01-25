@@ -42,7 +42,12 @@ service CdcControlService {
 message PauseRequest {}
 message ResumeRequest {}
 message DrainRequest {}
-message StopRequest {}
+message StopRequest {
+  // If true, don't drop the replication slot on shutdown.
+  // Use this for upgrades/restarts where the daemon will resume.
+  // Set to false (default) for permanent job deletion to cleanup all resources.
+  bool skip_slot_cleanup = 1;
+}
 message ReloadConfigRequest {
   uint64 flush_size = 1;           // 0 = no change
   uint64 flush_interval_ms = 2;    // 0 = no change

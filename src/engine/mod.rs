@@ -269,13 +269,17 @@ impl CdcEngine {
             }
         }
 
-        // Cleanup PostgreSQL resources (drop replication slot)
-        if let Err(e) = setup::cleanup_postgres_resources(
-            &self.config.database_url,
-            &self.config.slot_name,
-        ).await {
-            eprintln!("⚠️  Cleanup warning: {}", e);
-            // Non-fatal - continue shutdown
+        // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
+        if self.shared_state.should_skip_slot_cleanup() {
+            println!("⏭️  Skipping slot cleanup (upgrade/restart mode)");
+        } else {
+            if let Err(e) = setup::cleanup_postgres_resources(
+                &self.config.database_url,
+                &self.config.slot_name,
+            ).await {
+                eprintln!("⚠️  Cleanup warning: {}", e);
+                // Non-fatal - continue shutdown
+            }
         }
 
         println!("CDC shutdown complete");

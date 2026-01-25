@@ -311,35 +311,84 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
 
     let client = create_postgres_client(database_url).await?;
 
-    // Verificar si el slot existe antes de intentar dropearlo
-    let slot_exists: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = $1)",
+    // Verificar si el slot existe y obtener info
+    let slot_info = client
+        .query_opt(
+            "SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = $1",
             &[&slot_name],
         )
         .await
         .map_err(|e| SetupError::PgSlotFailed {
             name: slot_name.to_string(),
             error: e.to_string(),
-        })?
-        .get(0);
+        })?;
 
-    if slot_exists {
-        println!("  🗑️  Dropping replication slot: {}", slot_name);
-        client
-            .execute(
-                "SELECT pg_drop_replication_slot($1)",
-                &[&slot_name],
-            )
-            .await
-            .map_err(|e| SetupError::PgSlotFailed {
+    match slot_info {
+        Some(row) => {
+            let is_active: bool = row.get(0);
+            let active_pid: Option<i32> = row.get(1);
+
+            println!("  🗑️  Dropping replication slot: {}", slot_name);
+
+            // Si el slot está activo, primero terminar el backend que lo tiene
+            if is_active {
+                if let Some(pid) = active_pid {
+                    println!("  ⚠️  Slot is active (pid={}), terminating backend...", pid);
+                    let terminated: bool = client
+                        .query_one(
+                            "SELECT pg_terminate_backend($1)",
+                            &[&pid],
+                        )
+                        .await
+                        .map(|row| row.get(0))
+                        .unwrap_or(false);
+
+                    if terminated {
+                        println!("  ✓ Backend terminated");
+                        // Esperar un momento para que PostgreSQL libere el slot
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    } else {
+                        println!("  ⚠️  Could not terminate backend, will retry drop anyway");
+                    }
+                }
+            }
+
+            // Intentar dropear el slot con retry
+            let mut retries = 3;
+            let mut last_error = None;
+
+            while retries > 0 {
+                match client
+                    .execute(
+                        "SELECT pg_drop_replication_slot($1)",
+                        &[&slot_name],
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        println!("  ✅ Replication slot {} dropped", slot_name);
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        last_error = Some(e.to_string());
+                        retries -= 1;
+                        if retries > 0 {
+                            println!("  ⚠️  Drop failed, retrying in 1s... ({} retries left)", retries);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+
+            // Si todos los reintentos fallaron
+            Err(SetupError::PgSlotFailed {
                 name: slot_name.to_string(),
-                error: format!("failed to drop slot: {}", e),
-            })?;
-        println!("  ✅ Replication slot {} dropped", slot_name);
-    } else {
-        println!("  ℹ️  Replication slot {} not found (already dropped?)", slot_name);
+                error: format!("failed to drop slot after retries: {}", last_error.unwrap_or_default()),
+            })
+        }
+        None => {
+            println!("  ℹ️  Replication slot {} not found (already dropped?)", slot_name);
+            Ok(())
+        }
     }
-
-    Ok(())
 }
