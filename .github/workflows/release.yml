@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+env:
+  COMPONENT: dbmazz
+  S3_BUCKET: ez-cdc-releases
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,7 +23,7 @@ jobs:
       - name: Install protoc and musl tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools pkg-config libssl-dev
+          sudo apt-get install -y protobuf-compiler musl-tools pkg-config libssl-dev perl make jq
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -39,19 +43,10 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install build dependencies for vendored OpenSSL
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y perl make
-
       - name: Build dbmazz for musl
         env:
           CARGO_TERM_COLOR: always
         run: cargo build --release --target x86_64-unknown-linux-musl --verbose
-
-      - name: Get version
-        id: version
-        run: echo "VERSION=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -60,19 +55,60 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
+      - name: Calculate next version from S3
+        id: version
+        run: |
+          # List all version directories in S3 for this component
+          VERSIONS=$(aws s3 ls "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/" 2>/dev/null | grep -E '^\s*PRE\s+[0-9]+\.[0-9]+\.[0-9]+/' | awk '{print $2}' | tr -d '/' | sort -t. -k1,1n -k2,2n -k3,3n)
+
+          if [ -z "$VERSIONS" ]; then
+            # No versions exist, start at 0.1.0
+            NEXT_VERSION="0.1.0"
+          else
+            # Get the latest version
+            LATEST=$(echo "$VERSIONS" | tail -1)
+            echo "Latest version in S3: $LATEST"
+
+            # Parse and increment patch version
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+            NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          fi
+
+          echo "Next version: $NEXT_VERSION"
+          echo "VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Calculate checksum
+        id: checksum
+        run: |
+          CHECKSUM=$(sha256sum target/x86_64-unknown-linux-musl/release/dbmazz | cut -d' ' -f1)
+          echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
+
       - name: Upload versioned binary to S3
         run: |
+          # Upload to versioned path: s3://ez-cdc-releases/dbmazz/0.1.0/dbmazz-linux-amd64
           aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            s3://ez-cdc-binaries/dbmazz-${{ steps.version.outputs.VERSION }}
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
+
+          # Also upload checksum file
+          echo "${{ steps.checksum.outputs.CHECKSUM }}  dbmazz-linux-amd64" > checksum.txt
+          aws s3 cp checksum.txt \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
 
       - name: Update latest binary in S3
         run: |
+          # Update the latest path for quick access
           aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            s3://ez-cdc-binaries/latest/dbmazz
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
+
+          # Write version marker
+          echo "${{ steps.version.outputs.VERSION }}" > version.txt
+          aws s3 cp version.txt \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
 
       - name: Print deployment info
         run: |
-          echo "✅ Deployed dbmazz version: ${{ steps.version.outputs.VERSION }}"
-          echo "📦 Binaries available at:"
-          echo "   - s3://ez-cdc-binaries/dbmazz-${{ steps.version.outputs.VERSION }}"
-          echo "   - s3://ez-cdc-binaries/latest/dbmazz"
+          echo "Deployed dbmazz version: ${{ steps.version.outputs.VERSION }}"
+          echo "Checksum (SHA256): ${{ steps.checksum.outputs.CHECKSUM }}"
+          echo "Binaries available at:"
+          echo "   - s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
+          echo "   - s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
