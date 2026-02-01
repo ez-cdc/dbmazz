@@ -19,7 +19,7 @@ use crate::sink::starrocks::StarRocksSink;
 use crate::source::postgres::{PostgresSource, build_standby_status_update};
 use crate::state_store::StateStore;
 
-/// Motor principal de CDC que orquesta todos los componentes
+/// Main CDC engine that orchestrates all components
 pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
@@ -27,9 +27,9 @@ pub struct CdcEngine {
 }
 
 impl CdcEngine {
-    /// Crear nuevo CdcEngine
+    /// Create new CdcEngine
     pub async fn new(config: Config) -> Result<Self> {
-        // 1. Crear SharedState
+        // 1. Create SharedState
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
@@ -38,7 +38,7 @@ impl CdcEngine {
         };
         let shared_state = SharedState::new(cdc_config);
 
-        // 2. Inicializar StateStore
+        // 2. Initialize StateStore
         let state_store = StateStore::new(&config.database_url).await?;
         
         Ok(Self {
@@ -48,20 +48,20 @@ impl CdcEngine {
         })
     }
 
-    /// Ejecutar el motor CDC
+    /// Execute CDC engine
     pub async fn run(self) -> Result<()> {
         // Stage: SETUP - gRPC Server
         self.shared_state.set_stage(Stage::Setup, "Starting gRPC server").await;
         self.start_grpc_server();
 
-        // Stage: SETUP - Ejecutar setup automático
+        // Stage: SETUP - Execute automatic setup
         self.shared_state.set_stage(Stage::Setup, "Running automatic setup").await;
         if let Err(e) = self.run_setup().await {
-            // Guardar error en SharedState para Health Check
+            // Save error in SharedState for Health Check
             self.shared_state.set_setup_error(Some(e.to_string())).await;
             self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
-            eprintln!("❌ Setup failed: {}", e);
-            // Mantener gRPC server corriendo para que el control plane pueda consultar el error
+            eprintln!("[ERROR] Setup failed: {}", e);
+            // Keep gRPC server running so control plane can query the error
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
@@ -84,17 +84,17 @@ impl CdcEngine {
         self.shared_state.set_stage(Stage::Setup, "Connecting to StarRocks HTTP endpoint").await;
         let sink = self.init_sink();
 
-        // Verificar conectividad HTTP ANTES de declarar CDC ready
+        // Verify HTTP connectivity BEFORE declaring CDC ready
         if let Err(e) = sink.verify_http_connection().await {
             let error_msg = format!("StarRocks HTTP connection failed: {}", e);
             self.shared_state.set_setup_error(Some(error_msg.clone())).await;
             self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
-            eprintln!("❌ {}", error_msg);
+            eprintln!("[ERROR] {}", error_msg);
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
-        println!("  ✓ StarRocks HTTP endpoint accessible");
+        println!("  [OK] StarRocks HTTP endpoint accessible");
 
         // Stage: SETUP - Pipeline
         self.shared_state.set_stage(Stage::Setup, "Initializing pipeline").await;
@@ -104,7 +104,7 @@ impl CdcEngine {
         self.shared_state.set_stage(Stage::Cdc, "Replicating").await;
         println!("Connected! Streaming CDC events...");
 
-        // 6. Ejecutar main loop
+        // 6. Execute main loop
         self.run_main_loop(
             replication_stream,
             tx,
@@ -113,13 +113,13 @@ impl CdcEngine {
         ).await
     }
 
-    /// Ejecutar setup automático (PostgreSQL + StarRocks)
+    /// Execute automatic setup (PostgreSQL + StarRocks)
     async fn run_setup(&self) -> Result<(), setup::SetupError> {
         let setup_manager = SetupManager::new(self.config.clone());
         setup_manager.run().await
     }
 
-    /// Cargar checkpoint desde StateStore
+    /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
         let last_lsn = self.state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
@@ -136,11 +136,11 @@ impl CdcEngine {
         Ok(start_lsn)
     }
 
-    /// Iniciar servidor gRPC en background
+    /// Start gRPC server in background
     fn start_grpc_server(&self) {
         let grpc_state = self.shared_state.clone();
         let grpc_port = self.config.grpc_port;
-        
+
         tokio::spawn(async move {
             if let Err(e) = grpc::start_grpc_server(grpc_port, grpc_state).await {
                 eprintln!("gRPC server error: {}", e);
@@ -148,7 +148,7 @@ impl CdcEngine {
         });
     }
 
-    /// Inicializar PostgreSQL source
+    /// Initialize PostgreSQL source
     async fn init_source(&self) -> Result<PostgresSource> {
         let source = PostgresSource::new(
             &self.config.database_url,
@@ -159,7 +159,7 @@ impl CdcEngine {
         Ok(source)
     }
 
-    /// Inicializar StarRocks sink
+    /// Initialize StarRocks sink
     fn init_sink(&self) -> Box<StarRocksSink> {
         Box::new(StarRocksSink::new(
             self.config.starrocks_url.clone(),
@@ -169,7 +169,7 @@ impl CdcEngine {
         ))
     }
 
-    /// Inicializar pipeline y retornar canales
+    /// Initialize pipeline and return channels
     fn init_pipeline(
         &self,
         sink: Box<StarRocksSink>,
@@ -191,7 +191,7 @@ impl CdcEngine {
         (tx, feedback_rx)
     }
 
-    /// Main loop de replicación
+    /// Main replication loop
     async fn run_main_loop<S>(
         &self,
         mut replication_stream: S,
@@ -211,8 +211,8 @@ impl CdcEngine {
         loop {
             iteration = iteration.wrapping_add(1);
             
-            // 1. Check state changes cada 256 iteraciones para reducir overhead
-            // Con ~287 eventos/s, esto verifica estado ~1x/segundo en lugar de 287x/segundo
+            // 1. Check state changes every 256 iterations to reduce overhead
+            // With ~287 events/s, this checks state ~1x/second instead of 287x/second
             if iteration & 0xFF == 0 {
                 if let Some(flow) = self.check_state_control_sync(&tx) {
                     match flow {
@@ -271,13 +271,13 @@ impl CdcEngine {
 
         // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
         if self.shared_state.should_skip_slot_cleanup() {
-            println!("⏭️  Skipping slot cleanup (upgrade/restart mode)");
+            println!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
         } else {
             if let Err(e) = setup::cleanup_postgres_resources(
                 &self.config.database_url,
                 &self.config.slot_name,
             ).await {
-                eprintln!("⚠️  Cleanup warning: {}", e);
+                eprintln!("[WARN] Cleanup warning: {}", e);
                 // Non-fatal - continue shutdown
             }
         }
@@ -286,7 +286,7 @@ impl CdcEngine {
         Ok(())
     }
 
-    /// Verificar estado del CDC (Pause/Stop/Draining) - Sincrono
+    /// Check CDC state (Pause/Stop/Draining) - Synchronous
     fn check_state_control_sync(
         &self,
         tx: &mpsc::Sender<crate::source::parser::CdcEvent>,
@@ -316,7 +316,7 @@ impl CdcEngine {
         }
     }
 
-    /// Manejar mensajes de replicación
+    /// Handle replication messages
     async fn handle_replication_message<S>(
         &self,
         msg: WalMessage,
@@ -349,7 +349,7 @@ impl CdcEngine {
         }
     }
 
-    /// Manejar confirmación de checkpoint
+    /// Handle checkpoint confirmation
     async fn handle_checkpoint_feedback<S>(
         &self,
         confirmed_lsn: u64,
@@ -359,31 +359,31 @@ impl CdcEngine {
         S: SinkExt<bytes::Bytes> + Unpin,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        // 1. Actualizar SharedState
+        // 1. Update SharedState
         self.shared_state.confirm_lsn(confirmed_lsn);
 
-        // 2. Guardar checkpoint
+        // 2. Save checkpoint
         if let Err(e) = self.state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await
         {
             eprintln!("Failed to save checkpoint: {}", e);
-            return Ok(()); // No fatal
+            return Ok(()); // Not fatal
         }
 
-        // 3. Confirmar a PostgreSQL
+        // 3. Confirm to PostgreSQL
         let status = build_standby_status_update(confirmed_lsn);
         if let Err(e) = replication_stream.send(status).await {
             eprintln!("Failed to send status update to PostgreSQL: {}", e);
-            return Ok(()); // No fatal
+            return Ok(()); // Not fatal
         }
 
-        println!("✓ Checkpoint confirmed: LSN 0x{:X}", confirmed_lsn);
+        println!("[OK] Checkpoint confirmed: LSN 0x{:X}", confirmed_lsn);
         Ok(())
     }
 }
 
-/// Control de flujo para el loop
+/// Flow control for the loop
 enum ControlFlow {
     Continue,
     Break,

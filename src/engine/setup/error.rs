@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// Errores detallados del proceso de SETUP
+/// Detailed errors from the SETUP process
 #[derive(Debug, Clone)]
 pub enum SetupError {
     // PostgreSQL
@@ -20,7 +20,7 @@ pub enum SetupError {
 }
 
 impl SetupError {
-    /// Mensaje descriptivo para gRPC Health Check
+    /// Descriptive message for gRPC Health Check
     pub fn to_grpc_message(&self) -> String {
         match self {
             SetupError::PgConnectionFailed { host, error } => {

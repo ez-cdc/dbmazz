@@ -15,7 +15,7 @@ use crate::pipeline::schema_cache::{SchemaCache, TableSchema, SchemaDelta};
 pub struct StarRocksSink {
     curl_loader: CurlStreamLoader,
     database: String,
-    mysql_pool: Option<Pool>,  // Pool MySQL para DDL (puerto 9030)
+    mysql_pool: Option<Pool>,  // MySQL pool for DDL (port 9030)
 }
 
 /// Check if a table is internal to dbmazz and should not be replicated
@@ -32,8 +32,8 @@ impl StarRocksSink {
         println!("StarRocksSink initialized:");
         println!("  base_url: {}", base_url);
         println!("  database: {}", database);
-        
-        // Extraer host del base_url para conexión MySQL
+
+        // Extract host from base_url for MySQL connection
         let mysql_host = base_url
             .replace("http://", "")
             .replace("https://", "")
@@ -41,18 +41,18 @@ impl StarRocksSink {
             .next()
             .unwrap_or("starrocks")
             .to_string();
-        
-        // Crear pool MySQL para DDL (puerto 9030)
-        // StarRocks no soporta todas las variables de MySQL, usar prefer_socket=false
+
+        // Create MySQL pool for DDL (port 9030)
+        // StarRocks doesn't support all MySQL variables, use prefer_socket=false
         let mysql_opts = OptsBuilder::default()
             .ip_or_hostname(mysql_host)
             .tcp_port(9030)
             .user(Some(user.clone()))
             .pass(Some(pass.clone()))
             .db_name(Some(database.clone()))
-            .prefer_socket(false);  // Evita el error "Unknown system variable 'socket'"
-        
-        // Crear CurlStreamLoader para Stream Load (usa libcurl con 100-continue)
+            .prefer_socket(false);  // Avoids "Unknown system variable 'socket'" error
+
+        // Create CurlStreamLoader for Stream Load (uses libcurl with 100-continue)
         let curl_loader = CurlStreamLoader::new(
             base_url.clone(),
             database.clone(),
@@ -67,13 +67,13 @@ impl StarRocksSink {
         }
     }
 
-    /// Verifica que el endpoint HTTP de StarRocks (puerto 8040) está accesible
-    /// Esto debe llamarse durante el setup para fallar temprano si hay problemas de red
+    /// Verifies that the StarRocks HTTP endpoint (port 8040) is accessible
+    /// This should be called during setup to fail early if there are network issues
     pub async fn verify_http_connection(&self) -> Result<()> {
         self.curl_loader.verify_connection().await
     }
 
-    /// Convierte un Tuple a JSON usando el schema de la tabla (incluye todas las columnas)
+    /// Converts a Tuple to JSON using the table schema (includes all columns)
     fn tuple_to_json(
         &self,
         tuple: &Tuple,
@@ -81,9 +81,10 @@ impl StarRocksSink {
     ) -> Result<Map> {
         self.tuple_to_json_selective(tuple, schema, false).map(|(row, _)| row)
     }
-    
-    /// Convierte un Tuple a JSON con opcion de excluir columnas TOAST
-    /// Retorna (row, columnas_incluidas) para usar en partial update
+
+
+    /// Converts a Tuple to JSON with option to exclude TOAST columns
+    /// Returns (row, included_columns) for use in partial update
     fn tuple_to_json_selective(
         &self,
         tuple: &Tuple,
@@ -93,10 +94,10 @@ impl StarRocksSink {
         let column_count = schema.columns.len();
         let mut row = Map::with_capacity(column_count);
         let mut included_columns = Vec::with_capacity(column_count);
-        
-        // Iterar sobre columnas y datos en paralelo
+
+        // Iterate over columns and data in parallel
         for (idx, (column, data)) in schema.columns.iter().zip(tuple.cols.iter()).enumerate() {
-            // Si exclude_toast=true y esta columna es TOAST, skip
+            // If exclude_toast=true and this column is TOAST, skip
             if exclude_toast && tuple.is_toast_column(idx) {
                 continue;
             }
@@ -105,15 +106,15 @@ impl StarRocksSink {
                 TupleData::Null => json!(null),
                 TupleData::Toast => {
                     if exclude_toast {
-                        // Ya fue skipped arriba, pero por seguridad
+                        // Already skipped above, but for safety
                         continue;
                     }
-                    // TOAST = dato muy grande no incluido en el WAL
-                    // Si no excluimos, usamos null (indica valor sin cambios)
+                    // TOAST = very large data not included in WAL
+                    // If not excluding, use null (indicates unchanged value)
                     json!(null)
                 },
                 TupleData::Text(bytes) => {
-                    // Convertir bytes a string y luego al tipo apropiado
+                    // Convert bytes to string and then to appropriate type
                     let text = String::from_utf8_lossy(bytes);
                     self.convert_pg_value(&text, column.type_id)
                 }
@@ -125,8 +126,9 @@ impl StarRocksSink {
         
         Ok((row, included_columns))
     }
-    
-    /// Convierte un valor de PostgreSQL al tipo JSON apropiado
+
+
+    /// Converts a PostgreSQL value to the appropriate JSON type
     fn convert_pg_value(&self, text: &str, pg_type_id: u32) -> Value {
         match pg_type_id {
             // Boolean
@@ -148,7 +150,7 @@ impl StarRocksSink {
                     .map(|f| json!(f))
                     .unwrap_or_else(|_| json!(text))
             },
-            // NUMERIC/DECIMAL - mantener como string para precisión
+            // NUMERIC/DECIMAL - keep as string for precision
             1700 => json!(text),
             // Timestamp types
             1114 | 1184 => json!(text),
@@ -156,8 +158,9 @@ impl StarRocksSink {
             _ => json!(text),
         }
     }
-    
-    /// Serializa un batch a JSON bytes sin duplicar buffers.
+
+
+    /// Serializes a batch to JSON bytes without duplicating buffers.
     fn build_body(&self, rows: Vec<Map>) -> Result<Arc<Vec<u8>>> {
         if rows.is_empty() {
             return Ok(Arc::new(Vec::new()));
@@ -172,7 +175,7 @@ impl StarRocksSink {
         Ok(Arc::new(body.into_bytes()))
     }
 
-    /// Envía con reintentos en caso de fallo usando un body preconstruido.
+    /// Sends with retries in case of failure using a prebuilt body.
     async fn send_body_with_retry(
         &self,
         table_name: &str,
@@ -194,16 +197,16 @@ impl StarRocksSink {
                             e
                         ));
                     }
-                    
+
                     eprintln!(
-                        "⚠️  Retry {}/{} for {}: {}", 
-                        attempt, 
-                        max_retries, 
-                        table_name, 
+                        "Retry {}/{} for {}: {}",
+                        attempt,
+                        max_retries,
+                        table_name,
                         e
                     );
-                    
-                    // Backoff exponencial: 100ms, 200ms, 400ms...
+
+                    // Exponential backoff: 100ms, 200ms, 400ms...
                     tokio::time::sleep(
                         Duration::from_millis(100 * 2_u64.pow(attempt))
                     ).await;
@@ -212,7 +215,7 @@ impl StarRocksSink {
         }
     }
 
-    /// Envía un batch de filas a StarRocks via Stream Load (full row) con reintentos.
+    /// Sends a batch of rows to StarRocks via Stream Load (full row) with retries.
     async fn send_with_retry(
         &self,
         table_name: &str,
@@ -225,8 +228,9 @@ impl StarRocksSink {
         }
         self.send_body_with_retry(table_name, body, None, max_retries).await
     }
-    
-    /// Ejecuta DDL en StarRocks via MySQL protocol
+
+
+    /// Executes DDL in StarRocks via MySQL protocol
     async fn execute_ddl(&self, sql: &str) -> Result<()> {
         let pool = self.mysql_pool.as_ref()
             .ok_or_else(|| anyhow!("MySQL pool not initialized"))?;
@@ -239,8 +243,9 @@ impl StarRocksSink {
         
         Ok(())
     }
-    
-    /// Convierte tipo PostgreSQL a tipo StarRocks
+
+
+    /// Converts PostgreSQL type to StarRocks type
     fn pg_type_to_starrocks(&self, pg_type: u32) -> &'static str {
         match pg_type {
             16 => "BOOLEAN",           // bool
@@ -259,8 +264,9 @@ impl StarRocksSink {
             _ => "STRING",             // default
         }
     }
-    
-    /// Aplica cambios de schema (agrega columnas nuevas)
+
+
+    /// Applies schema changes (adds new columns)
     pub async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()> {
         for col in &delta.added_columns {
             let sr_type = self.pg_type_to_starrocks(col.pg_type_id);
@@ -268,21 +274,21 @@ impl StarRocksSink {
                 "ALTER TABLE {}.{} ADD COLUMN {} {}",
                 self.database, delta.table_name, col.name, sr_type
             );
-            
-            // Intentar ejecutar DDL, ignorar error si columna ya existe
+
+            // Try to execute DDL, ignore error if column already exists
             match self.execute_ddl(&sql).await {
                 Ok(_) => {
                     println!(
-                        "✅ Schema evolution: added column {} ({}) to {}", 
+                        "Schema evolution: added column {} ({}) to {}",
                         col.name, sr_type, delta.table_name
                     );
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    // StarRocks retorna "Duplicate column name" si columna ya existe
+                    // StarRocks returns "Duplicate column name" if column already exists
                     if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
                         println!(
-                            "⚠️  Column {} already exists in {}, skipping",
+                            "Column {} already exists in {}, skipping",
                             col.name, delta.table_name
                         );
                     } else {
@@ -296,8 +302,9 @@ impl StarRocksSink {
         }
         Ok(())
     }
-    
-    /// Envía partial update con reintentos en caso de fallo
+
+
+    /// Sends partial update with retries in case of failure
     async fn send_partial_update_with_retry(
         &self,
         table_name: &str,
@@ -322,11 +329,11 @@ impl Sink for StarRocksSink {
         schema_cache: &SchemaCache,
         lsn: u64
     ) -> Result<()> {
-        // Cache timestamp para toda el batch (evita llamadas repetidas)
+        // Cache timestamp for entire batch (avoids repeated calls)
         let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-        
-        // Estructura: (relation_id, toast_bitmap) -> (rows, columns)
-        // Agrupamos por tabla Y por patron de TOAST para optimizar partial updates
+
+        // Structure: (relation_id, toast_bitmap) -> (rows, columns)
+        // Group by table AND TOAST pattern to optimize partial updates
         #[derive(Hash, Eq, PartialEq)]
         struct BatchKey {
             relation_id: u32,
@@ -343,17 +350,18 @@ impl Sink for StarRocksSink {
                         if is_internal_table(&schema.name) {
                             continue;
                         }
-                        // INSERTs siempre son full row (aunque tengan TOAST, enviamos null)
+                        // INSERTs are always full row (even if they have TOAST, we send null)
                         let mut row = self.tuple_to_json(tuple, schema)?;
-                        
-                        // Columnas de auditoría CDC
+
+                        // CDC audit columns
                         row.insert("dbmazz_op_type", json!(0)); // 0 = INSERT
                         row.insert("dbmazz_is_deleted", json!(false));
                         row.insert("dbmazz_synced_at", json!(&synced_at));
                         row.insert("dbmazz_cdc_version", json!(lsn as i64));
-                        
-                        let key = BatchKey { 
-                            relation_id: *relation_id, 
+
+
+                        let key = BatchKey {
+                            relation_id: *relation_id,
                             toast_bitmap: 0  // Full row
                         };
                         batches.entry(key)
@@ -361,50 +369,51 @@ impl Sink for StarRocksSink {
                             .0.push(row);
                     }
                 },
-                
+
                 CdcMessage::Update { relation_id, new_tuple, .. } => {
                     if let Some(schema) = schema_cache.get(*relation_id) {
                         // Skip internal dbmazz tables
                         if is_internal_table(&schema.name) {
                             continue;
                         }
-                        // Usar POPCNT (SIMD) para detectar TOAST rapido: O(1)
+                        // Use POPCNT (SIMD) to detect TOAST quickly: O(1)
                         let has_toast = new_tuple.has_toast();
-                        
+
                         let (mut row, columns) = if has_toast {
-                            // Partial update: excluir columnas TOAST
+                            // Partial update: exclude TOAST columns
                             let (r, mut cols) = self.tuple_to_json_selective(
                                 new_tuple, schema, true
                             )?;
-                            
-                            // Agregar columnas de auditoria a la lista
+
+                            // Add audit columns to the list
                             cols.push("dbmazz_op_type".to_string());
                             cols.push("dbmazz_is_deleted".to_string());
                             cols.push("dbmazz_synced_at".to_string());
                             cols.push("dbmazz_cdc_version".to_string());
-                            
+
+
                             (r, Some(cols))
                         } else {
-                            // Full row update (sin TOAST)
+                            // Full row update (no TOAST)
                             (self.tuple_to_json(new_tuple, schema)?, None)
                         };
-                        
-                        // Columnas de auditoría CDC
+
+                        // CDC audit columns
                         row.insert("dbmazz_op_type", json!(1)); // 1 = UPDATE
                         row.insert("dbmazz_is_deleted", json!(false));
                         row.insert("dbmazz_synced_at", json!(&synced_at));
                         row.insert("dbmazz_cdc_version", json!(lsn as i64));
-                        
-                        let key = BatchKey { 
-                            relation_id: *relation_id, 
+
+                        let key = BatchKey {
+                            relation_id: *relation_id,
                             toast_bitmap: new_tuple.toast_bitmap
                         };
-                        
+
                         let entry = batches.entry(key).or_insert_with(|| (Vec::new(), columns.clone()));
                         entry.0.push(row);
                     }
                 },
-                
+
                 CdcMessage::Delete { relation_id, old_tuple } => {
                     if let Some(old) = old_tuple {
                         if let Some(schema) = schema_cache.get(*relation_id) {
@@ -412,17 +421,17 @@ impl Sink for StarRocksSink {
                             if is_internal_table(&schema.name) {
                                 continue;
                             }
-                            // DELETEs siempre son full row (necesitamos todos los campos)
+                            // DELETEs are always full row (we need all fields)
                             let mut row = self.tuple_to_json(old, schema)?;
-                            
-                            // Columnas de auditoría CDC
+
+                            // CDC audit columns
                             row.insert("dbmazz_op_type", json!(2)); // 2 = DELETE
                             row.insert("dbmazz_is_deleted", json!(true)); // Soft delete
                             row.insert("dbmazz_synced_at", json!(&synced_at));
                             row.insert("dbmazz_cdc_version", json!(lsn as i64));
-                            
-                            let key = BatchKey { 
-                                relation_id: *relation_id, 
+
+                            let key = BatchKey {
+                                relation_id: *relation_id,
                                 toast_bitmap: 0  // Full row
                             };
                             batches.entry(key)
@@ -431,13 +440,13 @@ impl Sink for StarRocksSink {
                         }
                     }
                 },
-                
-                // Begin, Commit, Relation, KeepAlive, Unknown - no necesitan sink
+
+                // Begin, Commit, Relation, KeepAlive, Unknown - don't need sink
                 _ => {}
             }
         }
-        
-        // Enviar cada batch agrupado por (tabla, toast_signature)
+
+        // Send each batch grouped by (table, toast_signature)
         for (key, (rows, columns)) in batches {
             if let Some(schema) = schema_cache.get(key.relation_id) {
                 if let Some(cols) = columns {

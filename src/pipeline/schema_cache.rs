@@ -35,13 +35,13 @@ impl SchemaCache {
 
     pub fn update(&mut self, msg: &CdcMessage) -> Option<SchemaDelta> {
         if let CdcMessage::Relation { id, namespace, name, columns, .. } = msg {
-            // Obtener schema anterior (si existe)
+            // Get previous schema (if exists)
             let prev_columns: HashSet<String> = self.cache
                 .get(id)
                 .map(|s| s.columns.iter().map(|c| c.name.clone()).collect())
                 .unwrap_or_default();
-            
-            // Detectar columnas nuevas
+
+            // Detect new columns
             let added: Vec<AddedColumn> = columns.iter()
                 .filter(|c| !prev_columns.contains(&c.name))
                 .map(|c| AddedColumn {
@@ -50,17 +50,17 @@ impl SchemaCache {
                     type_mod: c.type_mod,
                 })
                 .collect();
-            
-            // Actualizar cache
+
+            // Update cache
             self.cache.insert(*id, TableSchema {
                 id: *id,
                 namespace: namespace.clone(),
                 name: name.clone(),
                 columns: columns.clone(),
             });
-            
-            // Retornar delta si hay columnas nuevas
-            // Solo retornar si prev_columns no esta vacio (no es la primera vez que vemos esta tabla)
+
+            // Return delta if there are new columns
+            // Only return if prev_columns is not empty (not the first time we see this table)
             if !added.is_empty() && !prev_columns.is_empty() {
                 return Some(SchemaDelta {
                     table_name: name.clone(),

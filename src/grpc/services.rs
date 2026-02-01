@@ -51,8 +51,8 @@ impl HealthService for HealthServiceImpl {
         let state = self.shared_state.get_state();
         let (stage, stage_detail) = self.shared_state.get_stage().await;
         let error_detail = self.shared_state.get_setup_error().await.unwrap_or_default();
-        
-        // Si hay un error de setup, retornar NOT_SERVING
+
+        // If there is a setup error, return NOT_SERVING
         let status = if !error_detail.is_empty() {
             ServingStatus::NotServing
         } else {
@@ -161,7 +161,7 @@ impl CdcControlService for CdcControlServiceImpl {
         match current {
             CdcState::Running | CdcState::Paused => {
                 self.shared_state.set_state(CdcState::Draining);
-                // Enviar señal de shutdown
+                // Send shutdown signal
                 let _ = self.shared_state.shutdown_tx.send(true);
                 Ok(Response::new(ControlResponse {
                     success: true,
@@ -200,7 +200,7 @@ impl CdcControlService for CdcControlServiceImpl {
                 // Set cleanup flag before triggering shutdown
                 self.shared_state.set_skip_slot_cleanup(req.skip_slot_cleanup);
                 self.shared_state.set_state(CdcState::Stopped);
-                // Enviar señal de shutdown inmediato
+                // Send immediate shutdown signal
                 let _ = self.shared_state.shutdown_tx.send(true);
 
                 let message = if req.skip_slot_cleanup {
@@ -225,7 +225,7 @@ impl CdcControlService for CdcControlServiceImpl {
 
         let mut changes = Vec::new();
 
-        // 0 significa "no cambiar"
+        // 0 means "no change"
         if req.flush_size > 0 {
             config.flush_size = req.flush_size as usize;
             changes.push(format!("flush_size={}", req.flush_size));
@@ -342,9 +342,9 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
             let mut ticker = interval(Duration::from_millis(interval_ms as u64));
             let mut last_events = shared_state.get_events_processed();
             let mut last_time = std::time::Instant::now();
-            
-            // Inicializar CPU tracker que lee directamente de /proc
-            // Esto proporciona métricas consistentes entre Docker y bare metal
+
+            // Initialize CPU tracker that reads directly from /proc
+            // This provides consistent metrics between Docker and bare metal
             let mut cpu_tracker = CpuTracker::new();
 
             loop {
@@ -369,11 +369,11 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
 
                 let timestamp = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs();
 
-                // Leer CPU del proceso desde /proc/[pid]/stat
-                // Consistente entre Docker y bare metal
+                // Read process CPU from /proc/[pid]/stat
+                // Consistent between Docker and bare metal
                 let cpu_millicores = cpu_tracker.get_cpu_millicores();
 
                 let metrics = MetricsResponse {

@@ -1,10 +1,10 @@
-# Arquitectura dbmazz
+# dbmazz Architecture
 
-CDC de alto rendimiento: PostgreSQL → StarRocks.
+High-performance CDC: PostgreSQL → StarRocks.
 
 ---
 
-## Diagrama de Flujo
+## Flow Diagram
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
@@ -23,89 +23,89 @@ CDC de alto rendimiento: PostgreSQL → StarRocks.
                     └─────────────┘
 
 ┌─────────────┐     ┌─────────────┐
-│    gRPC     │◀───▶│   Engine    │  (orquestador del lifecycle)
+│    gRPC     │◀───▶│   Engine    │  (lifecycle orchestrator)
 │   Server    │     │             │
 └─────────────┘     └─────────────┘
 ```
 
 ---
 
-## Módulos
+## Modules
 
-| Archivo/Carpeta | Responsabilidad |
+| File/Folder | Responsibility |
 |-----------------|-----------------|
-| `main.rs` | Entry point minimalista (< 30 líneas) |
-| `config.rs` | Carga de env vars centralizada |
-| **`engine/mod.rs`** | **Orquestador del lifecycle CDC (INIT → SETUP → CDC)** |
-| **`engine/setup/mod.rs`** | **Manager principal del setup automático** |
-| **`engine/setup/postgres.rs`** | **Setup PostgreSQL (REPLICA IDENTITY, Publication, Slot)** |
-| **`engine/setup/starrocks.rs`** | **Setup StarRocks (validación + columnas audit)** |
-| **`engine/setup/error.rs`** | **Tipos de error descriptivos para control plane** |
-| `source/postgres.rs` | Conexión y lectura del WAL stream |
-| `source/parser.rs` | Parser zero-copy con SIMD para `pgoutput` |
-| `sink/starrocks.rs` | Lógica de Stream Load a StarRocks |
-| `sink/curl_loader.rs` | Cliente HTTP con libcurl (100-continue) |
+| `main.rs` | Minimalist entry point (< 30 lines) |
+| `config.rs` | Centralized env var loading |
+| **`engine/mod.rs`** | **CDC lifecycle orchestrator (INIT → SETUP → CDC)** |
+| **`engine/setup/mod.rs`** | **Main automatic setup manager** |
+| **`engine/setup/postgres.rs`** | **PostgreSQL setup (REPLICA IDENTITY, Publication, Slot)** |
+| **`engine/setup/starrocks.rs`** | **StarRocks setup (validation + audit columns)** |
+| **`engine/setup/error.rs`** | **Descriptive error types for control plane** |
+| `source/postgres.rs` | Connection and WAL stream reading |
+| `source/parser.rs` | Zero-copy parser with SIMD for `pgoutput` |
+| `sink/starrocks.rs` | Stream Load logic to StarRocks |
+| `sink/curl_loader.rs` | HTTP client with libcurl (100-continue) |
 | `pipeline/mod.rs` | Batching, backpressure, flush logic |
-| `pipeline/schema_cache.rs` | Cache O(1) de schemas + schema evolution |
-| `grpc/services.rs` | 4 servicios: Health, Control, Status, Metrics |
-| `grpc/state.rs` | SharedState con atomics para métricas |
-| `replication/wal_handler.rs` | Parsing de mensajes WAL (XLogData, KeepAlive) |
-| `state_store.rs` | Persistencia de checkpoints en PostgreSQL |
+| `pipeline/schema_cache.rs` | O(1) schema cache + schema evolution |
+| `grpc/services.rs` | 4 services: Health, Control, Status, Metrics |
+| `grpc/state.rs` | SharedState with atomics for metrics |
+| `replication/wal_handler.rs` | Parsing of WAL messages (XLogData, KeepAlive) |
+| `state_store.rs` | Checkpoint persistence in PostgreSQL |
 
 ---
 
-## Dónde Colocar Código Nuevo
+## Where to Place New Code
 
-| Tipo de cambio | Ubicación |
+| Type of change | Location |
 |----------------|-----------|
-| Nuevo source (MySQL, MongoDB) | `src/source/<name>.rs` + implementar trait |
-| Nuevo sink (ClickHouse, Kafka) | `src/sink/<name>.rs` + implementar trait `Sink` |
-| **Validación de setup** | `src/engine/setup/postgres.rs` o `src/engine/setup/starrocks.rs` |
-| **Nuevo tipo de error setup** | `src/engine/setup/error.rs` → enum `SetupError` |
-| **Lógica del engine** | `src/engine/mod.rs` (fase del lifecycle) |
-| Nueva variable de entorno | Campo en `src/config.rs` → struct `Config` |
-| Nuevo servicio gRPC | `src/grpc/services.rs` + `src/proto/dbmazz.proto` |
-| Helper de parsing | Función en `src/source/parser.rs` |
-| Transformación de datos | `src/pipeline/` (nuevo archivo si es complejo) |
-| Lógica de WAL | `src/replication/wal_handler.rs` |
-| Estado persistente | `src/state_store.rs` |
+| New source (MySQL, MongoDB) | `src/source/<name>.rs` + implement trait |
+| New sink (ClickHouse, Kafka) | `src/sink/<name>.rs` + implement `Sink` trait |
+| **Setup validation** | `src/engine/setup/postgres.rs` or `src/engine/setup/starrocks.rs` |
+| **New setup error type** | `src/engine/setup/error.rs` → enum `SetupError` |
+| **Engine logic** | `src/engine/mod.rs` (lifecycle phase) |
+| New environment variable | Field in `src/config.rs` → struct `Config` |
+| New gRPC service | `src/grpc/services.rs` + `src/proto/dbmazz.proto` |
+| Parsing helper | Function in `src/source/parser.rs` |
+| Data transformation | `src/pipeline/` (new file if complex) |
+| WAL logic | `src/replication/wal_handler.rs` |
+| Persistent state | `src/state_store.rs` |
 
 ---
 
-## Flujo de Datos
+## Data Flow
 
 1. **WAL Reader** (`source/postgres.rs`)
-   - Conecta a PostgreSQL con `replication=database`
-   - Lee stream de replicación lógica
+   - Connects to PostgreSQL with `replication=database`
+   - Reads logical replication stream
 
 2. **Parser** (`source/parser.rs`)
-   - Parsea protocolo `pgoutput` (Begin, Commit, Relation, Insert, Update, Delete)
-   - Zero-copy con `bytes::Bytes`
-   - SIMD para validación UTF-8
+   - Parses `pgoutput` protocol (Begin, Commit, Relation, Insert, Update, Delete)
+   - Zero-copy with `bytes::Bytes`
+   - SIMD for UTF-8 validation
 
 3. **Pipeline** (`pipeline/mod.rs`)
-   - Acumula eventos en batches
-   - Flush por tamaño (`FLUSH_SIZE`) o tiempo (`FLUSH_INTERVAL_MS`)
+   - Accumulates events in batches
+   - Flush by size (`FLUSH_SIZE`) or time (`FLUSH_INTERVAL_MS`)
    - Backpressure via channel capacity
 
 4. **Schema Cache** (`pipeline/schema_cache.rs`)
-   - Cache O(1) de schemas por `relation_id`
-   - Detecta nuevas columnas → schema evolution
+   - O(1) schema cache by `relation_id`
+   - Detects new columns → schema evolution
 
 5. **Sink** (`sink/starrocks.rs`)
-   - Convierte a JSON con `sonic-rs`
-   - Stream Load via HTTP con `curl`
-   - Partial Update para columnas TOAST
+   - Converts to JSON with `sonic-rs`
+   - Stream Load via HTTP with `curl`
+   - Partial Update for TOAST columns
 
 6. **Checkpoint** (`state_store.rs`)
-   - Persiste LSN en tabla `dbmazz_checkpoints`
-   - Confirma a PostgreSQL con `StandbyStatusUpdate`
+   - Persists LSN in `dbmazz_checkpoints` table
+   - Confirms to PostgreSQL with `StandbyStatusUpdate`
 
 ---
 
-## Flujo de Setup Automático
+## Automatic Setup Flow
 
-El módulo `engine/setup/` maneja la configuración automática en el stage `SETUP`:
+The `engine/setup/` module handles automatic configuration in the `SETUP` stage:
 
 ### 1. PostgreSQL Setup (`engine/setup/postgres.rs`)
 
@@ -123,7 +123,7 @@ Create/Verify Replication Slot
 ✅ PostgreSQL Ready
 ```
 
-**Idempotencia**: Detecta recursos existentes (recovery mode) y continúa sin errores.
+**Idempotency**: Detects existing resources (recovery mode) and continues without errors.
 
 ### 2. StarRocks Setup (`engine/setup/starrocks.rs`)
 
@@ -145,12 +145,12 @@ Add Missing Audit Columns:
 
 ### 3. Error Handling (`engine/setup/error.rs`)
 
-Si cualquier paso falla:
-- Error descriptivo guardado en `SharedState`
-- Health Check retorna `NOT_SERVING` con `errorDetail`
-- gRPC server sigue corriendo para consultas del control plane
+If any step fails:
+- Descriptive error saved in `SharedState`
+- Health Check returns `NOT_SERVING` with `errorDetail`
+- gRPC server keeps running for control plane queries
 
-**Ejemplo**:
+**Example**:
 ```rust
 SetupError::PgTableNotFound { table: "orders" }
   ↓
@@ -159,33 +159,33 @@ errorDetail: "Table 'orders' not found in PostgreSQL. Verify the table exists...
 
 ---
 
-## Principios de Diseño
+## Design Principles
 
 ### Zero-copy
 
 ```rust
-// ✅ Usar bytes::Bytes para slices sin copia
+// ✅ Use bytes::Bytes for slices without copying
 let val = data.split_to(len);  // Zero-copy slice
 ```
 
 ### SIMD Optimizations
 
-- `memchr`: búsqueda de bytes O(n/32)
-- `simdutf8`: validación UTF-8 con AVX2
-- `sonic-rs`: JSON parsing SIMD
-- Bitmap `u64` para TOAST: POPCNT, CTZ
+- `memchr`: byte search O(n/32)
+- `simdutf8`: UTF-8 validation with AVX2
+- `sonic-rs`: SIMD JSON parsing
+- Bitmap `u64` for TOAST: POPCNT, CTZ
 
 ### Async Everything
 
 ```rust
-// Todo I/O es async con tokio
+// All I/O is async with tokio
 async fn send_batch(&self, rows: Vec<Row>) -> Result<()>
 ```
 
 ### Trait-based Extensibility
 
 ```rust
-// Nuevos sinks implementan el trait
+// New sinks implement the trait
 #[async_trait]
 pub trait Sink: Send + Sync {
     async fn push_batch(&mut self, batch: &[CdcMessage], ...) -> Result<()>;
@@ -193,10 +193,10 @@ pub trait Sink: Send + Sync {
 }
 ```
 
-### Configuración por Env Vars
+### Configuration via Env Vars
 
 ```rust
-// Todo configurable, nada hardcodeado
+// Everything configurable, nothing hardcoded
 pub struct Config {
     pub database_url: String,      // DATABASE_URL
     pub flush_size: usize,         // FLUSH_SIZE
@@ -207,28 +207,28 @@ pub struct Config {
 
 ---
 
-## Estructura de Directorios
+## Directory Structure
 
 ```
 src/
-├── main.rs              # Entry point (delegación a engine)
+├── main.rs              # Entry point (delegation to engine)
 ├── config.rs            # Config::from_env()
-├── engine.rs            # CdcEngine (orquestador)
+├── engine.rs            # CdcEngine (orchestrator)
 ├── state_store.rs       # Checkpoints
-├── source/              # Fuentes de datos
+├── source/              # Data sources
 │   ├── mod.rs
 │   ├── postgres.rs      # PostgreSQL replication
 │   └── parser.rs        # pgoutput parser
-├── sink/                # Destinos
-│   ├── mod.rs           # Trait Sink
+├── sink/                # Destinations
+│   ├── mod.rs           # Sink trait
 │   ├── starrocks.rs     # StarRocks Stream Load
 │   └── curl_loader.rs   # HTTP client
-├── pipeline/            # Procesamiento
+├── pipeline/            # Processing
 │   ├── mod.rs           # Batching + flush
 │   └── schema_cache.rs  # Schema cache + evolution
-├── grpc/                # API control
+├── grpc/                # Control API
 │   ├── mod.rs           # Server setup
-│   ├── services.rs      # 4 servicios
+│   ├── services.rs      # 4 services
 │   └── state.rs         # SharedState
 ├── replication/         # WAL handling
 │   ├── mod.rs
@@ -236,4 +236,3 @@ src/
 └── proto/               # Protobuf
     └── dbmazz.proto
 ```
-

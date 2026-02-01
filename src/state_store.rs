@@ -13,7 +13,7 @@ pub struct StateStore {
 
 impl StateStore {
     pub async fn new(database_url: &str) -> Result<Self> {
-        // Crear conexión regular (no replicación) para checkpoints
+        // Create regular connection (non-replication) for checkpoints
         let clean_url = database_url
             .replace("?replication=database", "")
             .replace("&replication=database", "")
@@ -26,8 +26,8 @@ impl StateStore {
                 eprintln!("StateStore connection error: {}", e);
             }
         });
-        
-        // Crear tabla de checkpoints
+
+        // Create checkpoints table
         client.execute(
             "CREATE TABLE IF NOT EXISTS dbmazz_checkpoints (
                 slot_name TEXT PRIMARY KEY,

@@ -1,233 +1,232 @@
 # Changelog
 
-Todos los cambios notables de dbmazz serán documentados aquí.
+All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
 ### Added
-- **Setup Automático PostgreSQL**: Configuración cero, `dbmazz` configura todo automáticamente
-  - Verifica que las tablas existen
-  - Configura `REPLICA IDENTITY FULL` automáticamente
-  - Crea/verifica Publication y Replication Slot
-  - Modo recovery: detecta recursos existentes tras caídas
-- **Setup Automático StarRocks**: Columnas de auditoría agregadas automáticamente
+- **Automatic PostgreSQL Setup**: Zero configuration, `dbmazz` configures everything automatically
+  - Verifies that tables exist
+  - Configures `REPLICA IDENTITY FULL` automatically
+  - Creates/verifies Publication and Replication Slot
+  - Recovery mode: detects existing resources after crashes
+- **Automatic StarRocks Setup**: Audit columns added automatically
   - `dbmazz_op_type`, `dbmazz_is_deleted`, `dbmazz_synced_at`, `dbmazz_cdc_version`
-  - Valida conectividad y existencia de tablas
-  - Idempotente: detecta columnas existentes
-- **Error Handling Mejorado**: Mensajes descriptivos para el control plane
-  - Nuevo campo `error_detail` en Health Check
-  - `status: NOT_SERVING` cuando hay errores de setup
-  - gRPC server sigue corriendo para consultas incluso con errores
-- **Métricas de CPU en Millicores**: Monitoreo de consumo de CPU consistente entre entornos
-  - Nuevo campo `cpu_millicores` en `MetricsResponse`
-  - Lectura directa de `/proc/[pid]/stat` (mismo algoritmo que `ps` y `top`)
-  - Consistente entre bare metal, Docker y Kubernetes
-  - 1000 millicores = 100% de 1 core (estándar Kubernetes)
-  - Validado: 3000 ev/s → 45 millicores (4.5% de 1 core)
-  - Eficiencia: 66 eventos/milicore en bare metal
-- **gRPC Reflection**: Servidor gRPC con reflection habilitado para uso simple de `grpcurl` sin archivos `.proto`
-- **Schema Evolution básico**: Detección automática de nuevas columnas y `ALTER TABLE ADD COLUMN` en StarRocks
+  - Validates connectivity and table existence
+  - Idempotent: detects existing columns
+- **Improved Error Handling**: Descriptive messages for the control plane
+  - New `error_detail` field in Health Check
+  - `status: NOT_SERVING` when there are setup errors
+  - gRPC server keeps running for queries even with errors
+- **CPU Metrics in Millicores**: Consistent CPU consumption monitoring across environments
+  - New `cpu_millicores` field in `MetricsResponse`
+  - Direct reading from `/proc/[pid]/stat` (same algorithm as `ps` and `top`)
+  - Consistent across bare metal, Docker and Kubernetes
+  - 1000 millicores = 100% of 1 core (Kubernetes standard)
+  - Validated: 3000 ev/s → 45 millicores (4.5% of 1 core)
+  - Efficiency: 66 events/millicore on bare metal
+- **gRPC Reflection**: gRPC server with reflection enabled for simple use of `grpcurl` without `.proto` files
+- **Basic Schema Evolution**: Automatic detection of new columns and `ALTER TABLE ADD COLUMN` in StarRocks
 
 ### Changed
-- Migración de `reqwest` a `curl` crate (libcurl bindings) para StarRocks Stream Load
-  - Manejo correcto del protocolo `Expect: 100-continue`
-  - Soporte nativo para redirects FE → BE con autenticación
-- **Redirect Inteligente para Autoscaling**: Stream Load soporta StarRocks FE con autoscaling
-  - Conexión al Frontend (puerto 8030) en lugar de Backend directo
-  - Detección automática de redirects HTTP 307 a `127.0.0.1`
-  - Reescritura de hostname para compatibilidad con Docker/Kubernetes
-  - Soporte completo para balanceo de carga y failover entre múltiples BEs
-  - Funciona en bare metal, Docker Compose y Kubernetes sin configuración adicional
-  - **Nota**: Implementación actual no ha sido validada contra mejores prácticas de libcurl (TODO: benchmarks, connection pooling)
-- **Optimización de CPU**: Reducción del overhead del main loop
-  - Migración de `RwLock<CdcState>` a `AtomicU8` para acceso lock-free
-  - State checks reducidos de cada iteración a cada 256 iteraciones
-  - Zero-copy en WAL parsing (`bytes.slice(..)` en lugar de `clone()`)
-  - Pre-allocación de estructuras JSON con capacidad conocida
-- **BREAKING**: Ya no se requiere configurar PostgreSQL manualmente
-  - Publication, Slot y REPLICA IDENTITY ahora son automáticos
-  - Simplifica deployment: solo especifica las tablas
+- Migration from `reqwest` to `curl` crate (libcurl bindings) for StarRocks Stream Load
+  - Correct handling of `Expect: 100-continue` protocol
+  - Native support for FE → BE redirects with authentication
+- **Smart Redirect for Autoscaling**: Stream Load supports StarRocks FE with autoscaling
+  - Connection to Frontend (port 8030) instead of direct Backend
+  - Automatic detection of HTTP 307 redirects to `127.0.0.1`
+  - Hostname rewriting for Docker/Kubernetes compatibility
+  - Full support for load balancing and failover across multiple BEs
+  - Works on bare metal, Docker Compose and Kubernetes without additional configuration
+  - **Note**: Current implementation has not been validated against libcurl best practices (TODO: benchmarks, connection pooling)
+- **CPU Optimization**: Reduction of main loop overhead
+  - Migration from `RwLock<CdcState>` to `AtomicU8` for lock-free access
+  - State checks reduced from every iteration to every 256 iterations
+  - Zero-copy in WAL parsing (`bytes.slice(..)` instead of `clone()`)
+  - Pre-allocation of JSON structures with known capacity
+- **BREAKING**: PostgreSQL manual configuration is no longer required
+  - Publication, Slot and REPLICA IDENTITY are now automatic
+  - Simplifies deployment: just specify the tables
 
 ### Fixed
-- Clarificación comportamiento TOAST:
-  - INSERTs siempre reciben datos completos (incluso > 2KB)
-  - Solo UPDATEs que no modifican columna TOAST envían marcador 'u'
-  - Partial Update preserva valores existentes en StarRocks
-- Compatibilidad Docker: Redirects FE→BE que apuntaban a `127.0.0.1` ahora se reescriben al hostname correcto
+- Clarification of TOAST behavior:
+  - INSERTs always receive complete data (even > 2KB)
+  - Only UPDATEs that don't modify TOAST column send 'u' marker
+  - Partial Update preserves existing values in StarRocks
+- Docker compatibility: FE→BE redirects pointing to `127.0.0.1` are now rewritten to the correct hostname
 
 ---
 
 ## [0.1.0] - 2025-12-11
 
-### Features Principales
+### Main Features
 
-#### 🚀 CDC de Alto Rendimiento
-- Replicación nativa PostgreSQL → StarRocks usando protocolo `pgoutput`
-- Zero-copy parsing con `bytes::Bytes`
-- Optimizaciones SIMD (`memchr`, `simdutf8`, `sonic-rs`)
-- Throughput: 300K+ eventos procesados sin degradación
+#### High-Performance CDC
+- Native PostgreSQL → StarRocks replication using `pgoutput` protocol
+- Zero-copy parsing with `bytes::Bytes`
+- SIMD optimizations (`memchr`, `simdutf8`, `sonic-rs`)
+- Throughput: 300K+ events processed without degradation
 
-#### 🎮 API gRPC para Control Remoto
-- **HealthService**: Health check con lifecycle stages (INIT → SETUP → CDC)
+#### gRPC API for Remote Control
+- **HealthService**: Health check with lifecycle stages (INIT → SETUP → CDC)
 - **CdcControlService**: Pause, Resume, DrainAndStop, Stop, ReloadConfig
-- **CdcStatusService**: Estado actual (LSN, tablas, eventos pendientes)
-- **CdcMetricsService**: Stream de métricas en tiempo real
+- **CdcStatusService**: Current state (LSN, tables, pending events)
+- **CdcMetricsService**: Real-time metrics stream
 
-#### 🔄 Lifecycle Stages
-- `STAGE_INIT`: Inicializando
-- `STAGE_SETUP`: Conectando source/sink, validando tablas
-- `STAGE_CDC`: Replicando activamente
-- Permite al control plane monitorear progreso de inicialización
+#### Lifecycle Stages
+- `STAGE_INIT`: Initializing
+- `STAGE_SETUP`: Connecting source/sink, validating tables
+- `STAGE_CDC`: Actively replicating
+- Allows control plane to monitor initialization progress
 
-#### 📦 Soporte TOAST (Columnas Grandes)
-- Detección automática de columnas TOAST con bitmap de 64-bits
-- StarRocks Partial Update para preservar valores grandes sin enviarlos
-- Optimizaciones SIMD (POPCNT, CTZ) para tracking de columnas
-- Soporta JSONs hasta 10MB sin pérdida de datos
+#### TOAST Support (Large Columns)
+- Automatic detection of TOAST columns with 64-bit bitmap
+- StarRocks Partial Update to preserve large values without sending them
+- SIMD optimizations (POPCNT, CTZ) for column tracking
+- Supports JSONs up to 10MB without data loss
 
-#### 🎯 Checkpointing Robusto
-- Persistencia de LSN en tabla PostgreSQL `dbmazz_checkpoints`
-- Recovery automático desde último checkpoint
-- Confirmación a PostgreSQL vía `StandbyStatusUpdate`
-- Garantía "at-least-once" delivery
+#### Robust Checkpointing
+- LSN persistence in PostgreSQL table `dbmazz_checkpoints`
+- Automatic recovery from last checkpoint
+- Confirmation to PostgreSQL via `StandbyStatusUpdate`
+- "At-least-once" delivery guarantee
 
-#### 📊 Auditoría CDC
-- Columnas automáticas en StarRocks:
+#### CDC Auditing
+- Automatic columns in StarRocks:
   - `dbmazz_op_type`: 0=INSERT, 1=UPDATE, 2=DELETE
   - `dbmazz_is_deleted`: Soft delete flag
-  - `dbmazz_synced_at`: Timestamp de sincronización
-  - `dbmazz_cdc_version`: LSN de PostgreSQL
+  - `dbmazz_synced_at`: Synchronization timestamp
+  - `dbmazz_cdc_version`: PostgreSQL LSN
 
-#### 🏗️ Arquitectura Modular
-- Refactorización: `main.rs` de 284 → 28 líneas (-90%)
-- Módulos separados: `config`, `engine`, `replication`, `grpc`
-- Código testeable y mantenible
+#### Modular Architecture
+- Refactoring: `main.rs` from 284 → 28 lines (-90%)
+- Separate modules: `config`, `engine`, `replication`, `grpc`
+- Testable and maintainable code
 
 ### Performance
 
-| Métrica | Valor |
+| Metric | Value |
 |---------|-------|
-| Throughput | 300K+ eventos |
-| CPU | ~25% bajo carga (287 eps) |
-| Memoria | ~5MB en uso |
-| Lag | <1KB en condiciones normales |
-| Latencia replicación | <5 segundos p99 |
+| Throughput | 300K+ events |
+| CPU | ~25% under load (287 eps) |
+| Memory | ~5MB in use |
+| Lag | <1KB under normal conditions |
+| Replication latency | <5 seconds p99 |
 
-### Optimizaciones Técnicas
+### Technical Optimizations
 
 #### JSON Serialization
-- Migración de `serde_json` → `sonic-rs`
-- Uso de SIMD para parsing JSON ultra-rápido
-- Reducción de 85% en lag bajo carga alta
+- Migration from `serde_json` → `sonic-rs`
+- Use of SIMD for ultra-fast JSON parsing
+- 85% reduction in lag under high load
 
 #### Connection Pooling
-- Reutilización de conexiones HTTP a StarRocks
+- HTTP connection reuse to StarRocks
 - `pool_max_idle_per_host: 10`
 - `tcp_keepalive: 60s`
 
-#### Batching Configurable
-- `FLUSH_SIZE`: Eventos por batch (default: 10000)
-- `FLUSH_INTERVAL_MS`: Intervalo máximo entre flushes (default: 5000ms)
-- Ajustable vía gRPC `ReloadConfig`
+#### Configurable Batching
+- `FLUSH_SIZE`: Events per batch (default: 10000)
+- `FLUSH_INTERVAL_MS`: Maximum interval between flushes (default: 5000ms)
+- Adjustable via gRPC `ReloadConfig`
 
-### Demo Comercial
+### Commercial Demo
 
-#### Características
-- Setup en 1 comando: `./demo-start.sh`
-- PostgreSQL + StarRocks en Docker
-- 3 tablas e-commerce: `orders`, `order_items`, `toast_test`
-- Generador de tráfico configurable (hasta 3000+ eps)
-- Generador de TOAST para probar columnas grandes
-- Dashboard TUI en tiempo real con métricas dinámicas
-- Cleanup automático para demos limpios
+#### Features
+- Setup in 1 command: `./demo-start.sh`
+- PostgreSQL + StarRocks in Docker
+- 3 e-commerce tables: `orders`, `order_items`, `toast_test`
+- Configurable traffic generator (up to 3000+ eps)
+- TOAST generator to test large columns
+- Real-time TUI dashboard with dynamic metrics
+- Automatic cleanup for clean demos
 
-#### Métricas Visibles
-- Counts PostgreSQL vs StarRocks
-- Registros eliminados (soft deletes)
-- Lag de replicación en segundos
-- LSN actual
-- Última sincronización
+#### Visible Metrics
+- PostgreSQL vs StarRocks counts
+- Deleted records (soft deletes)
+- Replication lag in seconds
+- Current LSN
+- Last synchronization
 
-### Validaciones
+### Validations
 
 #### REPLICA IDENTITY FULL
-- Validación automática en startup
-- Warning si no está configurado correctamente
-- Requerido para soft deletes en bases analíticas
+- Automatic validation on startup
+- Warning if not configured correctly
+- Required for soft deletes in analytical databases
 
-### Configuración
+### Configuration
 
-#### Variables de Entorno
-- `DATABASE_URL`: Conexión PostgreSQL con `?replication=database`
-- `SLOT_NAME`: Nombre del replication slot (default: `dbmazz_slot`)
-- `PUBLICATION_NAME`: Nombre de la publicación (default: `dbmazz_pub`)
-- `TABLES`: Lista de tablas separadas por coma (default: `orders,order_items`)
-- `STARROCKS_URL`: URL del Backend de StarRocks
-- `STARROCKS_DB`: Base de datos destino
-- `STARROCKS_USER`: Usuario (default: `root`)
-- `STARROCKS_PASS`: Password (default: vacío)
-- `FLUSH_SIZE`: Eventos por batch (default: 10000)
-- `FLUSH_INTERVAL_MS`: Intervalo de flush (default: 5000)
-- `GRPC_PORT`: Puerto gRPC (default: 50051)
+#### Environment Variables
+- `DATABASE_URL`: PostgreSQL connection with `?replication=database`
+- `SLOT_NAME`: Replication slot name (default: `dbmazz_slot`)
+- `PUBLICATION_NAME`: Publication name (default: `dbmazz_pub`)
+- `TABLES`: Comma-separated list of tables (default: `orders,order_items`)
+- `STARROCKS_URL`: StarRocks Backend URL
+- `STARROCKS_DB`: Target database
+- `STARROCKS_USER`: User (default: `root`)
+- `STARROCKS_PASS`: Password (default: empty)
+- `FLUSH_SIZE`: Events per batch (default: 10000)
+- `FLUSH_INTERVAL_MS`: Flush interval (default: 5000)
+- `GRPC_PORT`: gRPC port (default: 50051)
 
-### Dependencias Principales
+### Main Dependencies
 
-- `tokio-postgres` (Materialize fork): Replicación lógica
-- `tonic` + `prost`: Servidor gRPC
-- `sonic-rs`: JSON con SIMD
-- `curl`: Bindings a libcurl para Stream Load
-- `mysql_async`: Cliente MySQL para DDL en StarRocks
-- `hashbrown`: HashMap de alto rendimiento
-- `memchr` + `simdutf8`: Optimizaciones SIMD
-- `libc`: Acceso a syscalls de Linux para métricas de CPU
+- `tokio-postgres` (Materialize fork): Logical replication
+- `tonic` + `prost`: gRPC server
+- `sonic-rs`: JSON with SIMD
+- `curl`: libcurl bindings for Stream Load
+- `mysql_async`: MySQL client for DDL in StarRocks
+- `hashbrown`: High-performance HashMap
+- `memchr` + `simdutf8`: SIMD optimizations
+- `libc`: Access to Linux syscalls for CPU metrics
 
-### Estructura del Proyecto
+### Project Structure
 
 ```
 dbmazz/
 ├── src/
-│   ├── main.rs              # Punto de entrada (28 líneas)
-│   ├── config.rs            # Configuración desde env vars
-│   ├── engine/              # Motor CDC y setup automático
-│   │   ├── mod.rs           # Orquestador principal
-│   │   └── setup/           # Configuración automática PG/SR
-│   ├── grpc/                # API gRPC (4 servicios)
-│   │   ├── services.rs      # Implementación de servicios
-│   │   ├── state.rs         # Estado compartido (AtomicU8)
-│   │   └── cpu_metrics.rs   # Tracker de CPU (/proc)
-│   ├── replication/         # Procesamiento WAL
-│   ├── pipeline/            # Batching y schema cache
-│   ├── sink/                # Destinos (StarRocks)
-│   ├── source/              # Fuentes (PostgreSQL)
+│   ├── main.rs              # Entry point (28 lines)
+│   ├── config.rs            # Configuration from env vars
+│   ├── engine/              # CDC engine and automatic setup
+│   │   ├── mod.rs           # Main orchestrator
+│   │   └── setup/           # Automatic PG/SR configuration
+│   ├── grpc/                # gRPC API (4 services)
+│   │   ├── services.rs      # Service implementation
+│   │   ├── state.rs         # Shared state (AtomicU8)
+│   │   └── cpu_metrics.rs   # CPU tracker (/proc)
+│   ├── replication/         # WAL processing
+│   ├── pipeline/            # Batching and schema cache
+│   ├── sink/                # Destinations (StarRocks)
+│   ├── source/              # Sources (PostgreSQL)
 │   └── state_store.rs       # Checkpointing
-├── demo/                    # Demo comercial completo
-└── CHANGELOG.md             # Este archivo
+├── demo/                    # Complete commercial demo
+└── CHANGELOG.md             # This file
 ```
 
 ### Testing
 
-- ✅ Compilación: Sin errores
-- ✅ Replicación: 100% de datos (20K+ registros)
-- ✅ Checkpoints: Persistiendo correctamente
-- ✅ gRPC API: 16/16 tests pasados
-- ✅ TOAST: 90+ eventos con partial updates
-- ✅ Performance: Sin degradación bajo carga
+- ✅ Compilation: No errors
+- ✅ Replication: 100% of data (20K+ records)
+- ✅ Checkpoints: Persisting correctly
+- ✅ gRPC API: 16/16 tests passed
+- ✅ TOAST: 90+ events with partial updates
+- ✅ Performance: No degradation under load
 
 ---
 
 ## Roadmap
 
-### v0.2.0 (Planeado)
-- [ ] Metrics endpoint Prometheus
-- [ ] Sinks adicionales: Kafka, ClickHouse
-- [ ] Configuración YAML (además de env vars)
-- [ ] Snapshot inicial (antes de CDC)
-- [ ] Tests unitarios completos
+### v0.2.0 (Planned)
+- [ ] Prometheus metrics endpoint
+- [ ] Additional sinks: Kafka, ClickHouse
+- [ ] YAML configuration (in addition to env vars)
+- [ ] Initial snapshot (before CDC)
+- [ ] Complete unit tests
 
-### v0.3.0 (Futuro)
-- [ ] Multi-tenant: múltiples sources → múltiples destinos
-- [ ] UI web para monitoreo
-- [ ] Alerting integrado (Slack, PagerDuty)
-- [x] Schema evolution automático (parcial: agregar columnas funciona, pendiente cambio de tipos y eliminación)
-- [ ] Compresión de payloads
-
+### v0.3.0 (Future)
+- [ ] Multi-tenant: multiple sources → multiple destinations
+- [ ] Web UI for monitoring
+- [ ] Integrated alerting (Slack, PagerDuty)
+- [x] Automatic schema evolution (partial: adding columns works, pending type changes and deletion)
+- [ ] Payload compression

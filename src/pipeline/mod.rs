@@ -36,13 +36,13 @@ impl Pipeline {
         }
     }
 
-    /// Configura el canal de feedback para enviar LSNs confirmados al main loop
+    /// Configure the feedback channel to send confirmed LSNs to the main loop
     pub fn with_feedback_channel(mut self, feedback_tx: mpsc::Sender<u64>) -> Self {
         self.feedback_tx = Some(feedback_tx);
         self
     }
 
-    /// Configura el estado compartido para métricas
+    /// Configure the shared state for metrics
     pub fn with_shared_state(mut self, shared_state: Arc<SharedState>) -> Self {
         self.shared_state = Some(shared_state);
         self
@@ -71,15 +71,15 @@ impl Pipeline {
 
             tokio::select! {
                 Some(event) = self.rx.recv() => {
-                    last_lsn = event.lsn; // Actualizar LSN
-                    
-                    // Detectar cambios de schema
+                    last_lsn = event.lsn; // Update LSN
+
+                    // Detect schema changes
                     if let Some(delta) = self.schema_cache.update(&event.message) {
-                        println!("🔧 Schema change detected for table {}: {} new columns", 
+                        println!("[SCHEMA] Schema change detected for table {}: {} new columns",
                             delta.table_name, delta.added_columns.len());
                         if let Err(e) = self.sink.apply_schema_delta(&delta).await {
-                            eprintln!("❌ Schema evolution failed: {}", e);
-                            // Continuar procesando - no detener el pipeline por errores de DDL
+                            eprintln!("[ERROR] Schema evolution failed: {}", e);
+                            // Continue processing - do not stop the pipeline due to DDL errors
                         }
                     }
                     
@@ -103,12 +103,12 @@ impl Pipeline {
     async fn flush_batch(&mut self, batch: &[CdcMessage], lsn: u64) {
         match self.sink.push_batch(batch, &self.schema_cache, lsn).await {
             Ok(_) => {
-                // Actualizar métrica de batches enviados
+                // Update metric for batches sent
                 if let Some(ref state) = self.shared_state {
                     state.increment_batches();
                 }
 
-                // Enviar LSN al canal de feedback para confirmar checkpoint
+                // Send LSN to the feedback channel to confirm checkpoint
                 if let Some(ref tx) = self.feedback_tx {
                     if let Err(e) = tx.send(lsn).await {
                         eprintln!("Failed to send feedback: {}", e);

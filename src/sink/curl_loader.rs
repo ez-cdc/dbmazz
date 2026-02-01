@@ -3,14 +3,14 @@ use curl::easy::{Easy, List};
 use std::io::Read;
 use std::sync::Arc;
 
-// TODO: Este módulo maneja redirects FE→BE de StarRocks con reescritura de 127.0.0.1.
-// No se ha validado si esta implementación es óptima en términos de:
-// - Performance (double request overhead, manejo de conexiones)
-// - Mejores prácticas de libcurl (connection pooling, reuse, timeouts)
-// - Manejo de errores en redirects (límite de redirects, ciclos)
-// Considerar refactorizar con un HTTP client async (hyper/reqwest) o validar con benchmarks.
+// TODO: This module handles FE->BE redirects from StarRocks with 127.0.0.1 rewriting.
+// It has not been validated whether this implementation is optimal in terms of:
+// - Performance (double request overhead, connection handling)
+// - libcurl best practices (connection pooling, reuse, timeouts)
+// - Redirect error handling (redirect limit, loops)
+// Consider refactoring with an async HTTP client (hyper/reqwest) or validating with benchmarks.
 
-/// Resultado de un Stream Load
+/// Result of a Stream Load
 #[derive(Debug)]
 pub struct LoadResult {
     pub status: String,
@@ -18,7 +18,7 @@ pub struct LoadResult {
     pub message: String,
 }
 
-/// Cliente Stream Load usando libcurl (soporta Expect: 100-continue correctamente)
+/// Stream Load client using libcurl (supports Expect: 100-continue correctly)
 pub struct CurlStreamLoader {
     base_url: String,
     database: String,
@@ -36,8 +36,8 @@ impl CurlStreamLoader {
         }
     }
 
-    /// Verifica que el endpoint HTTP de StarRocks (puerto 8040) está accesible
-    /// Hace un GET simple al endpoint base para validar conectividad
+    /// Verifies that the StarRocks HTTP endpoint (port 8040) is accessible
+    /// Performs a simple GET to the base endpoint to validate connectivity
     pub async fn verify_connection(&self) -> Result<()> {
         let url = self.base_url.clone();
 
@@ -47,7 +47,7 @@ impl CurlStreamLoader {
             easy.timeout(std::time::Duration::from_secs(10))?;
             easy.connect_timeout(std::time::Duration::from_secs(5))?;
 
-            // Solo queremos verificar conectividad, no nos importa la respuesta
+            // We only want to verify connectivity, we don't care about the response
             let mut response = Vec::new();
             {
                 let mut transfer = easy.transfer();
@@ -69,7 +69,7 @@ impl CurlStreamLoader {
         .map_err(|e| anyhow!("Task join error: {}", e))?
     }
 
-    /// Envía datos a StarRocks via Stream Load (ejecuta en thread pool para no bloquear async)
+    /// Sends data to StarRocks via Stream Load (executes in thread pool to avoid blocking async)
     pub async fn send(
         &self,
         table_name: &str,
@@ -84,8 +84,8 @@ impl CurlStreamLoader {
         let pass = self.pass.clone();
         let table = table_name.to_string();
         let body = body.clone();
-        
-        // spawn_blocking para no bloquear el runtime async
+
+        // spawn_blocking to avoid blocking the async runtime
         tokio::task::spawn_blocking(move || {
             Self::send_sync(&url, &user, &pass, &table, body, partial_columns)
         })
@@ -101,45 +101,45 @@ impl CurlStreamLoader {
         body: Arc<Vec<u8>>,
         partial_columns: Option<Vec<String>>,
     ) -> Result<LoadResult> {
-        // Extraer hostname original para reescribir redirects de 127.0.0.1
+        // Extract original hostname to rewrite 127.0.0.1 redirects
         let original_hostname = Self::extract_hostname(url)?;
-        
+
         let mut easy = Easy::new();
-        
-        // NO seguir redirects automáticamente - los manejaremos manualmente
+
+        // DO NOT follow redirects automatically - we'll handle them manually
         easy.follow_location(false)?;
-        
-        // URL y método PUT
+
+        // URL and PUT method
         easy.url(url)?;
         easy.put(true)?;
-        
-        // Autenticación básica
+
+        // Basic authentication
         easy.username(user)?;
         easy.password(pass)?;
-        
+
         // Headers
         let mut headers = List::new();
-        headers.append("Expect: 100-continue")?; // CRÍTICO: esperar confirmación antes de enviar body
+        headers.append("Expect: 100-continue")?; // CRITICAL: wait for confirmation before sending body
         headers.append("format: json")?;
         headers.append("strip_outer_array: true")?;
         headers.append("ignore_json_size: true")?;
         headers.append("max_filter_ratio: 0.2")?;
-        
-        // Headers de partial update si existen
+
+        // Partial update headers if present
         let partial_cols_clone = partial_columns.clone();
         if let Some(ref cols) = partial_columns {
             headers.append("partial_update: true")?;
             headers.append("partial_update_mode: row")?;
             headers.append(&format!("columns: {}", cols.join(",")))?;
-            println!("🔄 Partial update for {}: {} columns", table_name, cols.len());
+            println!("Partial update for {}: {} columns", table_name, cols.len());
         }
-        
+
         easy.http_headers(headers)?;
-        
-        // Configurar body - libcurl manejará el protocolo 100-continue correctamente
+
+        // Configure body - libcurl will handle 100-continue protocol correctly
         let body_len = body.len();
         easy.post_field_size(body_len as u64)?;
-        easy.upload(true)?;  // Habilitar modo upload para PUT
+        easy.upload(true)?;  // Enable upload mode for PUT
         
         let body_for_read = body.clone();
         let mut offset: usize = 0;
@@ -156,15 +156,15 @@ impl CurlStreamLoader {
         
         // Timeout
         easy.timeout(std::time::Duration::from_secs(30))?;
-        
-        // Buffer para la respuesta y headers
+
+        // Buffer for response and headers
         let mut response_body = Vec::new();
         let mut redirect_location = None;
-        
+
         {
             let mut transfer = easy.transfer();
-            
-            // Capturar headers para detectar redirects
+
+            // Capture headers to detect redirects
             transfer.header_function(|header| {
                 let header_str = String::from_utf8_lossy(header);
                 if header_str.to_lowercase().starts_with("location:") {
@@ -182,29 +182,29 @@ impl CurlStreamLoader {
             
             transfer.perform()?;
         }
-        
+
         let response_code = easy.response_code()?;
-        
-        // Si es un redirect (307), seguirlo manualmente con reescritura de hostname
+
+        // If it's a redirect (307), follow it manually with hostname rewriting
         if response_code == 307 {
             if let Some(location) = redirect_location {
-                // Reescribir 127.0.0.1 con el hostname original
+                // Rewrite 127.0.0.1 with original hostname
                 let corrected_location = if location.contains("127.0.0.1") {
                     let rewritten = location.replace("127.0.0.1", &original_hostname);
-                    println!("🔀 Redirect reescrito: {} → {}", location, rewritten);
+                    println!("Redirect rewritten: {} -> {}", location, rewritten);
                     rewritten
                 } else {
                     location
                 };
-                
-                // Hacer segunda petición al BE (redirect)
+
+                // Make second request to BE (redirect)
                 return Self::send_to_be(&corrected_location, user, pass, partial_cols_clone, body.clone());
             }
         }
-        
+
         let response_body = String::from_utf8_lossy(&response_body).to_string();
-        
-        // Parsear respuesta JSON
+
+        // Parse JSON response
         let resp_json: serde_json::Value = serde_json::from_str(&response_body)
             .unwrap_or(serde_json::json!({"Status": "Unknown", "Message": response_body.clone()}));
         
@@ -212,7 +212,7 @@ impl CurlStreamLoader {
         let loaded_rows = resp_json["NumberLoadedRows"].as_u64().unwrap_or(0);
         let message = resp_json["Message"].as_str().unwrap_or("").to_string();
         
-        // Validar respuesta HTTP
+        // Validate HTTP response
         if response_code >= 400 {
             return Err(anyhow!(
                 "HTTP {}: {} - {}", 
@@ -220,30 +220,32 @@ impl CurlStreamLoader {
             ));
         }
         
-        // Validar respuesta de StarRocks
+        // Validate StarRocks response
         if status != "Success" && status != "Publish Timeout" {
-            // "Publish Timeout" es OK - los datos se escribieron
+            // "Publish Timeout" is OK - the data was written
             return Err(anyhow!(
                 "Stream Load failed: {} - {}", 
                 status, message
             ));
         }
-        
+
+
         println!(
-            "✅ Sent {} rows to StarRocks ({}.{})", 
+            "Sent {} rows to StarRocks ({}.{})",
             loaded_rows,
             table_name.split('.').last().unwrap_or(table_name),
             if partial_columns.is_some() { "partial" } else { "full" }
         );
-        
+
         Ok(LoadResult {
             status,
             loaded_rows,
             message,
         })
     }
-    
-    /// Extrae el hostname de una URL (ej: "http://starrocks:8030" → "starrocks")
+
+
+    /// Extracts the hostname from a URL (e.g., "http://starrocks:8030" -> "starrocks")
     fn extract_hostname(url: &str) -> Result<String> {
         let url_parts: Vec<&str> = url.split('/').collect();
         if url_parts.len() < 3 {
@@ -255,8 +257,9 @@ impl CurlStreamLoader {
         
         Ok(hostname.to_string())
     }
-    
-    /// Envía datos al BE después de seguir un redirect (segunda petición)
+
+
+    /// Sends data to BE after following a redirect (second request)
     fn send_to_be(
         be_url: &str,
         user: &str,
@@ -265,16 +268,16 @@ impl CurlStreamLoader {
         body: Arc<Vec<u8>>,
     ) -> Result<LoadResult> {
         let mut easy = Easy::new();
-        
-        // URL del BE (ya corregida)
+
+        // BE URL (already corrected)
         easy.url(be_url)?;
         easy.put(true)?;
-        
-        // Autenticación
+
+        // Authentication
         easy.username(user)?;
         easy.password(pass)?;
-        
-        // Recrear headers (List no es Clone)
+
+        // Recreate headers (List is not Clone)
         let mut headers = List::new();
         headers.append("Expect: 100-continue")?;
         headers.append("format: json")?;
@@ -287,10 +290,11 @@ impl CurlStreamLoader {
             headers.append("partial_update_mode: row")?;
             headers.append(&format!("columns: {}", cols.join(",")))?;
         }
-        
+
+
         easy.http_headers(headers)?;
-        
-        // Configurar body
+
+        // Configure body
         let body_len = body.len();
         easy.post_field_size(body_len as u64)?;
         easy.upload(true)?;
@@ -307,11 +311,12 @@ impl CurlStreamLoader {
             offset += to_copy;
             Ok(to_copy)
         })?;
-        
+
+
         // Timeout
         easy.timeout(std::time::Duration::from_secs(30))?;
-        
-        // Buffer para la respuesta
+
+        // Buffer for response
         let mut response_body = Vec::new();
         {
             let mut transfer = easy.transfer();
@@ -324,8 +329,8 @@ impl CurlStreamLoader {
         
         let response_code = easy.response_code()?;
         let response_body = String::from_utf8_lossy(&response_body).to_string();
-        
-        // Parsear respuesta JSON
+
+        // Parse JSON response
         let resp_json: serde_json::Value = serde_json::from_str(&response_body)
             .unwrap_or(serde_json::json!({"Status": "Unknown", "Message": response_body.clone()}));
         
@@ -333,7 +338,7 @@ impl CurlStreamLoader {
         let loaded_rows = resp_json["NumberLoadedRows"].as_u64().unwrap_or(0);
         let message = resp_json["Message"].as_str().unwrap_or("").to_string();
         
-        // Validar respuesta HTTP
+        // Validate HTTP response
         if response_code >= 400 {
             return Err(anyhow!(
                 "HTTP {}: {} - {}", 

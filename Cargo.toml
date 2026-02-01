@@ -5,7 +5,7 @@ edition = "2021"
 license = "Elastic-2.0"
 
 [dependencies]
-# Fork de Materialize con soporte completo para replicación lógica
+# Materialize fork with full support for logical replication
 tokio-postgres = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master", features = ["with-chrono-0_4", "with-serde_json-1"] }
 tokio = { version = "1.36", features = ["full"] }
 postgres-protocol = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master" }
@@ -41,5 +41,5 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 tonic-build = "0.12"
 
 [profile.release]
-debug = true  # Incluir debug symbols para flamegraph profiling
+debug = true  # Include debug symbols for flamegraph profiling
 

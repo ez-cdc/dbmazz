@@ -7,18 +7,18 @@ use crate::source::parser::{CdcEvent, PgOutputParser};
 use crate::source::postgres::build_standby_status_update;
 use crate::grpc::state::SharedState;
 
-/// Tipos de mensajes de replicación de PostgreSQL
+/// PostgreSQL replication message types
 #[derive(Debug)]
 pub enum WalMessage {
-    /// XLogData: Datos del WAL con LSN
+    /// XLogData: WAL data with LSN
     XLogData { lsn: u64, data: Bytes },
-    /// KeepAlive: Mensaje de keep-alive con LSN
+    /// KeepAlive: Keep-alive message with LSN
     KeepAlive { lsn: u64, reply_requested: bool },
-    /// Tipo desconocido
+    /// Unknown type
     Unknown(u8),
 }
 
-/// Parsear un mensaje de replicación desde bytes
+/// Parse a replication message from bytes
 pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
     if bytes.is_empty() {
         return None;
@@ -35,8 +35,8 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
             let _wal_start = bytes.get_u64();
             let wal_end = bytes.get_u64();
             let _timestamp = bytes.get_u64();
-            
-            // Usar slice en lugar de clone para zero-copy
+
+            // Use slice instead of clone for zero-copy
             Some(WalMessage::XLogData {
                 lsn: wal_end,
                 data: bytes.slice(..),
@@ -60,15 +60,15 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
     }
 }
 
-/// Procesar datos XLogData
+/// Process XLogData data
 pub async fn handle_xlog_data(
-    mut data: Bytes,
+    data: Bytes,
     lsn: u64,
     tx: &mpsc::Sender<CdcEvent>,
     shared_state: &SharedState,
     flush_size: usize,
 ) -> Result<()> {
-    // Actualizar LSN en SharedState
+    // Update LSN in SharedState
     shared_state.update_lsn(lsn);
 
     if data.is_empty() {
@@ -104,7 +104,7 @@ pub async fn handle_xlog_data(
     Ok(())
 }
 
-/// Manejar mensaje KeepAlive
+/// Handle KeepAlive message
 pub async fn handle_keepalive<S>(
     lsn: u64,
     reply_requested: bool,

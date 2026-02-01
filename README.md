@@ -1,114 +1,240 @@
-# dbmazz
+<p align="center">
+  <a href="https://ez-cdc.com">
+    <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="280">
+  </a>
+</p>
 
-**CDC de alto rendimiento en Rust**: Replica datos de PostgreSQL a StarRocks en tiempo real.
+<h1 align="center">dbmazz</h1>
+
+<p align="center">
+  High-performance CDC daemon for streaming PostgreSQL changes to StarRocks
+</p>
+
+<p align="center">
+  <a href="https://ez-cdc.com">Website</a> |
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#configuration">Configuration</a> |
+  <a href="#grpc-api">API</a> |
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
 ---
 
-## 🚀 Quick Start (2 minutos)
+## Overview
+
+**dbmazz** is a Rust-based Change Data Capture (CDC) daemon that enables real-time replication from PostgreSQL to StarRocks. It reads PostgreSQL's Write-Ahead Log (WAL) using logical replication and streams changes to StarRocks using the Stream Load API.
+
+dbmazz is the core replication engine of the [EZ-CDC](https://ez-cdc.com) platform, a complete CDC solution with a BYOC (Bring Your Own Cloud) deployment model. While EZ-CDC provides a full control plane, web portal, and deployment automation, dbmazz can be used independently as a standalone CDC daemon.
+
+---
+
+## Features
+
+- **Real-time CDC**: Streams INSERT, UPDATE, and DELETE operations with sub-second latency
+- **Logical Replication**: Uses PostgreSQL's native logical replication protocol (pgoutput)
+- **Exactly-once Delivery**: LSN-based checkpointing ensures no data loss or duplication
+- **Schema Evolution**: Automatically detects and handles schema changes
+- **Automatic Setup**: Zero-configuration deployment - creates publications, replication slots, and audit columns automatically
+- **gRPC API**: Remote control and monitoring via gRPC with reflection support
+- **Metrics**: Real-time throughput, lag, and health metrics
+- **TOAST Support**: Efficiently handles large column values using StarRocks Partial Update
+- **Soft Deletes**: Converts PostgreSQL DELETEs to soft deletes in StarRocks
+- **High Performance**: SIMD-optimized parsing, zero-copy operations, and connection pooling
+
+---
+
+## Architecture
+
+```
+┌──────────────────┐
+│   PostgreSQL     │
+│                  │
+│  Logical WAL     │
+│  (pgoutput)      │
+└────────┬─────────┘
+         │
+         │ Replication Protocol
+         │
+         ▼
+┌──────────────────────────────────────────┐
+│             dbmazz                       │
+│                                          │
+│  ┌──────────┐   ┌────────┐   ┌────────┐ │
+│  │WAL Reader│──▶│Pipeline│──▶│  Sink  │ │
+│  └──────────┘   └────────┘   └────────┘ │
+│       ▲             │             │      │
+│       │             │             │      │
+│  ┌────┴─────┐  ┌───▼────┐   ┌────▼────┐ │
+│  │Checkpoint│  │ Schema │   │ Metrics │ │
+│  │  Store   │  │ Cache  │   │         │ │
+│  └──────────┘  └────────┘   └─────────┘ │
+│                                          │
+│  ┌──────────────────────────────────┐   │
+│  │       gRPC Server (Tonic)        │   │
+│  │  - Health    - Control           │   │
+│  │  - Metrics   - Status            │   │
+│  └──────────────────────────────────┘   │
+└──────────────────┬───────────────────────┘
+                   │
+                   │ Stream Load API
+                   │
+                   ▼
+         ┌──────────────────┐
+         │    StarRocks     │
+         │                  │
+         │  Target Tables   │
+         │  + Audit Columns │
+         └──────────────────┘
+```
+
+---
+
+## Requirements
+
+- **PostgreSQL**: Version 12 or higher with `wal_level = 'logical'`
+- **StarRocks**: Version 2.5 or higher
+- **Rust**: Version 1.70 or higher (for building from source)
+
+---
+
+## Quick Start
+
+The fastest way to try dbmazz is using the included demo:
 
 ```bash
 cd demo
 ./demo-start.sh
 ```
 
-Verás:
-- ✅ PostgreSQL + StarRocks en Docker
-- ✅ 3 tablas replicándose en tiempo real
-- ✅ Dashboard con métricas en vivo
-- ✅ 300K+ eventos procesados
+This will:
+- Start PostgreSQL and StarRocks in Docker
+- Create 3 sample tables with real-time replication
+- Launch a metrics dashboard
+- Process 300K+ events to demonstrate performance
 
-**Para detener**: `Ctrl+C` o `./demo-stop.sh`
+To stop the demo:
+```bash
+./demo-stop.sh
+```
+
+For detailed demo documentation, see [demo/README.md](demo/README.md).
 
 ---
 
-## 📦 Instalación
+## Installation
 
-### 1. Prerequisitos
+### Build from Source
 
 ```bash
-# Instalar Rust
+# Install Rust toolchain
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Compilar dbmazz
+# Clone the repository
+git clone https://github.com/ez-cdc/dbmazz.git
+cd dbmazz
+
+# Build the release binary
 cargo build --release
+
+# Binary will be available at
+./target/release/dbmazz
 ```
 
-### 2. Configurar PostgreSQL
+### PostgreSQL Configuration
+
+Enable logical replication in PostgreSQL:
 
 ```sql
--- Habilitar replicación lógica
 ALTER SYSTEM SET wal_level = 'logical';
--- Reiniciar PostgreSQL
-
--- ✅ TODO LO DEMÁS ES AUTOMÁTICO:
--- - REPLICA IDENTITY FULL se configura automáticamente
--- - Publication se crea automáticamente
--- - Replication Slot se crea automáticamente
+-- Restart PostgreSQL for the change to take effect
 ```
 
-### 3. Configurar StarRocks
+All other PostgreSQL configuration (publications, replication slots, REPLICA IDENTITY) is handled automatically by dbmazz.
+
+### StarRocks Configuration
+
+Create your target tables in StarRocks with the basic schema:
 
 ```sql
--- Crear tabla (estructura básica solamente)
 CREATE TABLE my_table (
     id INT,
-    name VARCHAR(100)
-    -- ... tus columnas ...
+    name VARCHAR(100),
+    email VARCHAR(255)
+    -- ... your columns ...
 )
 PRIMARY KEY (id)
 DISTRIBUTED BY HASH(id);
-
--- ✅ COLUMNAS DE AUDITORÍA SE AGREGAN AUTOMÁTICAMENTE:
--- - dbmazz_op_type (TINYINT): 0=INSERT, 1=UPDATE, 2=DELETE
--- - dbmazz_is_deleted (BOOLEAN): Soft delete flag
--- - dbmazz_synced_at (DATETIME): Timestamp CDC
--- - dbmazz_cdc_version (BIGINT): LSN PostgreSQL
 ```
 
-### 4. Variables de Entorno
+dbmazz will automatically add the following audit columns:
+- `dbmazz_op_type` (TINYINT): Operation type (0=INSERT, 1=UPDATE, 2=DELETE)
+- `dbmazz_is_deleted` (BOOLEAN): Soft delete flag
+- `dbmazz_synced_at` (DATETIME): CDC synchronization timestamp
+- `dbmazz_cdc_version` (BIGINT): PostgreSQL LSN at time of change
+
+---
+
+## Configuration
+
+dbmazz is configured entirely through environment variables:
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes | - | PostgreSQL connection string with `replication=database` parameter |
+| `SLOT_NAME` | Yes | - | Replication slot name (created automatically if missing) |
+| `PUBLICATION_NAME` | Yes | - | Publication name (created automatically if missing) |
+| `TABLES` | Yes | - | Comma-separated list of tables to replicate (e.g., "orders,order_items") |
+| `STARROCKS_URL` | Yes | - | StarRocks BE HTTP endpoint (e.g., "http://localhost:8040") |
+| `STARROCKS_DB` | Yes | - | Target database name in StarRocks |
+| `STARROCKS_USER` | Yes | - | StarRocks username |
+| `STARROCKS_PASS` | No | "" | StarRocks password |
+| `FLUSH_SIZE` | No | 1500 | Number of events per batch before flushing to StarRocks |
+| `FLUSH_INTERVAL_MS` | No | 5000 | Maximum time (ms) between flushes |
+| `GRPC_PORT` | No | 50051 | gRPC server port for control and monitoring |
+
+### Example Configuration
 
 ```bash
-# PostgreSQL
-export DATABASE_URL="postgres://user:pass@localhost:5432/db?replication=database"
+# PostgreSQL source
+export DATABASE_URL="postgres://user:pass@localhost:5432/mydb?replication=database"
 export SLOT_NAME="dbmazz_slot"
 export PUBLICATION_NAME="dbmazz_pub"
-export TABLES="orders,order_items"
+export TABLES="orders,order_items,customers"
 
-# StarRocks
-export STARROCKS_URL="http://localhost:8040"  # Puerto BE
-export STARROCKS_DB="my_db"
+# StarRocks target
+export STARROCKS_URL="http://localhost:8040"
+export STARROCKS_DB="analytics"
 export STARROCKS_USER="root"
-export STARROCKS_PASS=""
+export STARROCKS_PASS="mypassword"
 
-# Pipeline (opcional)
-export FLUSH_SIZE="1500"           # Eventos por batch
-export FLUSH_INTERVAL_MS="5000"    # Flush cada 5 segundos
+# Performance tuning (optional)
+export FLUSH_SIZE="2000"
+export FLUSH_INTERVAL_MS="3000"
 
-# gRPC (opcional)
+# gRPC API (optional)
 export GRPC_PORT="50051"
-```
 
-### 5. Ejecutar
-
-```bash
+# Start the daemon
 ./target/release/dbmazz
 ```
 
 ---
 
-## 🎮 API gRPC
+## gRPC API
 
-dbmazz expone una API gRPC para control y monitoreo:
+dbmazz exposes a gRPC API for remote control and monitoring. The server has **gRPC Reflection** enabled, so tools like `grpcurl` work without `.proto` files.
 
-> **Nota**: El servidor tiene **gRPC Reflection** habilitado, por lo que `grpcurl` funciona sin necesidad de especificar archivos `.proto`.
+### Services
 
-### Health Check con Lifecycle Stages
+#### 1. HealthService
+
+Check daemon health and lifecycle stage:
 
 ```bash
 grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 ```
 
-**Respuesta (exitosa)**:
+Response (healthy):
 ```json
 {
   "status": "SERVING",
@@ -118,49 +244,51 @@ grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 }
 ```
 
-**Respuesta (con error)**:
+Response (error):
 ```json
 {
   "status": "NOT_SERVING",
   "stage": "STAGE_SETUP",
   "stageDetail": "Setup failed",
-  "errorDetail": "Table 'my_table' not found in PostgreSQL. Verify the table exists and is accessible."
+  "errorDetail": "Table 'orders' not found in PostgreSQL. Verify the table exists and is accessible."
 }
 ```
 
-**Stages**:
-- `STAGE_INIT`: Inicializando
-- `STAGE_SETUP`: Configurando PostgreSQL y StarRocks automáticamente
-- `STAGE_CDC`: Replicando activamente
+Lifecycle stages:
+- `STAGE_INIT`: Initializing daemon
+- `STAGE_SETUP`: Configuring PostgreSQL and StarRocks
+- `STAGE_CDC`: Actively replicating
 
-**Error Detail**: Mensajes descriptivos cuando `status: NOT_SERVING`
+#### 2. CdcControlService
 
-### Control Remoto
+Control daemon behavior:
 
 ```bash
-# Pausar CDC
+# Pause replication
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
 
-# Resumir CDC
+# Resume replication
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Resume
 
-# Recargar configuración en caliente
+# Hot-reload configuration
 grpcurl -plaintext -d '{"flush_size": 2000}' localhost:50051 \
   dbmazz.CdcControlService/ReloadConfig
 
-# Detener gracefully
+# Graceful shutdown
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/DrainAndStop
 ```
 
-### Métricas en Tiempo Real
+#### 3. CdcMetricsService
+
+Stream real-time metrics:
 
 ```bash
-# Stream de métricas cada 2 segundos
+# Stream metrics every 2 seconds
 grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 \
   dbmazz.CdcMetricsService/StreamMetrics
 ```
 
-**Respuesta**:
+Response:
 ```json
 {
   "eventsPerSecond": 287.5,
@@ -172,13 +300,15 @@ grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 \
 }
 ```
 
-### Estado Actual
+#### 4. CdcStatusService
+
+Get current replication status:
 
 ```bash
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
 ```
 
-**Respuesta**:
+Response:
 ```json
 {
   "state": "RUNNING",
@@ -190,201 +320,105 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
 }
 ```
 
-### Explorar API con Reflection
+### API Discovery
+
+Explore the API using gRPC reflection:
 
 ```bash
-# Listar todos los servicios
+# List all services
 grpcurl -plaintext localhost:50051 list
 
-# Ver métodos de un servicio
+# Describe a service
 grpcurl -plaintext localhost:50051 describe dbmazz.HealthService
 
-# Ver definición de un mensaje
+# Describe a message type
 grpcurl -plaintext localhost:50051 describe dbmazz.HealthCheckResponse
 ```
 
 ---
 
-## 🏗️ Arquitectura
+## Monitoring
 
-```
-PostgreSQL WAL
-      ↓
-  WAL Reader (tokio-postgres)
-      ↓
-  Parser (zero-copy + SIMD)
-      ↓
-  Schema Cache (O(1) lookup)
-      ↓
-  Pipeline (batching + backpressure)
-      ↓
-  StarRocks Sink (Stream Load)
-      ↓
-  Checkpoint (LSN confirmation)
-```
+### Metrics
 
-### Componentes Principales
+dbmazz exposes the following metrics via gRPC:
 
-| Componente | Tecnología | Propósito |
-|------------|------------|-----------|
-| **WAL Reader** | `tokio-postgres` | Conexión nativa replicación lógica |
-| **Parser** | `bytes` + SIMD | Zero-copy parsing del protocolo `pgoutput` |
-| **Schema Cache** | `hashbrown` | Lookup O(1) de definiciones de tablas |
-| **Pipeline** | `tokio::mpsc` | Batching y backpressure |
-| **Sink** | `curl` (libcurl) | HTTP Stream Load con 100-continue |
-| **State Store** | PostgreSQL | Persistencia de checkpoints |
-| **gRPC Server** | `tonic` | API de control y métricas |
+| Metric | Description |
+|--------|-------------|
+| `eventsPerSecond` | Throughput of events processed |
+| `lagBytes` | Replication lag in bytes |
+| `lagEvents` | Number of events pending processing |
+| `memoryBytes` | Current memory usage |
+| `totalEventsProcessed` | Cumulative events processed since start |
+| `totalBatchesSent` | Cumulative batches sent to StarRocks |
 
----
+### Health Checks
 
-## 🎯 Características Destacadas
-
-### ⚙️ Setup Automático (Configuración Cero)
-
-**dbmazz configura todo automáticamente**, sin necesidad de intervención manual:
-
-#### PostgreSQL
-- ✅ Crea **Publication** automáticamente
-- ✅ Crea **Replication Slot** automáticamente
-- ✅ Configura **REPLICA IDENTITY FULL** en todas las tablas
-- ✅ Valida que las tablas existen
-- ✅ **Recovery mode**: Detecta recursos existentes tras caídas
-
-#### StarRocks
-- ✅ Valida conectividad y existencia de tablas
-- ✅ Agrega **columnas de auditoría** automáticamente:
-  - `dbmazz_op_type` (TINYINT): Tipo de operación (0/1/2)
-  - `dbmazz_is_deleted` (BOOLEAN): Flag de soft delete
-  - `dbmazz_synced_at` (DATETIME): Timestamp de sincronización
-  - `dbmazz_cdc_version` (BIGINT): LSN de PostgreSQL
-
-**Antes vs Ahora**:
-```bash
-# ❌ Antes: Configuración manual (5+ comandos SQL)
-psql -c "ALTER TABLE orders REPLICA IDENTITY FULL;"
-psql -c "CREATE PUBLICATION dbmazz_pub FOR TABLE orders;"
-# ... más comandos ...
-
-# ✅ Ahora: Solo especifica las tablas
-export TABLES="orders,order_items"
-./dbmazz  # ¡Todo se configura automáticamente!
-```
-
-**Error Handling**: Si algo falla, el Health Check retorna mensajes descriptivos:
-```json
-{
-  "status": "NOT_SERVING",
-  "errorDetail": "Table 'orders' not found in StarRocks. Create the table before starting CDC."
-}
-```
-
-### Soporte TOAST (Columnas Grandes)
-
-dbmazz maneja automáticamente columnas TOAST (valores >2KB) usando **StarRocks Partial Update**:
-
-- ✅ Detección con bitmap de 64-bits + SIMD
-- ✅ Preserva JSONs hasta 10MB sin re-enviarlos
-- ✅ Zero allocations para tracking de columnas
-
-### Soft Deletes
-
-Los DELETEs de PostgreSQL se convierten en soft deletes en StarRocks:
-
-```sql
--- En StarRocks después de DELETE
-SELECT * FROM orders WHERE dbmazz_is_deleted = FALSE;  -- Registros activos
-SELECT * FROM orders WHERE dbmazz_is_deleted = TRUE;   -- Registros eliminados
-```
-
-### Checkpointing Robusto
-
-- ✅ Persiste LSN en tabla `dbmazz_checkpoints`
-- ✅ Recovery automático desde último checkpoint
-- ✅ Confirma a PostgreSQL para liberar WAL
-- ✅ Garantía "at-least-once" delivery
-
-### Optimizaciones de Performance
-
-- **SIMD**: `memchr`, `simdutf8`, `sonic-rs` para operaciones ultra-rápidas
-- **Zero-copy**: `bytes::Bytes` para evitar copias innecesarias
-- **Connection Pooling**: Reutiliza conexiones HTTP
-- **Batching**: Agrupa eventos para reducir overhead
-
----
-
-## 📊 Performance
-
-Medido en condiciones reales:
-
-| Métrica | Valor |
-|---------|-------|
-| **Throughput** | 300K+ eventos procesados |
-| **CPU** | ~25% (1 core) bajo carga de 287 eps |
-| **Memoria** | ~5MB en uso |
-| **Lag** | <1KB en condiciones normales |
-| **Latencia p99** | <5 segundos |
-
----
-
-## 🔧 Casos de Uso
-
-### 1. Análisis en Tiempo Real
-
-Replica datos transaccionales (PostgreSQL) a base analítica (StarRocks) para dashboards y reportes en tiempo real.
-
-### 2. Data Lake
-
-Replica a StarRocks como staging area antes de ETL a Data Lake.
-
-### 3. Cache Analytics
-
-Mantén caché de datos históricos en StarRocks para consultas rápidas sin impactar PostgreSQL.
-
-### 4. Multi-Region Sync
-
-Replica datos entre regiones usando StarRocks como destino intermedio.
-
----
-
-## 🛠️ Control Plane Integration
-
-dbmazz está diseñado para orquestación por control plane:
+Health checks return detailed error messages for troubleshooting:
 
 ```bash
-# 1. Iniciar instancia con puerto gRPC dinámico
-export GRPC_PORT=50051
-./dbmazz &
-
-# 2. Esperar a que llegue a CDC
-while true; do
-  STAGE=$(grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check | jq -r '.stage')
-  [ "$STAGE" == "STAGE_CDC" ] && break
-  sleep 1
-done
-
-# 3. Monitorear en tiempo real
-grpcurl -plaintext -d '{"interval_ms": 5000}' localhost:50051 \
-  dbmazz.CdcMetricsService/StreamMetrics
-
-# 4. Control dinámico
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
+grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 ```
 
+Common error scenarios:
+- Table not found in PostgreSQL or StarRocks
+- Connection failures
+- Permission issues
+- Replication slot conflicts
+
+### Performance Characteristics
+
+Measured under real-world conditions:
+
+| Metric | Value |
+|--------|-------|
+| Throughput | 300K+ events processed |
+| CPU Usage | ~25% (1 core) at 287 events/sec |
+| Memory Usage | ~5MB |
+| Replication Lag | <1KB under normal load |
+| p99 Latency | <5 seconds |
+
 ---
 
-## 📚 Documentación
+## Contributing
 
-- **[CHANGELOG.md](CHANGELOG.md)**: Historial de cambios y features
-- **[demo/README.md](demo/README.md)**: Guía completa del demo
-
----
-
-## 🤝 Soporte
-
-Para preguntas o issues, contactar al equipo de desarrollo.
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
-## 📄 Licencia
+## License
 
-Este proyecto está licenciado bajo la Elastic License v2.0. Consulta el archivo [LICENSE](../LICENSE) para más detalles.
+This project is licensed under the Elastic License v2.0. See the [LICENSE](../LICENSE) file for details.
+
+The Elastic License v2.0 allows you to:
+- Use dbmazz for commercial and non-commercial purposes
+- Modify and distribute the source code
+- Use dbmazz as part of a larger application
+
+With the following limitations:
+- You may not provide dbmazz as a managed service to third parties
+- You may not remove or obscure licensing, copyright, or trademark notices
+
+For questions about licensing, please contact the project maintainers.
+
+---
+
+## Related Projects
+
+dbmazz is the core replication engine of the **[EZ-CDC](https://ez-cdc.com)** platform:
+
+| Component | Description |
+|-----------|-------------|
+| **[EZ-CDC Platform](https://ez-cdc.com)** | Complete CDC solution with control plane, web portal, and BYOC deployment |
+| **worker-agent** | Rust agent that orchestrates dbmazz daemons in customer VPCs |
+| **control-plane** | Go-based API server for managing CDC deployments |
+
+If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, visit [ez-cdc.com](https://ez-cdc.com). If you need a standalone CDC daemon, dbmazz is the right choice.
+
+---
+
+## Support
+
+- **Website**: [ez-cdc.com](https://ez-cdc.com)
+- **Issues**: [GitHub Issues](https://github.com/ez-cdc/dbmazz/issues)
+- **Documentation**: [ARCHITECTURE.md](ARCHITECTURE.md) | [CONTRIBUTING.md](CONTRIBUTING.md)

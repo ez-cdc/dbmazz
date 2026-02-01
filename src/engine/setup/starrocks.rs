@@ -4,7 +4,7 @@ use mysql_async::{Pool, Conn, prelude::Queryable};
 use super::error::SetupError;
 use crate::config::Config;
 
-/// Columnas de auditoría CDC que deben existir en StarRocks
+/// CDC audit columns that must exist in StarRocks
 const AUDIT_COLUMNS: &[(&str, &str)] = &[
     ("dbmazz_op_type", "TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE'"),
     ("dbmazz_is_deleted", "BOOLEAN COMMENT 'Soft delete flag'"),
@@ -22,24 +22,24 @@ impl<'a> StarRocksSetup<'a> {
         Self { pool, config }
     }
 
-    /// Ejecutar todo el setup de StarRocks
+    /// Execute complete StarRocks setup
     pub async fn run(&self) -> Result<(), SetupError> {
-        println!("🔧 StarRocks Setup:");
-        
-        // 1. Verificar conectividad
+        println!("StarRocks Setup:");
+
+        // 1. Verify connectivity
         self.verify_connection().await?;
-        
-        // 2. Verificar que las tablas existen
+
+        // 2. Verify that tables exist
         self.verify_tables_exist().await?;
-        
-        // 3. Agregar columnas de auditoría
+
+        // 3. Add audit columns
         self.ensure_audit_columns().await?;
-        
-        println!("✅ StarRocks setup complete");
+
+        println!("[OK] StarRocks setup complete");
         Ok(())
     }
 
-    /// Verificar conectividad a StarRocks
+    /// Verify connectivity to StarRocks
     async fn verify_connection(&self) -> Result<(), SetupError> {
         let mut conn = self.pool
             .get_conn()
@@ -58,11 +58,11 @@ impl<'a> StarRocksSetup<'a> {
                 error: e.to_string(),
             })?;
 
-        println!("  ✓ StarRocks connection OK");
+        println!("  [OK] StarRocks connection OK");
         Ok(())
     }
 
-    /// Verificar que todas las tablas existen en StarRocks
+    /// Verify that all tables exist in StarRocks
     async fn verify_tables_exist(&self) -> Result<(), SetupError> {
         let mut conn = self.pool
             .get_conn()
@@ -73,12 +73,12 @@ impl<'a> StarRocksSetup<'a> {
             })?;
 
         for table in &self.config.tables {
-            // Extraer nombre de tabla sin schema (StarRocks no usa schemas)
+            // Extract table name without schema (StarRocks doesn't use schemas)
             let table_name = table.split('.').last().unwrap_or(table);
 
             let exists: Option<i32> = conn
                 .exec_first(
-                    "SELECT 1 FROM information_schema.tables 
+                    "SELECT 1 FROM information_schema.tables
                      WHERE table_schema = ? AND table_name = ?",
                     (&self.config.starrocks_db, table_name),
                 )
@@ -94,13 +94,13 @@ impl<'a> StarRocksSetup<'a> {
                 });
             }
 
-            println!("  ✓ Table {} exists in StarRocks", table_name);
+            println!("  [OK] Table {} exists in StarRocks", table_name);
         }
 
         Ok(())
     }
 
-    /// Asegurar que todas las tablas tienen columnas de auditoría
+    /// Ensure all tables have audit columns
     async fn ensure_audit_columns(&self) -> Result<(), SetupError> {
         for table in &self.config.tables {
             let table_name = table.split('.').last().unwrap_or(table);
@@ -109,7 +109,7 @@ impl<'a> StarRocksSetup<'a> {
         Ok(())
     }
 
-    /// Agregar columnas de auditoría a una tabla específica
+    /// Add audit columns to a specific table
     async fn ensure_audit_columns_for_table(&self, table: &str) -> Result<(), SetupError> {
         let mut conn = self.pool
             .get_conn()
@@ -119,14 +119,14 @@ impl<'a> StarRocksSetup<'a> {
                 error: e.to_string(),
             })?;
 
-        // Obtener columnas existentes
+        // Get existing columns
         let existing_columns = self.get_table_columns(&mut conn, table).await?;
 
-        // Agregar las que faltan
+        // Add missing columns
         for (col_name, col_def) in AUDIT_COLUMNS {
             if !existing_columns.contains(&col_name.to_string()) {
-                println!("  🔧 Adding audit column {} to {}", col_name, table);
-                
+                println!("  Adding audit column {} to {}", col_name, table);
+
                 let sql = format!(
                     "ALTER TABLE {}.{} ADD COLUMN {} {}",
                     self.config.starrocks_db, table, col_name, col_def
@@ -139,20 +139,20 @@ impl<'a> StarRocksSetup<'a> {
                         error: e.to_string(),
                     })?;
 
-                println!("  ✅ Column {} added to {}", col_name, table);
+                println!("  [OK] Column {} added to {}", col_name, table);
             } else {
-                println!("  ✓ Column {} already exists in {}", col_name, table);
+                println!("  [OK] Column {} already exists in {}", col_name, table);
             }
         }
 
         Ok(())
     }
 
-    /// Obtener lista de columnas de una tabla
+    /// Get list of columns for a table
     async fn get_table_columns(&self, conn: &mut Conn, table: &str) -> Result<Vec<String>, SetupError> {
         let rows: Vec<(String,)> = conn
             .exec(
-                "SELECT COLUMN_NAME FROM information_schema.columns 
+                "SELECT COLUMN_NAME FROM information_schema.columns
                  WHERE table_schema = ? AND table_name = ?",
                 (&self.config.starrocks_db, table),
             )
@@ -166,9 +166,9 @@ impl<'a> StarRocksSetup<'a> {
     }
 }
 
-/// Helper para crear pool de conexiones a StarRocks
+/// Helper to create StarRocks connection pool
 pub fn create_starrocks_pool(config: &Config) -> Result<Pool, SetupError> {
-    // Extraer host del URL
+    // Extract host from URL
     let host = config.starrocks_url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
@@ -182,7 +182,7 @@ pub fn create_starrocks_pool(config: &Config) -> Result<Pool, SetupError> {
         .user(Some(config.starrocks_user.clone()))
         .pass(Some(config.starrocks_pass.clone()))
         .db_name(Some(config.starrocks_db.clone()))
-        .prefer_socket(false); // Forzar TCP, no usar socket
+        .prefer_socket(false); // Force TCP, don't use socket
 
     Ok(Pool::new(opts))
 }

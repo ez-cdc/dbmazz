@@ -8,7 +8,7 @@ pub use error::SetupError;
 pub use postgres::cleanup_postgres_resources;
 use crate::config::Config;
 
-/// Manager principal del proceso de SETUP
+/// Main manager for the SETUP process
 pub struct SetupManager {
     config: Config,
 }
@@ -18,7 +18,7 @@ impl SetupManager {
         Self { config }
     }
 
-    /// Ejecutar todo el setup
+    /// Execute complete setup
     pub async fn run(&self) -> Result<(), SetupError> {
         println!("\n═══════════════════════════════════════");
         println!("        SETUP PHASE");
@@ -26,25 +26,25 @@ impl SetupManager {
 
         // 1. Setup PostgreSQL
         self.setup_postgres().await?;
-        
+
         // 2. Setup StarRocks
         self.setup_starrocks().await?;
 
         println!("\n═══════════════════════════════════════");
-        println!("    ✅ SETUP COMPLETE");
+        println!("    [OK] SETUP COMPLETE");
         println!("═══════════════════════════════════════\n");
 
         Ok(())
     }
 
-    /// Setup de PostgreSQL
+    /// PostgreSQL setup
     async fn setup_postgres(&self) -> Result<(), SetupError> {
         let client = postgres::create_postgres_client(&self.config.database_url).await?;
         let pg_setup = postgres::PostgresSetup::new(&client, &self.config);
         pg_setup.run().await
     }
 
-    /// Setup de StarRocks
+    /// StarRocks setup
     async fn setup_starrocks(&self) -> Result<(), SetupError> {
         let pool = starrocks::create_starrocks_pool(&self.config)?;
         let sr_setup = starrocks::StarRocksSetup::new(&pool, &self.config);

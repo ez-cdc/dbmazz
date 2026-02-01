@@ -1,7 +1,7 @@
 syntax = "proto3";
 package dbmazz;
 
-// Health Check (compatible con grpc-health-probe)
+// Health Check (compatible with grpc-health-probe)
 service HealthService {
   rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 }
@@ -25,12 +25,12 @@ message HealthCheckResponse {
   }
   
   ServingStatus status = 1;
-  Stage stage = 2;              // Etapa actual del ciclo de vida
-  string stage_detail = 3;      // Detalle de la etapa actual
-  string error_detail = 4;      // Detalle del error si stage != CDC
+  Stage stage = 2;              // Current lifecycle stage
+  string stage_detail = 3;      // Current stage detail
+  string error_detail = 4;      // Error detail if stage != CDC
 }
 
-// Control del CDC
+// CDC Control
 service CdcControlService {
   rpc Pause(PauseRequest) returns (ControlResponse);
   rpc Resume(ResumeRequest) returns (ControlResponse);
@@ -58,7 +58,7 @@ message ControlResponse {
   string message = 2;
 }
 
-// Status del CDC
+// CDC Status
 service CdcStatusService {
   rpc GetStatus(StatusRequest) returns (StatusResponse);
 }
@@ -79,23 +79,23 @@ message StatusResponse {
   repeated string tables = 6;
 }
 
-// Metricas en streaming
+// Streaming metrics
 service CdcMetricsService {
   rpc StreamMetrics(MetricsRequest) returns (stream MetricsResponse);
 }
 
 message MetricsRequest {
-  uint32 interval_ms = 1; // Intervalo entre updates
+  uint32 interval_ms = 1; // Interval between updates
 }
 
 message MetricsResponse {
   uint64 timestamp = 1;
   double events_per_second = 2;
   uint64 lag_bytes = 3;        // current_lsn - confirmed_lsn
-  uint64 lag_events = 4;       // eventos pendientes
+  uint64 lag_events = 4;       // pending events
   uint64 memory_bytes = 5;
   uint64 total_events_processed = 6;
   uint64 total_batches_sent = 7;
-  uint64 cpu_millicores = 8;   // CPU en milicores (1000 = 1 core)
+  uint64 cpu_millicores = 8;   // CPU in millicores (1000 = 1 core)
 }
 

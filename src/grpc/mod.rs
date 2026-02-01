@@ -10,16 +10,16 @@ use services::{health_service, control_service, status_service, metrics_service}
 
 pub use state::{CdcState, CdcConfig, Stage};
 
-/// Inicia el servidor gRPC en el puerto especificado
+/// Starts the gRPC server on the specified port
 pub async fn start_grpc_server(
     port: u16,
     shared_state: Arc<SharedState>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
-    
-    println!("🚀 gRPC server listening on {}", addr);
 
-    // Configurar servicio de reflection para que grpcurl funcione sin .proto
+    println!("gRPC server listening on {}", addr);
+
+    // Configure reflection service so grpcurl works without .proto files
     let reflection_service = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(services::dbmazz::FILE_DESCRIPTOR_SET)
         .build_v1()?;

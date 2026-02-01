@@ -41,7 +41,7 @@ pub struct SharedState {
     pub state: AtomicU8,
     pub stage: RwLock<Stage>,
     pub stage_detail: RwLock<String>,
-    pub setup_error: RwLock<Option<String>>,  // Error descriptivo del setup
+    pub setup_error: RwLock<Option<String>>,  // Descriptive setup error
     pub current_lsn: AtomicU64,
     pub confirmed_lsn: AtomicU64,
     pub pending_events: AtomicU64,
@@ -49,7 +49,7 @@ pub struct SharedState {
     pub batches_sent: AtomicU64,
     pub shutdown_tx: watch::Sender<bool>,
     pub config: RwLock<CdcConfig>,
-    // Timestamp del último evento procesado (para calcular events/sec)
+    // Timestamp of last processed event (to calculate events/sec)
     pub last_event_time: RwLock<std::time::Instant>,
     pub events_last_second: AtomicU64,
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
@@ -131,7 +131,7 @@ impl SharedState {
     }
 
     pub fn estimate_memory(&self) -> u64 {
-        // Estimación básica: pending_events * 1KB promedio por evento
+        // Basic estimation: pending_events * 1KB average per event
         self.pending_events.load(Ordering::Relaxed) * 1024
     }
 
@@ -154,7 +154,7 @@ impl SharedState {
         self.setup_error.read().await.clone()
     }
 
-    // Métodos sincronos para estado CDC (sin await)
+    // Synchronous methods for CDC state (no await)
     pub fn get_state(&self) -> CdcState {
         CdcState::from_u8(self.state.load(Ordering::Acquire))
     }

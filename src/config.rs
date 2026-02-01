@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use std::env;
 
-/// Configuración central de dbmazz desde variables de entorno
+/// Central configuration for dbmazz loaded from environment variables
 #[derive(Debug, Clone)]
 pub struct Config {
     // PostgreSQL
@@ -29,7 +29,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Cargar configuración desde variables de entorno
+    /// Load configuration from environment variables
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             // PostgreSQL
@@ -77,7 +77,7 @@ impl Config {
         })
     }
     
-    /// Imprimir banner con configuración
+    /// Print banner with configuration
     pub fn print_banner(&self) {
         println!("Starting dbmazz (High Performance Mode)...");
         println!("Source: Postgres ({})", self.slot_name);

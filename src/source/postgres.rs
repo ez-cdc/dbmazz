@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Difference from Unix epoch in microseconds
 const PG_EPOCH_OFFSET_USEC: i64 = 946_684_800_000_000;
 
-/// Genera timestamp en formato PostgreSQL (microsegundos desde 2000-01-01)
+/// Generates timestamp in PostgreSQL format (microseconds since 2000-01-01)
 pub fn pg_timestamp() -> i64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -16,15 +16,15 @@ pub fn pg_timestamp() -> i64 {
     usec - PG_EPOCH_OFFSET_USEC
 }
 
-/// Construye mensaje StandbyStatusUpdate para confirmar LSN a PostgreSQL
-/// 
-/// Formato del mensaje (34 bytes total):
+/// Builds StandbyStatusUpdate message to confirm LSN to PostgreSQL
+///
+/// Message format (34 bytes total):
 /// - tag: 'r' (1 byte)
-/// - walWritePos: u64 - LSN recibido
-/// - walFlushPos: u64 - LSN confirmado en disco local
-/// - walApplyPos: u64 - LSN aplicado al destino (sink)
-/// - timestamp: i64 - microsegundos desde 2000-01-01
-/// - reply: u8 - 0 = no necesita respuesta
+/// - walWritePos: u64 - received LSN
+/// - walFlushPos: u64 - LSN confirmed to local disk
+/// - walApplyPos: u64 - LSN applied to destination (sink)
+/// - timestamp: i64 - microseconds since 2000-01-01
+/// - reply: u8 - 0 = reply not requested
 pub fn build_standby_status_update(lsn: u64) -> Bytes {
     let mut buf = BytesMut::with_capacity(34);
     buf.put_u8(b'r');           // StandbyStatusUpdate tag
@@ -48,13 +48,13 @@ impl PostgresSource {
         slot_name: String,
         publication_name: String,
     ) -> Result<Self> {
-        // Limpiar URL de parámetros de replicación si existen
+        // Clean URL of replication parameters if they exist
         let clean_url = pg_config
             .replace("?replication=database", "")
             .replace("&replication=database", "")
             .replace("replication=database&", "");
-        
-        // Paso 1: Crear slot de replicación en conexión normal (sin modo replicación)
+
+        // Step 1: Create replication slot on normal connection (without replication mode)
         {
             let (slot_client, slot_connection) = tokio_postgres::connect(&clean_url, NoTls).await?;
             let slot_handle = tokio::spawn(async move {
@@ -63,22 +63,22 @@ impl PostgresSource {
                 }
             });
 
-            // Intentar crear el slot (ignorar si ya existe)
+            // Try to create the slot (ignore if it already exists)
             let _ = slot_client
                 .simple_query(&format!(
                     "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
                     slot_name
                 ))
-                .await; // Ignorar errores (slot puede ya existir)
+                .await; // Ignore errors (slot may already exist)
             
             drop(slot_client);
             let _ = slot_handle.await;
         }
-        
-        // Paso 2: Crear conexión de replicación
+
+        // Step 2: Create replication connection
         let mut config: Config = clean_url.parse()?;
-        
-        // ✅ El fork de Materialize SÍ tiene este método
+
+        // The Materialize fork has this method
         config.replication_mode(tokio_postgres::config::ReplicationMode::Logical);
         
         let (client, connection) = config.connect(NoTls).await?;
@@ -101,7 +101,7 @@ impl PostgresSource {
     }
 
     pub async fn start_replication_from(&self, start_lsn: u64) -> Result<CopyBothDuplex<Bytes>> {
-        // Convertir LSN a formato PostgreSQL (X/Y)
+        // Convert LSN to PostgreSQL format (X/Y)
         let lsn_str = if start_lsn == 0 {
             "0/0".to_string()
         } else {
@@ -124,15 +124,15 @@ impl PostgresSource {
         Ok(stream)
     }
 
-    /// Valida que las tablas tengan REPLICA IDENTITY FULL
-    /// 
-    /// Esto es crítico para StarRocks/ClickHouse porque necesitan todas las columnas
-    /// (incluyendo columnas de partición) para hacer INSERTs de soft deletes.
-    /// 
-    /// Con REPLICA IDENTITY DEFAULT, solo se recibe la PK en DELETEs, lo cual
-    /// es insuficiente para tablas particionadas.
+    /// Validates that tables have REPLICA IDENTITY FULL
+    ///
+    /// This is critical for StarRocks/ClickHouse because they need all columns
+    /// (including partition columns) to perform soft delete INSERTs.
+    ///
+    /// With REPLICA IDENTITY DEFAULT, only the PK is received in DELETEs, which
+    /// is insufficient for partitioned tables.
     pub async fn validate_replica_identity(&self, tables: &[String]) -> Result<()> {
-        // Crear una conexión normal (no de replicación) para consultas
+        // Create a normal connection (not replication) for queries
         let clean_url = self.get_clean_url();
         let (client, connection) = tokio_postgres::connect(&clean_url, NoTls).await?;
         
@@ -143,7 +143,7 @@ impl PostgresSource {
         });
 
         for table in tables {
-            // Parsear schema.table si está calificado
+            // Parse schema.table if qualified
             let parts: Vec<&str> = table.split('.').collect();
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
             
@@ -164,13 +164,13 @@ impl PostgresSource {
 
             match replica_char {
                 'f' => {
-                    println!("✅ Table '{}' has REPLICA IDENTITY FULL", relname);
+                    println!("Table '{}' has REPLICA IDENTITY FULL", relname);
                 }
                 'd' => {
-                    eprintln!("⚠️  WARNING: Table '{}' has REPLICA IDENTITY DEFAULT", relname);
+                    eprintln!("WARNING: Table '{}' has REPLICA IDENTITY DEFAULT", relname);
                     eprintln!("    This may cause issues with soft deletes in StarRocks.");
                     eprintln!("    Run: ALTER TABLE {} REPLICA IDENTITY FULL;", table);
-                    // No fallar, solo advertir - dejar que el usuario decida
+                    // Don't fail, just warn - let the user decide
                 }
                 'n' => {
                     return Err(anyhow::anyhow!(
@@ -181,11 +181,11 @@ impl PostgresSource {
                     ));
                 }
                 'i' => {
-                    println!("ℹ️  Table '{}' has REPLICA IDENTITY INDEX", relname);
+                    println!("Table '{}' has REPLICA IDENTITY INDEX", relname);
                     eprintln!("    Note: For full soft delete support, consider REPLICA IDENTITY FULL");
                 }
                 _ => {
-                    eprintln!("⚠️  Unknown REPLICA IDENTITY '{}' for table '{}'", replica_char, relname);
+                    eprintln!("Unknown REPLICA IDENTITY '{}' for table '{}'", replica_char, relname);
                 }
             }
         }
@@ -193,11 +193,11 @@ impl PostgresSource {
         Ok(())
     }
 
-    /// Obtiene la URL limpia sin parámetros de replicación
+    /// Gets the clean URL without replication parameters
     fn get_clean_url(&self) -> String {
-        // Esta función asume que PostgresSource fue creado con una URL válida
-        // En un escenario real, deberías almacenar la URL original
-        // Por ahora, esto es un placeholder que necesitaría la URL del env
+        // This function assumes PostgresSource was created with a valid URL
+        // In a real scenario, you should store the original URL
+        // For now, this is a placeholder that would need the URL from env
         std::env::var("DATABASE_URL")
             .unwrap_or_default()
             .replace("?replication=database", "")

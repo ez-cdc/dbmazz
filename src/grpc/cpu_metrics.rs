@@ -1,15 +1,15 @@
 use std::fs;
 use std::time::Instant;
 
-/// Tracker de CPU que lee directamente de /proc/[pid]/stat
-/// 
-/// Este tracker proporciona métricas de CPU consistentes entre:
+/// CPU tracker that reads directly from /proc/[pid]/stat
+///
+/// This tracker provides consistent CPU metrics across:
 /// - Bare metal Linux
 /// - Docker containers
 /// - Kubernetes pods
-/// 
-/// Funciona leyendo directamente /proc/[pid]/stat y calculando
-/// el delta de CPU entre muestras, exactamente como lo hace `ps` y `top`.
+///
+/// It works by reading /proc/[pid]/stat directly and calculating
+/// the CPU delta between samples, exactly like `ps` and `top` do.
 pub struct CpuTracker {
     pid: u32,
     last_utime: u64,
@@ -20,12 +20,14 @@ pub struct CpuTracker {
 }
 
 impl CpuTracker {
-    /// Crear un nuevo tracker para el proceso actual
+    /// Create a new tracker for the current process
     pub fn new() -> Self {
         let pid = std::process::id();
-        
-        // CLK_TCK es la frecuencia del reloj del sistema (típicamente 100 Hz en Linux)
-        // Esto nos permite convertir ticks de CPU a segundos
+
+        // CLK_TCK is the system clock frequency (typically 100 Hz on Linux)
+        // This allows us to convert CPU ticks to seconds
+        // SAFETY: sysconf(_SC_CLK_TCK) is always safe to call on POSIX systems
+        // and returns the number of clock ticks per second.
         let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 };
         
         Self {
@@ -37,24 +39,24 @@ impl CpuTracker {
             initialized: false,
         }
     }
-    
-    /// Lee utime y stime de /proc/[pid]/stat
-    /// 
-    /// Retorna (utime, stime) en ticks de CPU
-    /// utime = tiempo en modo usuario
-    /// stime = tiempo en modo kernel
+
+    /// Read utime and stime from /proc/[pid]/stat
+    ///
+    /// Returns (utime, stime) in CPU ticks
+    /// utime = time in user mode
+    /// stime = time in kernel mode
     fn read_cpu_times(&self) -> Option<(u64, u64)> {
-        // Leer /proc/[pid]/stat
-        // Formato: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime ...
+        // Read /proc/[pid]/stat
+        // Format: pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime ...
         let stat = fs::read_to_string(format!("/proc/{}/stat", self.pid)).ok()?;
-        
-        // El nombre del comando puede contener espacios y paréntesis, así que necesitamos
-        // encontrar el último paréntesis de cierre y partir desde ahí
+
+        // The command name can contain spaces and parentheses, so we need to
+        // find the last closing parenthesis and start from there
         let stat = stat.trim_end();
         let rpar_pos = stat.rfind(')')?;
         let parts: Vec<&str> = stat[rpar_pos + 1..].split_whitespace().collect();
-        
-        // Después del paréntesis de cierre:
+
+        // After the closing parenthesis:
         // 0=state 1=ppid 2=pgrp 3=session 4=tty_nr 5=tpgid 6=flags
         // 7=minflt 8=cminflt 9=majflt 10=cmajflt
         // 11=utime 12=stime
@@ -67,15 +69,15 @@ impl CpuTracker {
         
         Some((utime, stime))
     }
-    
-    /// Obtiene el consumo de CPU en millicores
-    /// 
-    /// Retorna:
-    /// - 1000 millicores = 100% de 1 core
-    /// - 500 millicores = 50% de 1 core
-    /// - 35 millicores = 3.5% de 1 core
-    /// 
-    /// El valor es consistente entre Docker y bare metal.
+
+    /// Get CPU consumption in millicores
+    ///
+    /// Returns:
+    /// - 1000 millicores = 100% of 1 core
+    /// - 500 millicores = 50% of 1 core
+    /// - 35 millicores = 3.5% of 1 core
+    ///
+    /// The value is consistent between Docker and bare metal.
     pub fn get_cpu_millicores(&mut self) -> u64 {
         let Some((utime, stime)) = self.read_cpu_times() else {
             return 0;
@@ -83,8 +85,8 @@ impl CpuTracker {
         
         let now = Instant::now();
         let elapsed_secs = now.duration_since(self.last_time).as_secs_f64();
-        
-        // Primera lectura o intervalo muy corto: solo inicializar estado
+
+        // First read or very short interval: just initialize state
         if !self.initialized || elapsed_secs < 0.1 {
             self.last_utime = utime;
             self.last_stime = stime;
@@ -92,29 +94,29 @@ impl CpuTracker {
             self.initialized = true;
             return 0;
         }
-        
-        // Calcular delta de ticks de CPU desde la última lectura
+
+        // Calculate CPU tick delta since last read
         let delta_utime = utime.saturating_sub(self.last_utime);
         let delta_stime = stime.saturating_sub(self.last_stime);
         let delta_ticks = delta_utime + delta_stime;
-        
-        // Convertir ticks a segundos de CPU usados
+
+        // Convert ticks to CPU seconds used
         // cpu_seconds = ticks / clock_ticks
         let cpu_seconds = delta_ticks as f64 / self.clock_ticks;
-        
-        // Calcular millicores
+
+        // Calculate millicores
         // millicores = (cpu_seconds / elapsed_seconds) * 1000
-        // 
-        // Ejemplo: Si el proceso usó 0.2 segundos de CPU en 1.0 segundos de tiempo real:
-        // millicores = (0.2 / 1.0) * 1000 = 200 millicores = 20% de 1 core
+        //
+        // Example: If the process used 0.2 CPU seconds in 1.0 real seconds:
+        // millicores = (0.2 / 1.0) * 1000 = 200 millicores = 20% of 1 core
         let millicores = (cpu_seconds / elapsed_secs) * 1000.0;
-        
-        // Actualizar estado para la próxima lectura
+
+        // Update state for next read
         self.last_utime = utime;
         self.last_stime = stime;
         self.last_time = now;
-        
-        // Asegurar que el valor no sea negativo o excesivamente alto debido a errores de lectura
+
+        // Ensure the value is not negative or excessively high due to read errors
         millicores.max(0.0).min(100000.0) as u64
     }
 }
@@ -142,7 +144,7 @@ mod tests {
     #[test]
     fn test_cpu_tracker_first_read_returns_zero() {
         let mut tracker = CpuTracker::new();
-        // Primera lectura debe retornar 0 (aún no hay delta)
+        // First read should return 0 (no delta yet)
         let millicores = tracker.get_cpu_millicores();
         assert_eq!(millicores, 0);
         assert!(tracker.initialized);
@@ -151,18 +153,18 @@ mod tests {
     #[test]
     fn test_cpu_tracker_measures_cpu() {
         let mut tracker = CpuTracker::new();
-        
-        // Primera lectura (inicialización)
+
+        // First read (initialization)
         let _ = tracker.get_cpu_millicores();
-        
-        // Esperar un poco para que haya actividad medible
+
+        // Wait a bit for measurable activity
         thread::sleep(Duration::from_millis(100));
-        
-        // Segunda lectura debe retornar un valor razonable
+
+        // Second read should return a reasonable value
         let millicores = tracker.get_cpu_millicores();
-        
-        // El valor debe estar en un rango razonable (0-1000 millicores típicamente)
-        // En tests puede ser bajo porque el proceso está idle
+
+        // The value should be in a reasonable range (0-1000 millicores typically)
+        // In tests it may be low because the process is idle
         assert!(millicores < 10000, "CPU millicores too high: {}", millicores);
     }
 }

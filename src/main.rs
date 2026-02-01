@@ -21,11 +21,11 @@ async fn main() -> Result<()> {
     env_logger::init();
     dotenv().ok();
 
-    // 1. Cargar configuración
+    // 1. Load configuration
     let config = Config::from_env()?;
     config.print_banner();
 
-    // 2. Crear y ejecutar motor CDC
+    // 2. Create and run CDC engine
     let engine = CdcEngine::new(config).await?;
     engine.run().await
 }
