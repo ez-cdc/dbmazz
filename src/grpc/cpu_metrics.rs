@@ -128,6 +128,7 @@ impl Default for CpuTracker {
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
     use std::thread;
