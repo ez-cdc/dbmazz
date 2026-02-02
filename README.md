@@ -1,5 +1,7 @@
 <p align="center">
-  <img src="assets/banner.jpg" alt="EZ-CDC Banner" width="600">
+  <a href="https://ez-cdc.com">
+    <img src="assets/banner.jpg" alt="EZ-CDC Banner" width="600">
+  </a>
 </p>
 
 # dbmazz
@@ -12,7 +14,9 @@ High-performance CDC daemon with pluggable source and sink connectors
 
 dbmazz is a Rust-based Change Data Capture (CDC) daemon that enables real-time replication between databases. It uses a pluggable connector architecture where sources and sinks can be easily added to support new databases.
 
-dbmazz is a core component of the EZ-CDC platform, a complete CDC solution with a BYOC (Bring Your Own Cloud) deployment model. While EZ-CDC provides a full control plane, web portal, and deployment automation, dbmazz can be used independently as a standalone CDC daemon.
+dbmazz can be used as a standalone CDC daemon, or as part of the EZ-CDC platform.
+
+> **Looking for a managed solution?** [EZ-CDC Cloud](https://ez-cdc.com) provides a complete CDC platform with web portal, deployment automation, monitoring, and enterprise support. Deploy in your own AWS account (BYOC) with zero infrastructure management.
 
 ## Supported Connectors
 
@@ -479,13 +483,13 @@ For questions about licensing, please contact the project maintainers.
 
 ## Related Projects
 
-dbmazz is part of the **EZ-CDC** ecosystem:
+dbmazz is part of the **[EZ-CDC](https://ez-cdc.com)** ecosystem:
 
-- **[EZ-CDC](https://github.com/your-org/ez-cdc)**: Complete CDC platform with control plane, web portal, and BYOC deployment automation
+- **[EZ-CDC Cloud](https://ez-cdc.com)**: Complete CDC platform with control plane, web portal, and BYOC deployment automation
 - **worker-agent**: Rust agent that orchestrates dbmazz daemons in customer VPCs
 - **control-plane**: Go-based API server for managing CDC deployments
 
-If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, check out EZ-CDC. If you need a standalone CDC daemon, dbmazz is the right choice.
+If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, check out [EZ-CDC Cloud](https://ez-cdc.com). If you need a standalone CDC daemon, dbmazz is the right choice.
 
 ---
 
