@@ -1,14 +1,16 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-mod source;
-mod sink;
-mod pipeline;
-mod state_store;
-mod grpc;
 mod config;
+mod connectors;
+mod core;
 mod engine;
+mod grpc;
+mod pipeline;
 mod replication;
+mod sink;
+mod source;
+mod state_store;
 
 use anyhow::Result;
 use dotenvy::dotenv;

@@ -34,8 +34,13 @@ curl = { version = "0.4", features = ["static-curl"] }
 serde_json = "1.0"
 sysinfo = "0.30"
 libc = "0.2"
+parking_lot = "0.12"
+url = "2.5"
 # Force vendored OpenSSL for musl cross-compilation
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[dev-dependencies]
+serial_test = "3.0"
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -15,9 +15,10 @@ use crate::grpc::state::SharedState;
 use crate::pipeline::Pipeline;
 use crate::replication::{parse_replication_message, handle_xlog_data, handle_keepalive, WalMessage};
 use setup::SetupManager;
-use crate::sink::starrocks::StarRocksSink;
+use crate::sink::NewSinkAdapter;
 use crate::source::postgres::{PostgresSource, build_standby_status_update};
 use crate::state_store::StateStore;
+use crate::connectors::sinks::create_sink;
 
 /// Main CDC engine that orchestrates all components
 pub struct CdcEngine {
@@ -80,13 +81,13 @@ impl CdcEngine {
         let replication_stream = source.start_replication_from(start_lsn).await?;
         tokio::pin!(replication_stream);
 
-        // Stage: SETUP - Sink Connection (verificar HTTP antes de iniciar pipeline)
-        self.shared_state.set_stage(Stage::Setup, "Connecting to StarRocks HTTP endpoint").await;
-        let sink = self.init_sink();
+        // Stage: SETUP - Sink Connection
+        self.shared_state.set_stage(Stage::Setup, "Connecting to sink").await;
+        let sink_adapter = self.init_sink()?;
 
         // Verify HTTP connectivity BEFORE declaring CDC ready
-        if let Err(e) = sink.verify_http_connection().await {
-            let error_msg = format!("StarRocks HTTP connection failed: {}", e);
+        if let Err(e) = sink_adapter.verify_http_connection().await {
+            let error_msg = format!("Sink HTTP connection failed: {}", e);
             self.shared_state.set_setup_error(Some(error_msg.clone())).await;
             self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
             eprintln!("[ERROR] {}", error_msg);
@@ -94,11 +95,21 @@ impl CdcEngine {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
-        println!("  [OK] StarRocks HTTP endpoint accessible");
+        println!("  [OK] Sink HTTP endpoint accessible");
+
+        // Log sink capabilities
+        let caps = sink_adapter.capabilities();
+        println!("  Sink capabilities:");
+        println!("    - upsert: {}, delete: {}, schema_evolution: {}",
+            caps.supports_upsert, caps.supports_delete, caps.supports_schema_evolution);
+        println!("    - optimal_flush_interval: {}ms", caps.optimal_flush_interval_ms);
+        if let Some(max) = caps.max_batch_size {
+            println!("    - max_batch_size: {}", max);
+        }
 
         // Stage: SETUP - Pipeline
         self.shared_state.set_stage(Stage::Setup, "Initializing pipeline").await;
-        let (tx, feedback_rx) = self.init_pipeline(sink);
+        let (tx, feedback_rx) = self.init_pipeline(sink_adapter, &caps);
 
         // Stage: CDC - Ready to replicate
         self.shared_state.set_stage(Stage::Cdc, "Replicating").await;
@@ -159,33 +170,42 @@ impl CdcEngine {
         Ok(source)
     }
 
-    /// Initialize StarRocks sink
-    fn init_sink(&self) -> Box<StarRocksSink> {
-        Box::new(StarRocksSink::new(
-            self.config.starrocks_url.clone(),
-            self.config.starrocks_db.clone(),
-            self.config.starrocks_user.clone(),
-            self.config.starrocks_pass.clone(),
-        ))
+    /// Initialize sink using trait-based connectors
+    fn init_sink(&self) -> Result<NewSinkAdapter> {
+        let core_sink = create_sink(&self.config.sink)?;
+        Ok(NewSinkAdapter::new(core_sink))
     }
 
-    /// Initialize pipeline and return channels
+    /// Initialize pipeline with sink adapter
     fn init_pipeline(
         &self,
-        sink: Box<StarRocksSink>,
+        sink: NewSinkAdapter,
+        caps: &crate::core::SinkCapabilities,
     ) -> (mpsc::Sender<crate::source::parser::CdcEvent>, mpsc::Receiver<u64>) {
-        let (tx, rx) = mpsc::channel(self.config.flush_size * 2);
+        // Use sink capabilities to configure batching, with config as fallback
+        let batch_size = caps.max_batch_size.unwrap_or(self.config.flush_size);
+        let flush_interval_ms = if caps.optimal_flush_interval_ms > 0 {
+            caps.optimal_flush_interval_ms
+        } else {
+            self.config.flush_interval_ms
+        };
+
+        println!("  Pipeline config (from sink capabilities):");
+        println!("    - batch_size: {} (config: {})", batch_size, self.config.flush_size);
+        println!("    - flush_interval: {}ms (config: {}ms)", flush_interval_ms, self.config.flush_interval_ms);
+
+        let (tx, rx) = mpsc::channel(batch_size * 2);
         let (feedback_tx, feedback_rx) = mpsc::channel::<u64>(100);
-        
+
         let pipeline = Pipeline::new(
             rx,
-            sink,
-            self.config.flush_size,
-            Duration::from_millis(self.config.flush_interval_ms),
+            Box::new(sink),
+            batch_size,
+            Duration::from_millis(flush_interval_ms),
         )
         .with_feedback_channel(feedback_tx)
         .with_shared_state(self.shared_state.clone());
-        
+
         tokio::spawn(pipeline.run());
 
         (tx, feedback_rx)
@@ -197,7 +217,7 @@ impl CdcEngine {
         mut replication_stream: S,
         tx: mpsc::Sender<crate::source::parser::CdcEvent>,
         mut feedback_rx: mpsc::Receiver<u64>,
-        start_lsn: u64,
+        _start_lsn: u64,
     ) -> Result<()>
     where
         S: StreamExt<Item = Result<bytes::Bytes, tokio_postgres::Error>>

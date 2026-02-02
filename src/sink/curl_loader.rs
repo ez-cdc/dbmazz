@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use curl::easy::{Easy, List};
-use std::io::Read;
 use std::sync::Arc;
 
 // TODO: This module handles FE->BE redirects from StarRocks with 127.0.0.1 rewriting.
