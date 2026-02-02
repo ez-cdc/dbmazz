@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.jpg" alt="EZ-CDC Banner" width="600">
+</p>
+
 # dbmazz
 
 High-performance CDC daemon with pluggable source and sink connectors
