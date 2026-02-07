@@ -483,13 +483,13 @@ For questions about licensing, please contact the project maintainers.
 
 ## Related Projects
 
-dbmazz is part of the **[EZ-CDC](https://ez-cdc.com)** ecosystem:
+dbmazz is part of the **EZ-CDC** ecosystem:
 
-- **[EZ-CDC Cloud](https://ez-cdc.com)**: Complete CDC platform with control plane, web portal, and BYOC deployment automation
+- **[EZ-CDC](https://github.com/your-org/ez-cdc)**: Complete CDC platform with control plane, web portal, and BYOC deployment automation
 - **worker-agent**: Rust agent that orchestrates dbmazz daemons in customer VPCs
-- **control-plane**: Go-based API server for managing CDC deployments
+- **control-plane**: Go-based API server for mala parnaging CDC deployments
 
-If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, check out [EZ-CDC Cloud](https://ez-cdc.com). If you need a standalone CDC daemon, dbmazz is the right choice.
+If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, check out EZ-CDC. If you need a standalone CDC daemon, dbmazz is the right choice.
 
 ---
 
