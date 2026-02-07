@@ -106,27 +106,27 @@ impl SharedState {
         self.pending_events.store(count, Ordering::Relaxed);
     }
 
-    pub fn get_current_lsn(&self) -> u64 {
+    pub fn current_lsn(&self) -> u64 {
         self.current_lsn.load(Ordering::Relaxed)
     }
 
-    pub fn get_confirmed_lsn(&self) -> u64 {
+    pub fn confirmed_lsn(&self) -> u64 {
         self.confirmed_lsn.load(Ordering::Relaxed)
     }
 
-    pub fn get_pending_events(&self) -> u64 {
+    pub fn pending_events(&self) -> u64 {
         self.pending_events.load(Ordering::Relaxed)
     }
 
-    pub fn get_events_processed(&self) -> u64 {
+    pub fn events_processed(&self) -> u64 {
         self.events_processed.load(Ordering::Relaxed)
     }
 
-    pub fn get_batches_sent(&self) -> u64 {
+    pub fn batches_sent(&self) -> u64 {
         self.batches_sent.load(Ordering::Relaxed)
     }
 
-    pub fn get_events_last_second(&self) -> u64 {
+    pub fn events_last_second(&self) -> u64 {
         self.events_last_second.swap(0, Ordering::Relaxed)
     }
 
@@ -140,7 +140,7 @@ impl SharedState {
         *self.stage_detail.write().await = detail.to_string();
     }
     
-    pub async fn get_stage(&self) -> (Stage, String) {
+    pub async fn stage(&self) -> (Stage, String) {
         let stage = *self.stage.read().await;
         let detail = self.stage_detail.read().await.clone();
         (stage, detail)
@@ -150,12 +150,12 @@ impl SharedState {
         *self.setup_error.write().await = error;
     }
 
-    pub async fn get_setup_error(&self) -> Option<String> {
+    pub async fn setup_error(&self) -> Option<String> {
         self.setup_error.read().await.clone()
     }
 
     // Synchronous methods for CDC state (no await)
-    pub fn get_state(&self) -> CdcState {
+    pub fn state(&self) -> CdcState {
         CdcState::from_u8(self.state.load(Ordering::Acquire))
     }
 

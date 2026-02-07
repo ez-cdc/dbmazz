@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes};
 use futures::SinkExt;
 use tokio::sync::mpsc;
+use tracing::error;
 
 use crate::source::parser::{CdcEvent, PgOutputParser};
 use crate::source::postgres::build_standby_status_update;
@@ -84,21 +85,31 @@ pub async fn handle_xlog_data(
                 lsn,
                 message: cdc_msg,
             };
-            
+
             shared_state.increment_events();
-            
+
             // Update pending events count
             let capacity = tx.capacity();
             let pending = (flush_size * 2) - capacity;
             shared_state.set_pending(pending as u64);
-            
+
             if let Err(e) = tx.send(event).await {
-                eprintln!("Failed to send to pipeline: {}", e);
+                error!("Failed to send to pipeline: {}", e);
                 return Err(e.into());
             }
         }
         Ok(None) => {}
-        Err(e) => eprintln!("Parse error: {}", e),
+        Err(e) => {
+            // CRITICAL: Parse error means WAL data is corrupted or protocol mismatch.
+            // We MUST halt replication to prevent data loss. Advancing LSN without
+            // processing the event would permanently lose this change.
+            return Err(anyhow!(
+                "WAL parse error at LSN 0x{:X} (tag={}): {}. Halting to prevent data loss.",
+                lsn,
+                pgoutput_tag as char,
+                e
+            ));
+        }
     }
 
     Ok(())
@@ -117,7 +128,7 @@ where
     if reply_requested {
         let status = build_standby_status_update(lsn);
         if let Err(e) = replication_stream.send(status).await {
-            eprintln!("Failed to send keepalive response: {}", e);
+            error!("Failed to send keepalive response: {}", e);
             return Err(e.into());
         }
     }

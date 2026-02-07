@@ -48,7 +48,7 @@
 //!
 //! // Write batch of CDC records
 //! let result = sink.write_batch(records).await?;
-//! println!("Wrote {} records", result.records_written);
+//! info!("Wrote {} records", result.records_written);
 //! ```
 
 mod config;
@@ -62,6 +62,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::{error, info};
 
 use crate::config::SinkConfig;
 use crate::core::{
@@ -125,10 +126,10 @@ impl StarRocksSink {
             sr_config.password.clone(),
         );
 
-        println!("StarRocksSink initialized:");
-        println!("  HTTP URL: {}", sr_config.http_url);
-        println!("  Database: {}", sr_config.database);
-        println!("  MySQL Port: {}", sr_config.mysql_port);
+        info!("StarRocksSink initialized:");
+        info!("  HTTP URL: {}", sr_config.http_url);
+        info!("  Database: {}", sr_config.database);
+        info!("  MySQL Port: {}", sr_config.mysql_port);
 
         Ok(Self {
             config: sr_config,
@@ -303,7 +304,7 @@ impl StarRocksSink {
                         ));
                     }
 
-                    eprintln!(
+                    info!(
                         "Retry {}/{} for {}: {}",
                         attempt, max_retries, table, e
                     );
@@ -379,7 +380,7 @@ impl Sink for StarRocksSink {
             let body = Arc::new(body);
 
             // Extract table name (remove schema prefix if present)
-            let table_name = table.split('.').last().unwrap_or(&table);
+            let table_name = table.split('.').next_back().unwrap_or(&table);
 
             let written = self.send_with_retry(table_name, body, partial_cols, 3).await?;
 

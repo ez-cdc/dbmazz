@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use tokio_postgres::{Client, NoTls, Config, CopyBothDuplex};
 use bytes::{Bytes, BytesMut, BufMut};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::{error, info, warn};
 
 /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
 /// Difference from Unix epoch in microseconds
@@ -59,7 +60,7 @@ impl PostgresSource {
             let (slot_client, slot_connection) = tokio_postgres::connect(&clean_url, NoTls).await?;
             let slot_handle = tokio::spawn(async move {
                 if let Err(e) = slot_connection.await {
-                    eprintln!("Slot connection error: {}", e);
+                    error!("Slot connection error: {}", e);
                 }
             });
 
@@ -85,7 +86,7 @@ impl PostgresSource {
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Replication connection error: {}", e);
+                error!("Replication connection error: {}", e);
             }
         });
 
@@ -113,7 +114,7 @@ impl PostgresSource {
             self.slot_name, lsn_str, self.publication_name
         );
 
-        println!("Starting replication from LSN: {}", lsn_str);
+        info!("Starting replication from LSN: {}", lsn_str);
 
         let stream = self
             .client
@@ -133,12 +134,12 @@ impl PostgresSource {
     /// is insufficient for partitioned tables.
     pub async fn validate_replica_identity(&self, tables: &[String]) -> Result<()> {
         // Create a normal connection (not replication) for queries
-        let clean_url = self.get_clean_url();
+        let clean_url = self.clean_url();
         let (client, connection) = tokio_postgres::connect(&clean_url, NoTls).await?;
         
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Validation connection error: {}", e);
+                error!("Validation connection error: {}", e);
             }
         });
 
@@ -164,12 +165,12 @@ impl PostgresSource {
 
             match replica_char {
                 'f' => {
-                    println!("Table '{}' has REPLICA IDENTITY FULL", relname);
+                    info!("Table '{}' has REPLICA IDENTITY FULL", relname);
                 }
                 'd' => {
-                    eprintln!("WARNING: Table '{}' has REPLICA IDENTITY DEFAULT", relname);
-                    eprintln!("    This may cause issues with soft deletes in StarRocks.");
-                    eprintln!("    Run: ALTER TABLE {} REPLICA IDENTITY FULL;", table);
+                    warn!("Table '{}' has REPLICA IDENTITY DEFAULT", relname);
+                    warn!("    This may cause issues with soft deletes in StarRocks.");
+                    warn!("    Run: ALTER TABLE {} REPLICA IDENTITY FULL;", table);
                     // Don't fail, just warn - let the user decide
                 }
                 'n' => {
@@ -181,11 +182,11 @@ impl PostgresSource {
                     ));
                 }
                 'i' => {
-                    println!("Table '{}' has REPLICA IDENTITY INDEX", relname);
-                    eprintln!("    Note: For full soft delete support, consider REPLICA IDENTITY FULL");
+                    info!("Table '{}' has REPLICA IDENTITY INDEX", relname);
+                    info!("    Note: For full soft delete support, consider REPLICA IDENTITY FULL");
                 }
                 _ => {
-                    eprintln!("Unknown REPLICA IDENTITY '{}' for table '{}'", replica_char, relname);
+                    warn!("Unknown REPLICA IDENTITY '{}' for table '{}'", replica_char, relname);
                 }
             }
         }
@@ -194,7 +195,7 @@ impl PostgresSource {
     }
 
     /// Gets the clean URL without replication parameters
-    fn get_clean_url(&self) -> String {
+    fn clean_url(&self) -> String {
         // This function assumes PostgresSource was created with a valid URL
         // In a real scenario, you should store the original URL
         // For now, this is a placeholder that would need the URL from env

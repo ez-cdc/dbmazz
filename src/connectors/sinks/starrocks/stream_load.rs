@@ -29,6 +29,7 @@
 use anyhow::{Result, anyhow};
 use curl::easy::{Easy, List};
 use std::sync::Arc;
+use tracing::{debug, info};
 
 /// Result of a successful Stream Load operation.
 #[derive(Debug, Clone)]
@@ -227,7 +228,7 @@ impl StreamLoadClient {
                 // Rewrite 127.0.0.1 to original hostname (StarRocks bug)
                 let corrected_location = if location.contains("127.0.0.1") {
                     let rewritten = location.replace("127.0.0.1", &original_hostname);
-                    println!("Redirect rewritten: {} -> {}", location, rewritten);
+                    debug!("Redirect rewritten: {} -> {}", location, rewritten);
                     rewritten
                 } else {
                     location
@@ -359,7 +360,7 @@ impl StreamLoadClient {
             "full"
         };
 
-        println!(
+        debug!(
             "Sent {} rows to StarRocks ({}.{})",
             loaded_rows, table_name, update_type
         );

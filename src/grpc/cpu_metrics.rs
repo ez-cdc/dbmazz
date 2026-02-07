@@ -78,7 +78,7 @@ impl CpuTracker {
     /// - 35 millicores = 3.5% of 1 core
     ///
     /// The value is consistent between Docker and bare metal.
-    pub fn get_cpu_millicores(&mut self) -> u64 {
+    pub fn cpu_millicores(&mut self) -> u64 {
         let Some((utime, stime)) = self.read_cpu_times() else {
             return 0;
         };
@@ -117,7 +117,7 @@ impl CpuTracker {
         self.last_time = now;
 
         // Ensure the value is not negative or excessively high due to read errors
-        millicores.max(0.0).min(100000.0) as u64
+        millicores.clamp(0.0, 100000.0) as u64
     }
 }
 
@@ -146,7 +146,7 @@ mod tests {
     fn test_cpu_tracker_first_read_returns_zero() {
         let mut tracker = CpuTracker::new();
         // First read should return 0 (no delta yet)
-        let millicores = tracker.get_cpu_millicores();
+        let millicores = tracker.cpu_millicores();
         assert_eq!(millicores, 0);
         assert!(tracker.initialized);
     }
@@ -156,13 +156,13 @@ mod tests {
         let mut tracker = CpuTracker::new();
 
         // First read (initialization)
-        let _ = tracker.get_cpu_millicores();
+        let _ = tracker.cpu_millicores();
 
         // Wait a bit for measurable activity
         thread::sleep(Duration::from_millis(100));
 
         // Second read should return a reasonable value
-        let millicores = tracker.get_cpu_millicores();
+        let millicores = tracker.cpu_millicores();
 
         // The value should be in a reasonable range (0-1000 millicores typically)
         // In tests it may be low because the process is idle

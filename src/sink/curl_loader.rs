@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use curl::easy::{Easy, List};
 use std::sync::Arc;
+use tracing::{debug, info};
 
 // TODO: This module handles FE->BE redirects from StarRocks with 127.0.0.1 rewriting.
 // It has not been validated whether this implementation is optimal in terms of:
@@ -130,7 +131,7 @@ impl CurlStreamLoader {
             headers.append("partial_update: true")?;
             headers.append("partial_update_mode: row")?;
             headers.append(&format!("columns: {}", cols.join(",")))?;
-            println!("Partial update for {}: {} columns", table_name, cols.len());
+            debug!("Partial update for {}: {} columns", table_name, cols.len());
         }
 
         easy.http_headers(headers)?;
@@ -190,7 +191,7 @@ impl CurlStreamLoader {
                 // Rewrite 127.0.0.1 with original hostname
                 let corrected_location = if location.contains("127.0.0.1") {
                     let rewritten = location.replace("127.0.0.1", &original_hostname);
-                    println!("Redirect rewritten: {} -> {}", location, rewritten);
+                    debug!("Redirect rewritten: {} -> {}", location, rewritten);
                     rewritten
                 } else {
                     location
@@ -229,10 +230,10 @@ impl CurlStreamLoader {
         }
 
 
-        println!(
+        debug!(
             "Sent {} rows to StarRocks ({}.{})",
             loaded_rows,
-            table_name.split('.').last().unwrap_or(table_name),
+            table_name.split('.').next_back().unwrap_or(table_name),
             if partial_columns.is_some() { "partial" } else { "full" }
         );
 
