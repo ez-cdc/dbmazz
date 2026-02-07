@@ -2,8 +2,8 @@
 // Licensed under the Elastic License v2.0
 
 use anyhow::{Context, Result};
-use log::warn;
 use std::env;
+use tracing::{info, warn};
 
 // =============================================================================
 // Source Configuration
@@ -42,7 +42,7 @@ pub struct PostgresSourceConfig {
 }
 
 /// Generic source configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SourceConfig {
     pub source_type: SourceType,
     #[allow(dead_code)]
@@ -50,6 +50,42 @@ pub struct SourceConfig {
     #[allow(dead_code)]
     pub tables: Vec<String>,
     pub postgres: Option<PostgresSourceConfig>,
+}
+
+impl std::fmt::Debug for SourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Extract password from URL if present and redact it
+        let redacted_url = if self.url.contains("://") {
+            // Pattern: scheme://user:password@host:port/db
+            if let Some(at_pos) = self.url.rfind('@') {
+                if let Some(scheme_end) = self.url.find("://") {
+                    let scheme_part = &self.url[..=scheme_end + 2];
+                    let after_at = &self.url[at_pos..];
+
+                    // Check if there's a colon between scheme and @
+                    let between = &self.url[scheme_end + 3..at_pos];
+                    if between.contains(':') {
+                        format!("{}[REDACTED]{}", scheme_part, after_at)
+                    } else {
+                        self.url.clone()
+                    }
+                } else {
+                    self.url.clone()
+                }
+            } else {
+                self.url.clone()
+            }
+        } else {
+            self.url.clone()
+        };
+
+        f.debug_struct("SourceConfig")
+            .field("source_type", &self.source_type)
+            .field("url", &redacted_url)
+            .field("tables", &self.tables)
+            .field("postgres", &self.postgres)
+            .finish()
+    }
 }
 
 // =============================================================================
@@ -88,7 +124,7 @@ pub struct StarRocksSinkConfig {
 }
 
 /// Generic sink configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SinkConfig {
     pub sink_type: SinkType,
     pub url: String,
@@ -98,6 +134,20 @@ pub struct SinkConfig {
     pub password: String,
     #[allow(dead_code)]
     pub starrocks: Option<StarRocksSinkConfig>,
+}
+
+impl std::fmt::Debug for SinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SinkConfig")
+            .field("sink_type", &self.sink_type)
+            .field("url", &self.url)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("starrocks", &self.starrocks)
+            .finish()
+    }
 }
 
 // =============================================================================
@@ -111,7 +161,7 @@ pub struct SinkConfig {
 ///
 /// **New code** should use the nested `source` and `sink` fields.
 /// **Legacy fields** are kept for backward compatibility and will be removed in a future version.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     // =========================================================================
     // New nested configuration (preferred)
@@ -143,6 +193,49 @@ pub struct Config {
 
     // gRPC
     pub grpc_port: u16,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact password from database_url
+        let redacted_db_url = if self.database_url.contains("://") {
+            if let Some(at_pos) = self.database_url.rfind('@') {
+                if let Some(scheme_end) = self.database_url.find("://") {
+                    let scheme_part = &self.database_url[..=scheme_end + 2];
+                    let after_at = &self.database_url[at_pos..];
+                    let between = &self.database_url[scheme_end + 3..at_pos];
+                    if between.contains(':') {
+                        format!("{}[REDACTED]{}", scheme_part, after_at)
+                    } else {
+                        self.database_url.clone()
+                    }
+                } else {
+                    self.database_url.clone()
+                }
+            } else {
+                self.database_url.clone()
+            }
+        } else {
+            self.database_url.clone()
+        };
+
+        f.debug_struct("Config")
+            .field("source", &self.source)
+            .field("sink", &self.sink)
+            .field("database_url", &redacted_db_url)
+            .field("slot_name", &self.slot_name)
+            .field("publication_name", &self.publication_name)
+            .field("tables", &self.tables)
+            .field("starrocks_url", &self.starrocks_url)
+            .field("starrocks_port", &self.starrocks_port)
+            .field("starrocks_db", &self.starrocks_db)
+            .field("starrocks_user", &self.starrocks_user)
+            .field("starrocks_pass", &"[REDACTED]")
+            .field("flush_size", &self.flush_size)
+            .field("flush_interval_ms", &self.flush_interval_ms)
+            .field("grpc_port", &self.grpc_port)
+            .finish()
+    }
 }
 
 // =============================================================================
@@ -301,15 +394,15 @@ impl Config {
 
     /// Print banner with configuration
     pub fn print_banner(&self) {
-        println!("Starting dbmazz (High Performance Mode)...");
+        info!("Starting dbmazz (High Performance Mode)...");
 
         // Source info
         match &self.source.source_type {
             SourceType::Postgres => {
                 if let Some(pg) = &self.source.postgres {
-                    println!("Source: Postgres (slot: {})", pg.slot_name);
+                    info!("Source: Postgres (slot: {})", pg.slot_name);
                 } else {
-                    println!("Source: Postgres");
+                    info!("Source: Postgres");
                 }
             }
         }
@@ -317,16 +410,16 @@ impl Config {
         // Sink info
         match &self.sink.sink_type {
             SinkType::StarRocks => {
-                println!("Sink: StarRocks (db: {})", self.sink.database);
+                info!("Sink: StarRocks (db: {})", self.sink.database);
             }
         }
 
-        println!(
+        info!(
             "Flush: {} msgs or {}ms interval",
             self.flush_size, self.flush_interval_ms
         );
-        println!("gRPC: port {}", self.grpc_port);
-        println!("Tables: {:?}", self.tables);
+        info!("gRPC: port {}", self.grpc_port);
+        info!("Tables: {:?}", self.tables);
     }
 }
 

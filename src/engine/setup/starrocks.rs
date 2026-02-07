@@ -1,8 +1,10 @@
 use anyhow::Result;
 use mysql_async::{Pool, Conn, prelude::Queryable};
+use tracing::info;
 
 use super::error::SetupError;
 use crate::config::Config;
+use crate::utils::validate_sql_identifier;
 
 /// CDC audit columns that must exist in StarRocks
 const AUDIT_COLUMNS: &[(&str, &str)] = &[
@@ -24,7 +26,7 @@ impl<'a> StarRocksSetup<'a> {
 
     /// Execute complete StarRocks setup
     pub async fn run(&self) -> Result<(), SetupError> {
-        println!("StarRocks Setup:");
+        info!("StarRocks Setup:");
 
         // 1. Verify connectivity
         self.verify_connection().await?;
@@ -35,7 +37,7 @@ impl<'a> StarRocksSetup<'a> {
         // 3. Add audit columns
         self.ensure_audit_columns().await?;
 
-        println!("[OK] StarRocks setup complete");
+        info!("[OK] StarRocks setup complete");
         Ok(())
     }
 
@@ -58,7 +60,7 @@ impl<'a> StarRocksSetup<'a> {
                 error: e.to_string(),
             })?;
 
-        println!("  [OK] StarRocks connection OK");
+        info!("  [OK] StarRocks connection OK");
         Ok(())
     }
 
@@ -74,7 +76,7 @@ impl<'a> StarRocksSetup<'a> {
 
         for table in &self.config.tables {
             // Extract table name without schema (StarRocks doesn't use schemas)
-            let table_name = table.split('.').last().unwrap_or(table);
+            let table_name = table.split('.').next_back().unwrap_or(table);
 
             let exists: Option<i32> = conn
                 .exec_first(
@@ -94,7 +96,7 @@ impl<'a> StarRocksSetup<'a> {
                 });
             }
 
-            println!("  [OK] Table {} exists in StarRocks", table_name);
+            info!("  [OK] Table {} exists in StarRocks", table_name);
         }
 
         Ok(())
@@ -103,7 +105,7 @@ impl<'a> StarRocksSetup<'a> {
     /// Ensure all tables have audit columns
     async fn ensure_audit_columns(&self) -> Result<(), SetupError> {
         for table in &self.config.tables {
-            let table_name = table.split('.').last().unwrap_or(table);
+            let table_name = table.split('.').next_back().unwrap_or(table);
             self.ensure_audit_columns_for_table(table_name).await?;
         }
         Ok(())
@@ -111,6 +113,18 @@ impl<'a> StarRocksSetup<'a> {
 
     /// Add audit columns to a specific table
     async fn ensure_audit_columns_for_table(&self, table: &str) -> Result<(), SetupError> {
+        // Validate table name to prevent SQL injection
+        validate_sql_identifier(table).map_err(|e| SetupError::SrConnectionFailed {
+            host: self.config.starrocks_url.clone(),
+            error: format!("Invalid table name: {}", e),
+        })?;
+
+        // Validate database name
+        validate_sql_identifier(&self.config.starrocks_db).map_err(|e| SetupError::SrConnectionFailed {
+            host: self.config.starrocks_url.clone(),
+            error: format!("Invalid database name: {}", e),
+        })?;
+
         let mut conn = self.pool
             .get_conn()
             .await
@@ -124,8 +138,14 @@ impl<'a> StarRocksSetup<'a> {
 
         // Add missing columns
         for (col_name, col_def) in AUDIT_COLUMNS {
+            // Validate column name (although these are constants, it's good practice)
+            validate_sql_identifier(col_name).map_err(|e| SetupError::SrAuditColumnsFailed {
+                table: table.to_string(),
+                error: format!("Invalid column name '{}': {}", col_name, e),
+            })?;
+
             if !existing_columns.contains(&col_name.to_string()) {
-                println!("  Adding audit column {} to {}", col_name, table);
+                info!("  Adding audit column {} to {}", col_name, table);
 
                 let sql = format!(
                     "ALTER TABLE {}.{} ADD COLUMN {} {}",
@@ -139,9 +159,9 @@ impl<'a> StarRocksSetup<'a> {
                         error: e.to_string(),
                     })?;
 
-                println!("  [OK] Column {} added to {}", col_name, table);
+                info!("  [OK] Column {} added to {}", col_name, table);
             } else {
-                println!("  [OK] Column {} already exists in {}", col_name, table);
+                info!("  [OK] Column {} already exists in {}", col_name, table);
             }
         }
 

@@ -48,9 +48,9 @@ impl HealthService for HealthServiceImpl {
         &self,
         _request: Request<HealthCheckRequest>,
     ) -> Result<Response<HealthCheckResponse>, Status> {
-        let state = self.shared_state.get_state();
-        let (stage, stage_detail) = self.shared_state.get_stage().await;
-        let error_detail = self.shared_state.get_setup_error().await.unwrap_or_default();
+        let state = self.shared_state.state();
+        let (stage, stage_detail) = self.shared_state.stage().await;
+        let error_detail = self.shared_state.setup_error().await.unwrap_or_default();
 
         // If there is a setup error, return NOT_SERVING
         let status = if !error_detail.is_empty() {
@@ -107,7 +107,7 @@ impl CdcControlService for CdcControlServiceImpl {
                 message: "CDC paused successfully".to_string(),
             }))
         } else {
-            let current = self.shared_state.get_state();
+            let current = self.shared_state.state();
             match current {
                 CdcState::Paused => {
                     Ok(Response::new(ControlResponse {
@@ -135,7 +135,7 @@ impl CdcControlService for CdcControlServiceImpl {
                 message: "CDC resumed successfully".to_string(),
             }))
         } else {
-            let current = self.shared_state.get_state();
+            let current = self.shared_state.state();
             match current {
                 CdcState::Running => {
                     Ok(Response::new(ControlResponse {
@@ -157,7 +157,7 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<DrainRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        let current = self.shared_state.get_state();
+        let current = self.shared_state.state();
         match current {
             CdcState::Running | CdcState::Paused => {
                 self.shared_state.set_state(CdcState::Draining);
@@ -188,7 +188,7 @@ impl CdcControlService for CdcControlServiceImpl {
         request: Request<StopRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
         let req = request.into_inner();
-        let current = self.shared_state.get_state();
+        let current = self.shared_state.state();
         match current {
             CdcState::Stopped => {
                 Ok(Response::new(ControlResponse {
@@ -281,7 +281,7 @@ impl CdcStatusService for CdcStatusServiceImpl {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let state = self.shared_state.get_state();
+        let state = self.shared_state.state();
         let config = self.shared_state.config.read().await;
 
         let proto_state = match state {
@@ -293,9 +293,9 @@ impl CdcStatusService for CdcStatusServiceImpl {
 
         Ok(Response::new(StatusResponse {
             state: proto_state as i32,
-            current_lsn: self.shared_state.get_current_lsn(),
-            confirmed_lsn: self.shared_state.get_confirmed_lsn(),
-            pending_events: self.shared_state.get_pending_events(),
+            current_lsn: self.shared_state.current_lsn(),
+            confirmed_lsn: self.shared_state.confirmed_lsn(),
+            pending_events: self.shared_state.pending_events(),
             slot_name: config.slot_name.clone(),
             tables: config.tables.clone(),
         }))
@@ -340,7 +340,7 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
 
         tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(interval_ms as u64));
-            let mut last_events = shared_state.get_events_processed();
+            let mut last_events = shared_state.events_processed();
             let mut last_time = std::time::Instant::now();
 
             // Initialize CPU tracker that reads directly from /proc
@@ -350,7 +350,7 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
             loop {
                 ticker.tick().await;
 
-                let current_events = shared_state.get_events_processed();
+                let current_events = shared_state.events_processed();
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_time).as_secs_f64();
                 
@@ -363,8 +363,8 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
                 last_events = current_events;
                 last_time = now;
 
-                let current_lsn = shared_state.get_current_lsn();
-                let confirmed_lsn = shared_state.get_confirmed_lsn();
+                let current_lsn = shared_state.current_lsn();
+                let confirmed_lsn = shared_state.confirmed_lsn();
                 let lag_bytes = current_lsn.saturating_sub(confirmed_lsn);
 
                 let timestamp = SystemTime::now()
@@ -374,16 +374,16 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
 
                 // Read process CPU from /proc/[pid]/stat
                 // Consistent between Docker and bare metal
-                let cpu_millicores = cpu_tracker.get_cpu_millicores();
+                let cpu_millicores = cpu_tracker.cpu_millicores();
 
                 let metrics = MetricsResponse {
                     timestamp,
                     events_per_second,
                     lag_bytes,
-                    lag_events: shared_state.get_pending_events(),
+                    lag_events: shared_state.pending_events(),
                     memory_bytes: shared_state.estimate_memory(),
                     total_events_processed: current_events,
-                    total_batches_sent: shared_state.get_batches_sent(),
+                    total_batches_sent: shared_state.batches_sent(),
                     cpu_millicores,
                 };
 

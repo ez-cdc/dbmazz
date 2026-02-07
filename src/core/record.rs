@@ -105,6 +105,7 @@ pub enum Value {
     Unchanged,
 }
 
+#[allow(dead_code)]
 impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
@@ -137,6 +138,7 @@ pub enum DataType {
     TimestampTz,
 }
 
+#[allow(dead_code)]
 impl DataType {
     pub fn is_numeric(&self) -> bool {
         matches!(

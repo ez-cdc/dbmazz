@@ -54,6 +54,7 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio_postgres::{Client, CopyBothDuplex, NoTls};
+use tracing::{error, info, warn};
 
 use crate::core::{CdcRecord, Source, SourcePosition};
 
@@ -141,12 +142,12 @@ impl PostgresSource {
     }
 
     /// Get the current LSN position
-    pub fn get_current_lsn(&self) -> u64 {
+    pub fn current_lsn(&self) -> u64 {
         self.current_lsn.load(Ordering::Relaxed)
     }
 
     /// Get the confirmed LSN position
-    pub fn get_confirmed_lsn(&self) -> u64 {
+    pub fn confirmed_lsn(&self) -> u64 {
         self.confirmed_lsn.load(Ordering::Relaxed)
     }
 
@@ -181,7 +182,7 @@ impl PostgresSource {
         // Spawn connection handler
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Replication connection error: {}", e);
+                error!("Replication connection error: {}", e);
             }
         });
 
@@ -197,7 +198,7 @@ impl PostgresSource {
             self.slot_name, lsn_str, self.publication_name
         );
 
-        println!("Starting replication from LSN: {}", lsn_str);
+        info!("Starting replication from LSN: {}", lsn_str);
 
         let stream = client
             .copy_both_simple(&query)
@@ -223,11 +224,8 @@ impl PostgresSource {
                 let pgoutput_tag = data[0];
                 let pgoutput_body = data.slice(1..);
 
-                match PgOutputParser::parse(pgoutput_tag, pgoutput_body)? {
-                    Some(cdc_msg) => {
-                        self.handle_cdc_message(cdc_msg, lsn).await?;
-                    }
-                    None => {}
+                if let Some(cdc_msg) = PgOutputParser::parse(pgoutput_tag, pgoutput_body)? {
+                    self.handle_cdc_message(cdc_msg, lsn).await?;
                 }
 
                 Ok(Some(lsn))
@@ -240,7 +238,7 @@ impl PostgresSource {
                 Ok(Some(lsn))
             }
             WalMessage::Unknown(tag) => {
-                eprintln!("Unknown WAL message tag: {}", tag);
+                warn!("Unknown WAL message tag: {}", tag);
                 Ok(None)
             }
         }
@@ -371,7 +369,7 @@ impl PostgresSource {
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Validation connection error: {}", e);
+                error!("Validation connection error: {}", e);
             }
         });
 
@@ -403,12 +401,12 @@ impl PostgresSource {
 
             match replica_char {
                 'f' => {
-                    println!("Table '{}' has REPLICA IDENTITY FULL", relname);
+                    info!("Table '{}' has REPLICA IDENTITY FULL", relname);
                 }
                 'd' => {
-                    eprintln!("WARNING: Table '{}' has REPLICA IDENTITY DEFAULT", relname);
-                    eprintln!("    This may cause issues with soft deletes.");
-                    eprintln!("    Run: ALTER TABLE {} REPLICA IDENTITY FULL;", table);
+                    warn!("Table '{}' has REPLICA IDENTITY DEFAULT", relname);
+                    warn!("    This may cause issues with soft deletes.");
+                    warn!("    Run: ALTER TABLE {} REPLICA IDENTITY FULL;", table);
                 }
                 'n' => {
                     anyhow::bail!(
@@ -420,13 +418,13 @@ impl PostgresSource {
                     );
                 }
                 'i' => {
-                    println!("Table '{}' has REPLICA IDENTITY INDEX", relname);
-                    eprintln!(
+                    info!("Table '{}' has REPLICA IDENTITY INDEX", relname);
+                    error!(
                         "    Note: For full soft delete support, consider REPLICA IDENTITY FULL"
                     );
                 }
                 _ => {
-                    eprintln!(
+                    error!(
                         "Unknown REPLICA IDENTITY '{}' for table '{}'",
                         replica_char, relname
                     );
@@ -472,14 +470,14 @@ impl Source for PostgresSource {
 
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("Validation connection error: {}", e);
+                error!("Validation connection error: {}", e);
             }
         });
 
         // Check version
         let row = client.query_one("SELECT version()", &[]).await?;
         let version: String = row.get(0);
-        println!("PostgreSQL version: {}", version);
+        info!("PostgreSQL version: {}", version);
 
         // Validate replica identity
         self.validate_replica_identity().await?;
@@ -489,13 +487,13 @@ impl Source for PostgresSource {
 
     async fn start(&mut self) -> Result<()> {
         self.is_running.store(true, Ordering::Relaxed);
-        println!("PostgreSQL source started");
+        info!("PostgreSQL source started");
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
         self.is_running.store(false, Ordering::Relaxed);
-        println!("PostgreSQL source stopped");
+        info!("PostgreSQL source stopped");
         Ok(())
     }
 
@@ -544,12 +542,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(source.get_current_lsn(), 0);
+        assert_eq!(source.current_lsn(), 0);
         source.update_lsn(12345);
-        assert_eq!(source.get_current_lsn(), 12345);
+        assert_eq!(source.current_lsn(), 12345);
 
-        assert_eq!(source.get_confirmed_lsn(), 0);
+        assert_eq!(source.confirmed_lsn(), 0);
         source.confirm_lsn(10000);
-        assert_eq!(source.get_confirmed_lsn(), 10000);
+        assert_eq!(source.confirmed_lsn(), 10000);
     }
 }

@@ -5,6 +5,7 @@ use tokio_postgres::{Client, NoTls};
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::error;
 
 #[derive(Clone)]
 pub struct StateStore {
@@ -23,7 +24,7 @@ impl StateStore {
         
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("StateStore connection error: {}", e);
+                error!("StateStore connection error: {}", e);
             }
         });
 

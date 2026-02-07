@@ -17,6 +17,7 @@
 
 use crate::connectors::sources::postgres::parser::{Column, Tuple, TupleData};
 use crate::core::{ColumnDef, ColumnValue, DataType, Value};
+use tracing::warn;
 
 /// PostgreSQL type OIDs for common types
 pub mod pg_oid {
@@ -183,7 +184,7 @@ pub fn pg_type_to_data_type(type_id: u32, type_mod: i32) -> DataType {
         _ => {
             // Log warning for unknown types in debug builds
             #[cfg(debug_assertions)]
-            eprintln!("WARNING: Unknown PostgreSQL type OID: {}", type_id);
+            warn!("WARNING: Unknown PostgreSQL type OID: {}", type_id);
 
             DataType::String
         }
@@ -222,8 +223,8 @@ pub fn tuple_data_to_value(data: &TupleData, type_id: u32) -> Value {
                 }
                 pg_oid::BYTEA => {
                     // PostgreSQL sends bytea as hex-encoded with \x prefix
-                    if text.starts_with("\\x") {
-                        match hex::decode(&text[2..]) {
+                    if let Some(stripped) = text.strip_prefix("\\x") {
+                        match hex::decode(stripped) {
                             Ok(decoded) => Value::Bytes(decoded),
                             Err(_) => Value::String(text.to_string()),
                         }

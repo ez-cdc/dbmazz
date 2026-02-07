@@ -34,6 +34,7 @@ pub enum StageFormat {
 
 /// Result returned from sink write operations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SinkResult {
     pub records_written: usize,
     pub bytes_written: u64,

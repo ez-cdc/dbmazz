@@ -1,8 +1,10 @@
 use anyhow::Result;
 use tokio_postgres::{Client, NoTls};
+use tracing::{info, warn};
 
 use super::error::SetupError;
 use crate::config::Config;
+use crate::utils::validate_sql_identifier;
 
 pub struct PostgresSetup<'a> {
     client: &'a Client,
@@ -16,7 +18,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Execute complete PostgreSQL setup
     pub async fn run(&self) -> Result<(), SetupError> {
-        println!("PostgreSQL Setup:");
+        info!("PostgreSQL Setup:");
 
         // 1. Verify that tables exist
         self.verify_tables_exist().await?;
@@ -30,7 +32,7 @@ impl<'a> PostgresSetup<'a> {
         // 4. Create/verify Replication Slot
         self.ensure_replication_slot().await?;
 
-        println!("[OK] PostgreSQL setup complete");
+        info!("[OK] PostgreSQL setup complete");
         Ok(())
     }
 
@@ -62,7 +64,7 @@ impl<'a> PostgresSetup<'a> {
                 });
             }
 
-            println!("  [OK] Table {} exists", table);
+            info!("  [OK] Table {} exists", table);
         }
         Ok(())
     }
@@ -70,6 +72,12 @@ impl<'a> PostgresSetup<'a> {
     /// Configure REPLICA IDENTITY FULL on all tables
     async fn ensure_replica_identity(&self) -> Result<(), SetupError> {
         for table in &self.config.tables {
+            // Validate table name to prevent SQL injection
+            validate_sql_identifier(table).map_err(|e| SetupError::PgConnectionFailed {
+                host: "PostgreSQL".to_string(),
+                error: format!("Invalid table name: {}", e),
+            })?;
+
             let parts: Vec<&str> = table.split('.').collect();
             let schema = if parts.len() > 1 { parts[0] } else { "public" };
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
@@ -77,9 +85,9 @@ impl<'a> PostgresSetup<'a> {
             // Consultar estado actual
             let row = self.client
                 .query_one(
-                    "SELECT c.relreplident 
-                     FROM pg_class c 
-                     JOIN pg_namespace n ON c.relnamespace = n.oid 
+                    "SELECT c.relreplident
+                     FROM pg_class c
+                     JOIN pg_namespace n ON c.relnamespace = n.oid
                      WHERE c.relname = $1 AND n.nspname = $2",
                     &[&table_name, &schema],
                 )
@@ -94,7 +102,7 @@ impl<'a> PostgresSetup<'a> {
 
             // If not FULL, configure it
             if identity_char != 'f' {
-                println!("  Setting REPLICA IDENTITY FULL on {}", table);
+                info!("  Setting REPLICA IDENTITY FULL on {}", table);
                 self.client
                     .execute(
                         &format!("ALTER TABLE {} REPLICA IDENTITY FULL", table),
@@ -105,9 +113,9 @@ impl<'a> PostgresSetup<'a> {
                         table: table.clone(),
                         error: e.to_string(),
                     })?;
-                println!("  [OK] REPLICA IDENTITY FULL set on {}", table);
+                info!("  [OK] REPLICA IDENTITY FULL set on {}", table);
             } else {
-                println!("  [OK] {} already has REPLICA IDENTITY FULL", table);
+                info!("  [OK] {} already has REPLICA IDENTITY FULL", table);
             }
         }
         Ok(())
@@ -116,6 +124,12 @@ impl<'a> PostgresSetup<'a> {
     /// Create/verify Publication
     async fn ensure_publication(&self) -> Result<(), SetupError> {
         let pub_name = &self.config.publication_name;
+
+        // Validate publication name to prevent SQL injection
+        validate_sql_identifier(pub_name).map_err(|e| SetupError::PgPublicationFailed {
+            name: pub_name.clone(),
+            error: format!("Invalid publication name: {}", e),
+        })?;
 
         // Check if it exists
         let exists: bool = self.client
@@ -131,13 +145,19 @@ impl<'a> PostgresSetup<'a> {
             .get(0);
 
         if exists {
-            println!("  [OK] Publication {} exists", pub_name);
+            info!("  [OK] Publication {} exists", pub_name);
 
             // Verify that it includes all tables
             let missing = self.get_missing_tables_in_publication(pub_name).await?;
 
             for table in missing {
-                println!("  Adding {} to publication {}", table, pub_name);
+                // Validate each table name before adding
+                validate_sql_identifier(&table).map_err(|e| SetupError::PgPublicationFailed {
+                    name: pub_name.clone(),
+                    error: format!("Invalid table name '{}': {}", table, e),
+                })?;
+
+                info!("  Adding {} to publication {}", table, pub_name);
                 self.client
                     .execute(
                         &format!("ALTER PUBLICATION {} ADD TABLE {}", pub_name, table),
@@ -148,11 +168,19 @@ impl<'a> PostgresSetup<'a> {
                         name: pub_name.clone(),
                         error: e.to_string(),
                     })?;
-                println!("  [OK] Table {} added to publication", table);
+                info!("  [OK] Table {} added to publication", table);
             }
         } else {
+            // Validate all table names before creating publication
+            for table in &self.config.tables {
+                validate_sql_identifier(table).map_err(|e| SetupError::PgPublicationFailed {
+                    name: pub_name.clone(),
+                    error: format!("Invalid table name '{}': {}", table, e),
+                })?;
+            }
+
             // Create new publication
-            println!("  Creating publication {}", pub_name);
+            info!("  Creating publication {}", pub_name);
             let tables = self.config.tables.join(", ");
             self.client
                 .execute(
@@ -164,7 +192,7 @@ impl<'a> PostgresSetup<'a> {
                     name: pub_name.clone(),
                     error: e.to_string(),
                 })?;
-            println!("  [OK] Publication {} created", pub_name);
+            info!("  [OK] Publication {} created", pub_name);
         }
 
         Ok(())
@@ -229,11 +257,11 @@ impl<'a> PostgresSetup<'a> {
                 if is_active {
                     // Slot exists and is active - another process is using it
                     // This is recovery mode (same daemon restarting)
-                    println!("  [OK] Replication slot {} exists and is active (recovery mode)", slot_name);
+                    info!("  [OK] Replication slot {} exists and is active (recovery mode)", slot_name);
                 } else {
                     // Slot exists but is NOT active - orphaned from a previous run
                     // Drop it and recreate to ensure clean state
-                    println!("  [WARN] Replication slot {} exists but is inactive (orphaned), dropping...", slot_name);
+                    warn!("  Replication slot {} exists but is inactive (orphaned), dropping...", slot_name);
                     self.client
                         .execute(
                             "SELECT pg_drop_replication_slot($1)",
@@ -244,7 +272,7 @@ impl<'a> PostgresSetup<'a> {
                             name: slot_name.clone(),
                             error: format!("failed to drop orphaned slot: {}", e),
                         })?;
-                    println!("  Creating replication slot {}", slot_name);
+                    info!("  Creating replication slot {}", slot_name);
                     self.client
                         .execute(
                             "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -255,12 +283,12 @@ impl<'a> PostgresSetup<'a> {
                             name: slot_name.clone(),
                             error: e.to_string(),
                         })?;
-                    println!("  [OK] Replication slot {} created", slot_name);
+                    info!("  [OK] Replication slot {} created", slot_name);
                 }
             }
             None => {
                 // Slot doesn't exist - create it
-                println!("  Creating replication slot {}", slot_name);
+                info!("  Creating replication slot {}", slot_name);
                 self.client
                     .execute(
                         "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -271,7 +299,7 @@ impl<'a> PostgresSetup<'a> {
                         name: slot_name.clone(),
                         error: e.to_string(),
                     })?;
-                println!("  [OK] Replication slot {} created", slot_name);
+                info!("  [OK] Replication slot {} created", slot_name);
             }
         }
 
@@ -297,7 +325,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
     // Spawn connection in background
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL setup connection error: {}", e);
+            info!("PostgreSQL setup connection error: {}", e);
         }
     });
 
@@ -307,7 +335,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
 /// Cleanup PostgreSQL resources on daemon shutdown
 /// Drops the replication slot to free the resource
 pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> Result<(), SetupError> {
-    println!("Cleaning up PostgreSQL resources...");
+    info!("Cleaning up PostgreSQL resources...");
 
     let client = create_postgres_client(database_url).await?;
 
@@ -328,12 +356,12 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
             let is_active: bool = row.get(0);
             let active_pid: Option<i32> = row.get(1);
 
-            println!("  Dropping replication slot: {}", slot_name);
+            info!("  Dropping replication slot: {}", slot_name);
 
             // If slot is active, first terminate the backend that holds it
             if is_active {
                 if let Some(pid) = active_pid {
-                    println!("  [WARN] Slot is active (pid={}), terminating backend...", pid);
+                    warn!("  Slot is active (pid={}), terminating backend...", pid);
                     let terminated: bool = client
                         .query_one(
                             "SELECT pg_terminate_backend($1)",
@@ -344,11 +372,11 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                         .unwrap_or(false);
 
                     if terminated {
-                        println!("  [OK] Backend terminated");
+                        info!("  [OK] Backend terminated");
                         // Wait a moment for PostgreSQL to release the slot
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     } else {
-                        println!("  [WARN] Could not terminate backend, will retry drop anyway");
+                        warn!("  Could not terminate backend, will retry drop anyway");
                     }
                 }
             }
@@ -366,14 +394,14 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                     .await
                 {
                     Ok(_) => {
-                        println!("  [OK] Replication slot {} dropped", slot_name);
+                        info!("  [OK] Replication slot {} dropped", slot_name);
                         return Ok(());
                     }
                     Err(e) => {
                         last_error = Some(e.to_string());
                         retries -= 1;
                         if retries > 0 {
-                            println!("  [WARN] Drop failed, retrying in 1s... ({} retries left)", retries);
+                            warn!("  Drop failed, retrying in 1s... ({} retries left)", retries);
                             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         }
                     }
@@ -387,7 +415,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
             })
         }
         None => {
-            println!("  [INFO] Replication slot {} not found (already dropped?)", slot_name);
+            info!("  [INFO] Replication slot {} not found (already dropped?)", slot_name);
             Ok(())
         }
     }

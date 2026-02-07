@@ -8,6 +8,7 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::grpc::{self, CdcConfig, CdcState, Stage};
@@ -61,7 +62,7 @@ impl CdcEngine {
             // Save error in SharedState for Health Check
             self.shared_state.set_setup_error(Some(e.to_string())).await;
             self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
-            eprintln!("[ERROR] Setup failed: {}", e);
+            error!("Setup failed: {}", e);
             // Keep gRPC server running so control plane can query the error
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
@@ -90,21 +91,21 @@ impl CdcEngine {
             let error_msg = format!("Sink HTTP connection failed: {}", e);
             self.shared_state.set_setup_error(Some(error_msg.clone())).await;
             self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
-            eprintln!("[ERROR] {}", error_msg);
+            error!("{}", error_msg);
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
-        println!("  [OK] Sink HTTP endpoint accessible");
+        info!("  [OK] Sink HTTP endpoint accessible");
 
         // Log sink capabilities
         let caps = sink_adapter.capabilities();
-        println!("  Sink capabilities:");
-        println!("    - upsert: {}, delete: {}, schema_evolution: {}",
+        info!("  Sink capabilities:");
+        info!("    - upsert: {}, delete: {}, schema_evolution: {}",
             caps.supports_upsert, caps.supports_delete, caps.supports_schema_evolution);
-        println!("    - optimal_flush_interval: {}ms", caps.optimal_flush_interval_ms);
+        info!("    - optimal_flush_interval: {}ms", caps.optimal_flush_interval_ms);
         if let Some(max) = caps.max_batch_size {
-            println!("    - max_batch_size: {}", max);
+            info!("    - max_batch_size: {}", max);
         }
 
         // Stage: SETUP - Pipeline
@@ -113,7 +114,7 @@ impl CdcEngine {
 
         // Stage: CDC - Ready to replicate
         self.shared_state.set_stage(Stage::Cdc, "Replicating").await;
-        println!("Connected! Streaming CDC events...");
+        info!("Connected! Streaming CDC events...");
 
         // 6. Execute main loop
         self.run_main_loop(
@@ -134,11 +135,11 @@ impl CdcEngine {
     async fn load_checkpoint(&self) -> Result<u64> {
         let last_lsn = self.state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
-        
+
         if start_lsn > 0 {
-            println!("Checkpoint: Resuming from LSN 0x{:X}", start_lsn);
+            info!("Checkpoint: Resuming from LSN 0x{:X}", start_lsn);
         } else {
-            println!("Checkpoint: Starting from beginning (no previous checkpoint)");
+            info!("Checkpoint: Starting from beginning (no previous checkpoint)");
         }
 
         self.shared_state.update_lsn(start_lsn);
@@ -154,7 +155,7 @@ impl CdcEngine {
 
         tokio::spawn(async move {
             if let Err(e) = grpc::start_grpc_server(grpc_port, grpc_state).await {
-                eprintln!("gRPC server error: {}", e);
+                error!("gRPC server error: {}", e);
             }
         });
     }
@@ -190,9 +191,9 @@ impl CdcEngine {
             self.config.flush_interval_ms
         };
 
-        println!("  Pipeline config (from sink capabilities):");
-        println!("    - batch_size: {} (config: {})", batch_size, self.config.flush_size);
-        println!("    - flush_interval: {}ms (config: {}ms)", flush_interval_ms, self.config.flush_interval_ms);
+        info!("  Pipeline config (from sink capabilities):");
+        info!("    - batch_size: {} (config: {})", batch_size, self.config.flush_size);
+        info!("    - flush_interval: {}ms (config: {}ms)", flush_interval_ms, self.config.flush_interval_ms);
 
         let (tx, rx) = mpsc::channel(batch_size * 2);
         let (feedback_tx, feedback_rx) = mpsc::channel::<u64>(100);
@@ -251,7 +252,7 @@ impl CdcEngine {
                 // Shutdown signal
                 _ = shutdown_rx.changed() => {
                     if *shutdown_rx.borrow() {
-                        println!("Shutdown signal received");
+                        info!("Shutdown signal received");
                         break;
                     }
                 }
@@ -269,11 +270,11 @@ impl CdcEngine {
                             }
                         }
                         Some(Err(e)) => {
-                            eprintln!("Replication stream error: {}", e);
+                            error!("Replication stream error: {}", e);
                             break;
                         }
                         None => {
-                            eprintln!("Replication stream ended");
+                            warn!("Replication stream ended");
                             break;
                         }
                     }
@@ -291,18 +292,16 @@ impl CdcEngine {
 
         // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
         if self.shared_state.should_skip_slot_cleanup() {
-            println!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
-        } else {
-            if let Err(e) = setup::cleanup_postgres_resources(
-                &self.config.database_url,
-                &self.config.slot_name,
-            ).await {
-                eprintln!("[WARN] Cleanup warning: {}", e);
-                // Non-fatal - continue shutdown
-            }
+            info!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
+        } else if let Err(e) = setup::cleanup_postgres_resources(
+            &self.config.database_url,
+            &self.config.slot_name,
+        ).await {
+            warn!("Cleanup warning: {}", e);
+            // Non-fatal - continue shutdown
         }
 
-        println!("CDC shutdown complete");
+        info!("CDC shutdown complete");
         Ok(())
     }
 
@@ -311,17 +310,17 @@ impl CdcEngine {
         &self,
         tx: &mpsc::Sender<crate::source::parser::CdcEvent>,
     ) -> Option<ControlFlow> {
-        let current_state = self.shared_state.get_state();
+        let current_state = self.shared_state.state();
         
         match current_state {
             CdcState::Stopped => {
-                println!("CDC stopped by control plane. Exiting immediately.");
+                info!("CDC stopped by control plane. Exiting immediately.");
                 Some(ControlFlow::Break)
             }
             CdcState::Draining => {
                 // Check if channel is empty
                 if tx.capacity() == self.config.flush_size * 2 {
-                    println!("CDC drained. Exiting gracefully.");
+                    info!("CDC drained. Exiting gracefully.");
                     self.shared_state.set_state(CdcState::Stopped);
                     Some(ControlFlow::Break)
                 } else {
@@ -363,7 +362,7 @@ impl CdcEngine {
                 Ok(lsn)
             }
             WalMessage::Unknown(tag) => {
-                eprintln!("Unknown replication message tag: {}", tag);
+                warn!("Unknown replication message tag: {}", tag);
                 Ok(0)
             }
         }
@@ -379,26 +378,35 @@ impl CdcEngine {
         S: SinkExt<bytes::Bytes> + Unpin,
         S::Error: std::error::Error + Send + Sync + 'static,
     {
-        // 1. Update SharedState
-        self.shared_state.confirm_lsn(confirmed_lsn);
+        // CRITICAL: We MUST save checkpoint before confirming to PostgreSQL.
+        // If we confirm to PostgreSQL but fail to save locally, we could:
+        // 1. PostgreSQL discards WAL (thinking we persisted it)
+        // 2. On crash, we restart from old checkpoint
+        // 3. WAL data is gone → permanent data loss
 
-        // 2. Save checkpoint
+        // 1. Save checkpoint to persistent storage
         if let Err(e) = self.state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await
         {
-            eprintln!("Failed to save checkpoint: {}", e);
-            return Ok(()); // Not fatal
+            error!("Failed to save checkpoint at LSN 0x{:X}: {}", confirmed_lsn, e);
+            error!("NOT confirming to PostgreSQL to prevent data loss");
+            // Return error to halt replication loop
+            return Err(e);
         }
 
-        // 3. Confirm to PostgreSQL
+        // 2. Update SharedState (after successful persistence)
+        self.shared_state.confirm_lsn(confirmed_lsn);
+
+        // 3. Confirm to PostgreSQL (only after checkpoint is safely persisted)
         let status = build_standby_status_update(confirmed_lsn);
         if let Err(e) = replication_stream.send(status).await {
-            eprintln!("Failed to send status update to PostgreSQL: {}", e);
-            return Ok(()); // Not fatal
+            error!("Failed to send status update to PostgreSQL: {}", e);
+            error!("Checkpoint saved but not confirmed - may cause duplicate events on restart");
+            return Err(anyhow::Error::new(e));
         }
 
-        println!("[OK] Checkpoint confirmed: LSN 0x{:X}", confirmed_lsn);
+        debug!("Checkpoint confirmed: LSN 0x{:X}", confirmed_lsn);
         Ok(())
     }
 }

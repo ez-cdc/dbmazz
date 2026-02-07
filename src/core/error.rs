@@ -27,6 +27,7 @@ pub enum CoreError {
     },
 
     /// Serialization/deserialization errors
+    #[allow(dead_code)]
     SerializationError {
         message: String,
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
@@ -223,6 +224,7 @@ impl std::error::Error for CoreError {
 }
 
 /// Result type alias using CoreError
+#[allow(dead_code)]
 pub type CoreResult<T> = Result<T, CoreError>;
 
 #[cfg(test)]

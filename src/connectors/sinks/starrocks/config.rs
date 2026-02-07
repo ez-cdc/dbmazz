@@ -21,7 +21,7 @@ const DEFAULT_MYSQL_PORT: u16 = 9030;
 ///
 /// This struct contains all the configuration needed to connect to StarRocks
 /// for both Stream Load (HTTP) and DDL operations (MySQL protocol).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StarRocksSinkConfig {
     /// HTTP URL for Stream Load API (e.g., "http://starrocks:8040")
     pub http_url: String,
@@ -45,6 +45,20 @@ pub struct StarRocksSinkConfig {
     /// Maximum filter ratio for Stream Load (default: 0.2)
     #[allow(dead_code)]
     pub max_filter_ratio: f64,
+}
+
+impl std::fmt::Debug for StarRocksSinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StarRocksSinkConfig")
+            .field("http_url", &self.http_url)
+            .field("mysql_port", &self.mysql_port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_filter_ratio", &self.max_filter_ratio)
+            .finish()
+    }
 }
 
 #[allow(dead_code)]

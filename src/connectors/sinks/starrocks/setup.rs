@@ -13,10 +13,12 @@
 
 use anyhow::{Result, anyhow};
 use mysql_async::{Pool, Conn, OptsBuilder, prelude::Queryable};
+use tracing::info;
 
 use super::config::StarRocksSinkConfig;
 use super::types::TypeMapper;
 use crate::core::DataType;
+use crate::utils::validate_sql_identifier;
 
 /// CDC audit columns that must exist in all replicated StarRocks tables.
 #[allow(dead_code)]
@@ -91,7 +93,7 @@ impl StarRocksSetup {
     ///
     /// * `tables` - List of table names to set up
     pub async fn run(&self, tables: &[String]) -> Result<()> {
-        println!("StarRocks Setup:");
+        info!("StarRocks Setup:");
 
         // 1. Verify connectivity
         self.verify_connection().await?;
@@ -102,7 +104,7 @@ impl StarRocksSetup {
         // 3. Ensure audit columns exist
         self.ensure_audit_columns(tables).await?;
 
-        println!("[OK] StarRocks setup complete");
+        info!("[OK] StarRocks setup complete");
         Ok(())
     }
 
@@ -116,7 +118,7 @@ impl StarRocksSetup {
             .await
             .map_err(|e| anyhow!("Connection test failed: {}", e))?;
 
-        println!("  [OK] StarRocks MySQL connection OK");
+        info!("  [OK] StarRocks MySQL connection OK");
         Ok(())
     }
 
@@ -145,7 +147,7 @@ impl StarRocksSetup {
                 ));
             }
 
-            println!("  [OK] Table {} exists", table_name);
+            info!("  [OK] Table {} exists", table_name);
         }
 
         Ok(())
@@ -162,14 +164,26 @@ impl StarRocksSetup {
 
     /// Adds audit columns to a specific table if they don't exist.
     async fn ensure_audit_columns_for_table(&self, table: &str) -> Result<()> {
+        // Validate table name to prevent SQL injection
+        validate_sql_identifier(table)
+            .map_err(|e| anyhow!("Invalid table name '{}': {}", table, e))?;
+
+        // Validate database name
+        validate_sql_identifier(&self.config.database)
+            .map_err(|e| anyhow!("Invalid database name '{}': {}", self.config.database, e))?;
+
         let mut conn = self.get_connection().await?;
 
         // Get existing columns
         let existing_columns = self.get_table_columns(&mut conn, table).await?;
 
         for (col_name, col_def) in AUDIT_COLUMNS {
+            // Validate column name (although these are constants, it's good practice)
+            validate_sql_identifier(col_name)
+                .map_err(|e| anyhow!("Invalid column name '{}': {}", col_name, e))?;
+
             if !existing_columns.contains(&col_name.to_string()) {
-                println!("  Adding audit column {} to {}", col_name, table);
+                info!("  Adding audit column {} to {}", col_name, table);
 
                 let sql = format!(
                     "ALTER TABLE {}.{} ADD COLUMN {} {}",
@@ -180,9 +194,9 @@ impl StarRocksSetup {
                     .await
                     .map_err(|e| anyhow!("Failed to add column {} to {}: {}", col_name, table, e))?;
 
-                println!("  [OK] Column {} added to {}", col_name, table);
+                info!("  [OK] Column {} added to {}", col_name, table);
             } else {
-                println!("  [OK] Column {} already exists in {}", col_name, table);
+                info!("  [OK] Column {} already exists in {}", col_name, table);
             }
         }
 
@@ -202,6 +216,18 @@ impl StarRocksSetup {
         column_name: &str,
         data_type: &DataType,
     ) -> Result<()> {
+        // Validate table name to prevent SQL injection
+        validate_sql_identifier(table)
+            .map_err(|e| anyhow!("Invalid table name '{}': {}", table, e))?;
+
+        // Validate column name
+        validate_sql_identifier(column_name)
+            .map_err(|e| anyhow!("Invalid column name '{}': {}", column_name, e))?;
+
+        // Validate database name
+        validate_sql_identifier(&self.config.database)
+            .map_err(|e| anyhow!("Invalid database name '{}': {}", self.config.database, e))?;
+
         let sr_type = self.type_mapper.to_starrocks_type(data_type);
 
         let sql = format!(
@@ -213,7 +239,7 @@ impl StarRocksSetup {
 
         match conn.query_drop(&sql).await {
             Ok(_) => {
-                println!(
+                info!(
                     "Schema evolution: added column {} ({}) to {}",
                     column_name, sr_type, table
                 );
@@ -223,7 +249,7 @@ impl StarRocksSetup {
                 let err_msg = e.to_string();
                 // Ignore if column already exists
                 if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
-                    println!("Column {} already exists in {}, skipping", column_name, table);
+                    info!("Column {} already exists in {}, skipping", column_name, table);
                     Ok(())
                 } else {
                     Err(anyhow!(

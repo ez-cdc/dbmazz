@@ -5,6 +5,7 @@ mod cpu_metrics;
 use tonic::transport::Server;
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use std::sync::Arc;
+use tracing::info;
 use state::SharedState;
 use services::{health_service, control_service, status_service, metrics_service};
 
@@ -17,7 +18,7 @@ pub async fn start_grpc_server(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
-    println!("gRPC server listening on {}", addr);
+    info!("gRPC server listening on {}", addr);
 
     // Configure reflection service so grpcurl works without .proto files
     let reflection_service = ReflectionBuilder::configure()

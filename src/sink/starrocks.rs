@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use chrono::Utc;
 use mysql_async::{Pool, Conn, OptsBuilder, prelude::Queryable};
+use tracing::info;
 
 use crate::sink::Sink;
 use crate::sink::curl_loader::CurlStreamLoader;
@@ -29,9 +30,9 @@ impl StarRocksSink {
     pub fn new(base_url: String, database: String, user: String, pass: String) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         
-        println!("StarRocksSink initialized:");
-        println!("  base_url: {}", base_url);
-        println!("  database: {}", database);
+        info!("StarRocksSink initialized:");
+        info!("  base_url: {}", base_url);
+        info!("  database: {}", database);
 
         // Extract host from base_url for MySQL connection
         let mysql_host = base_url
@@ -198,7 +199,7 @@ impl StarRocksSink {
                         ));
                     }
 
-                    eprintln!(
+                    info!(
                         "Retry {}/{} for {}: {}",
                         attempt,
                         max_retries,
@@ -278,7 +279,7 @@ impl StarRocksSink {
             // Try to execute DDL, ignore error if column already exists
             match self.execute_ddl(&sql).await {
                 Ok(_) => {
-                    println!(
+                    info!(
                         "Schema evolution: added column {} ({}) to {}",
                         col.name, sr_type, delta.table_name
                     );
@@ -287,7 +288,7 @@ impl StarRocksSink {
                     let err_msg = e.to_string();
                     // StarRocks returns "Duplicate column name" if column already exists
                     if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
-                        println!(
+                        info!(
                             "Column {} already exists in {}, skipping",
                             col.name, delta.table_name
                         );
@@ -414,31 +415,32 @@ impl Sink for StarRocksSink {
                     }
                 },
 
-                CdcMessage::Delete { relation_id, old_tuple } => {
-                    if let Some(old) = old_tuple {
-                        if let Some(schema) = schema_cache.get(*relation_id) {
-                            // Skip internal dbmazz tables
-                            if is_internal_table(&schema.name) {
-                                continue;
-                            }
-                            // DELETEs are always full row (we need all fields)
-                            let mut row = self.tuple_to_json(old, schema)?;
-
-                            // CDC audit columns
-                            row.insert("dbmazz_op_type", json!(2)); // 2 = DELETE
-                            row.insert("dbmazz_is_deleted", json!(true)); // Soft delete
-                            row.insert("dbmazz_synced_at", json!(&synced_at));
-                            row.insert("dbmazz_cdc_version", json!(lsn as i64));
-
-                            let key = BatchKey {
-                                relation_id: *relation_id,
-                                toast_bitmap: 0  // Full row
-                            };
-                            batches.entry(key)
-                                .or_insert_with(|| (Vec::new(), None))
-                                .0.push(row);
+                CdcMessage::Delete { relation_id, old_tuple: Some(old) } => {
+                    if let Some(schema) = schema_cache.get(*relation_id) {
+                        // Skip internal dbmazz tables
+                        if is_internal_table(&schema.name) {
+                            continue;
                         }
+                        // DELETEs are always full row (we need all fields)
+                        let mut row = self.tuple_to_json(old, schema)?;
+
+                        // CDC audit columns
+                        row.insert("dbmazz_op_type", json!(2)); // 2 = DELETE
+                        row.insert("dbmazz_is_deleted", json!(true)); // Soft delete
+                        row.insert("dbmazz_synced_at", json!(&synced_at));
+                        row.insert("dbmazz_cdc_version", json!(lsn as i64));
+
+                        let key = BatchKey {
+                            relation_id: *relation_id,
+                            toast_bitmap: 0  // Full row
+                        };
+                        batches.entry(key)
+                            .or_insert_with(|| (Vec::new(), None))
+                            .0.push(row);
                     }
+                },
+                CdcMessage::Delete { old_tuple: None, .. } => {
+                    // Ignore deletes without old tuple
                 },
 
                 // Begin, Commit, Relation, KeepAlive, Unknown - don't need sink

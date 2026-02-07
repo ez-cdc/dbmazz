@@ -17,6 +17,9 @@
 
 use anyhow::{Context, Result};
 use tokio_postgres::{Client, NoTls};
+use tracing::{error, info, warn};
+
+use crate::utils::validate_sql_identifier;
 
 /// PostgreSQL setup manager for CDC
 pub struct PostgresSetup<'a> {
@@ -44,7 +47,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Execute complete PostgreSQL setup
     pub async fn run(&self) -> Result<()> {
-        println!("PostgreSQL Setup:");
+        info!("PostgreSQL Setup:");
 
         // 1. Verify that tables exist
         self.verify_tables_exist().await?;
@@ -58,7 +61,7 @@ impl<'a> PostgresSetup<'a> {
         // 4. Create/verify Replication Slot
         self.ensure_replication_slot().await?;
 
-        println!("[OK] PostgreSQL setup complete");
+        info!("[OK] PostgreSQL setup complete");
         Ok(())
     }
 
@@ -84,7 +87,7 @@ impl<'a> PostgresSetup<'a> {
                 anyhow::bail!("Table '{}' not found in PostgreSQL", table);
             }
 
-            println!("  [OK] Table {} exists", table);
+            info!("  [OK] Table {} exists", table);
         }
         Ok(())
     }
@@ -92,6 +95,10 @@ impl<'a> PostgresSetup<'a> {
     /// Configure REPLICA IDENTITY FULL on all tables
     async fn ensure_replica_identity(&self) -> Result<()> {
         for table in self.tables {
+            // Validate table name to prevent SQL injection
+            validate_sql_identifier(table)
+                .with_context(|| format!("Invalid table name: {}", table))?;
+
             let (schema, table_name) = parse_table_name(table);
 
             let row = self
@@ -110,7 +117,7 @@ impl<'a> PostgresSetup<'a> {
             let identity_char = replica_identity as u8 as char;
 
             if identity_char != 'f' {
-                println!("  Setting REPLICA IDENTITY FULL on {}", table);
+                info!("  Setting REPLICA IDENTITY FULL on {}", table);
                 self.client
                     .execute(
                         &format!("ALTER TABLE {} REPLICA IDENTITY FULL", table),
@@ -120,9 +127,9 @@ impl<'a> PostgresSetup<'a> {
                     .with_context(|| {
                         format!("Failed to set REPLICA IDENTITY FULL on {}", table)
                     })?;
-                println!("  [OK] REPLICA IDENTITY FULL set on {}", table);
+                info!("  [OK] REPLICA IDENTITY FULL set on {}", table);
             } else {
-                println!("  [OK] {} already has REPLICA IDENTITY FULL", table);
+                info!("  [OK] {} already has REPLICA IDENTITY FULL", table);
             }
         }
         Ok(())
@@ -130,6 +137,10 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create/verify Publication
     async fn ensure_publication(&self) -> Result<()> {
+        // Validate publication name to prevent SQL injection
+        validate_sql_identifier(self.publication_name)
+            .with_context(|| format!("Invalid publication name: {}", self.publication_name))?;
+
         // Check if publication exists
         let exists: bool = self
             .client
@@ -142,13 +153,17 @@ impl<'a> PostgresSetup<'a> {
             .get(0);
 
         if exists {
-            println!("  [OK] Publication {} exists", self.publication_name);
+            info!("  [OK] Publication {} exists", self.publication_name);
 
             // Verify that it includes all tables
             let missing = self.get_missing_tables_in_publication().await?;
 
             for table in missing {
-                println!(
+                // Validate each table name before adding
+                validate_sql_identifier(&table)
+                    .with_context(|| format!("Invalid table name: {}", table))?;
+
+                info!(
                     "  Adding {} to publication {}",
                     table, self.publication_name
                 );
@@ -162,11 +177,17 @@ impl<'a> PostgresSetup<'a> {
                     )
                     .await
                     .with_context(|| format!("Failed to add {} to publication", table))?;
-                println!("  [OK] Table {} added to publication", table);
+                info!("  [OK] Table {} added to publication", table);
             }
         } else {
+            // Validate all table names before creating publication
+            for table in self.tables {
+                validate_sql_identifier(table)
+                    .with_context(|| format!("Invalid table name: {}", table))?;
+            }
+
             // Create new publication
-            println!("  Creating publication {}", self.publication_name);
+            info!("  Creating publication {}", self.publication_name);
             let tables = self.tables.join(", ");
             self.client
                 .execute(
@@ -180,7 +201,7 @@ impl<'a> PostgresSetup<'a> {
                 .with_context(|| {
                     format!("Failed to create publication {}", self.publication_name)
                 })?;
-            println!("  [OK] Publication {} created", self.publication_name);
+            info!("  [OK] Publication {} created", self.publication_name);
         }
 
         Ok(())
@@ -233,13 +254,13 @@ impl<'a> PostgresSetup<'a> {
             Some(row) => {
                 let is_active: bool = row.get(0);
                 if is_active {
-                    println!(
+                    info!(
                         "  [OK] Replication slot {} exists and is active (recovery mode)",
                         self.slot_name
                     );
                 } else {
                     // Orphaned slot - drop and recreate
-                    println!(
+                    info!(
                         "  [WARN] Replication slot {} exists but is inactive, dropping...",
                         self.slot_name
                     );
@@ -261,7 +282,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create a new replication slot
     async fn create_replication_slot(&self) -> Result<()> {
-        println!("  Creating replication slot {}", self.slot_name);
+        info!("  Creating replication slot {}", self.slot_name);
         self.client
             .execute(
                 "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
@@ -269,7 +290,7 @@ impl<'a> PostgresSetup<'a> {
             )
             .await
             .with_context(|| format!("Failed to create replication slot {}", self.slot_name))?;
-        println!("  [OK] Replication slot {} created", self.slot_name);
+        info!("  [OK] Replication slot {} created", self.slot_name);
         Ok(())
     }
 }
@@ -298,7 +319,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client> {
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            eprintln!("PostgreSQL setup connection error: {}", e);
+            error!("PostgreSQL setup connection error: {}", e);
         }
     });
 
@@ -310,7 +331,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client> {
 /// Drops the replication slot to free the resource. This should be
 /// called during graceful shutdown to prevent slot accumulation.
 pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> Result<()> {
-    println!("Cleaning up PostgreSQL resources...");
+    info!("Cleaning up PostgreSQL resources...");
 
     let client = create_postgres_client(database_url).await?;
 
@@ -328,12 +349,12 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
             let is_active: bool = row.get(0);
             let active_pid: Option<i32> = row.get(1);
 
-            println!("  Dropping replication slot: {}", slot_name);
+            info!("  Dropping replication slot: {}", slot_name);
 
             // If slot is active, first terminate the backend
             if is_active {
                 if let Some(pid) = active_pid {
-                    println!(
+                    info!(
                         "  [WARN] Slot is active (pid={}), terminating backend...",
                         pid
                     );
@@ -344,10 +365,10 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                         .unwrap_or(false);
 
                     if terminated {
-                        println!("  [OK] Backend terminated");
+                        info!("  [OK] Backend terminated");
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                     } else {
-                        println!("  [WARN] Could not terminate backend");
+                        info!("  [WARN] Could not terminate backend");
                     }
                 }
             }
@@ -362,14 +383,14 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                     .await
                 {
                     Ok(_) => {
-                        println!("  [OK] Replication slot {} dropped", slot_name);
+                        info!("  [OK] Replication slot {} dropped", slot_name);
                         return Ok(());
                     }
                     Err(e) => {
                         last_error = Some(e.to_string());
                         retries -= 1;
                         if retries > 0 {
-                            println!(
+                            info!(
                                 "  [WARN] Drop failed, retrying in 1s... ({} retries left)",
                                 retries
                             );
@@ -385,7 +406,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
             );
         }
         None => {
-            println!(
+            info!(
                 "  [INFO] Replication slot {} not found (already dropped?)",
                 slot_name
             );

@@ -14,6 +14,7 @@ pub enum SourcePosition {
     FilePosition { file: String, position: u64 },
 }
 
+#[allow(dead_code)]
 impl SourcePosition {
     /// Creates a new LSN position
     pub fn lsn(lsn: u64) -> Self {

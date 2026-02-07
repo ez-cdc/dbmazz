@@ -8,6 +8,7 @@
 
 use anyhow::{bail, Result};
 use url::Url;
+use tracing::warn;
 
 /// PostgreSQL-specific source configuration
 ///
@@ -111,7 +112,7 @@ pub fn validate_postgres_url(url: &str) -> Result<()> {
 
     // Warn about missing database
     if parsed.path().is_empty() || parsed.path() == "/" {
-        eprintln!("WARNING: No database specified in URL, will use default database");
+        warn!("No database specified in URL, will use default database");
     }
 
     Ok(())

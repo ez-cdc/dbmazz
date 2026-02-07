@@ -3,6 +3,7 @@ pub mod postgres;
 pub mod starrocks;
 
 use anyhow::Result;
+use tracing::info;
 
 pub use error::SetupError;
 pub use postgres::cleanup_postgres_resources;
@@ -20,9 +21,9 @@ impl SetupManager {
 
     /// Execute complete setup
     pub async fn run(&self) -> Result<(), SetupError> {
-        println!("\n═══════════════════════════════════════");
-        println!("        SETUP PHASE");
-        println!("═══════════════════════════════════════\n");
+        info!("\n═══════════════════════════════════════");
+        info!("        SETUP PHASE");
+        info!("═══════════════════════════════════════\n");
 
         // 1. Setup PostgreSQL
         self.setup_postgres().await?;
@@ -30,9 +31,9 @@ impl SetupManager {
         // 2. Setup StarRocks
         self.setup_starrocks().await?;
 
-        println!("\n═══════════════════════════════════════");
-        println!("    [OK] SETUP COMPLETE");
-        println!("═══════════════════════════════════════\n");
+        info!("\n═══════════════════════════════════════");
+        info!("    [OK] SETUP COMPLETE");
+        info!("═══════════════════════════════════════\n");
 
         Ok(())
     }
