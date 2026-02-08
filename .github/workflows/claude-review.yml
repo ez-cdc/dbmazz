@@ -1,0 +1,56 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            You are reviewing a Rust CDC daemon that reads PostgreSQL WAL via logical replication
+            and streams changes to StarRocks via Stream Load HTTP API. Data integrity is critical.
+
+            IMPORTANT RULES FOR THIS REVIEW:
+            - ONLY comment on issues you are HIGHLY confident about. Do NOT speculate or guess.
+            - Do NOT comment on code that looks correct. Silence means approval.
+            - Do NOT suggest style changes, naming preferences, or subjective improvements.
+            - Do NOT add comments about adding tests unless there is a clear bug.
+            - Focus ONLY on: data integrity bugs, security issues, type safety, and correctness problems.
+            - If you are not sure whether something is a bug, do NOT flag it.
+            - Keep comments concise and actionable. No fluff.
+
+            SPECIFIC PATTERNS TO CHECK (these are critical for data integrity):
+            1. confirmed_lsn MUST only advance AFTER data is committed to StarRocks (premature = data loss)
+            2. StarRocks Stream Load returns HTTP 200 even for failures - MUST check response body Status field
+            3. WAL parser MUST handle all pgoutput message types (unknown = log + skip, never panic)
+            4. Column type mapping MUST be exhaustive (unmapped types = clear error, not silent drop)
+            5. HTTP calls to StarRocks MUST have timeouts (hanging = pipeline blocked)
+            6. CSV escaping MUST handle commas, quotes, newlines, null bytes
+            7. NEVER log connection strings, passwords, or auth tokens
+            8. Structs with password fields MUST NOT derive Debug (use custom impl that redacts)
+            9. unwrap() in production code paths is a bug
+            10. Use tracing (info!, warn!, error!), NEVER println! or eprintln!
+
+            Use `mcp__github_inline_comment__create_inline_comment` for specific code issues.
+            Post a brief summary comment via `gh pr comment` ONLY if you found real issues.
+            If no issues found, post a single comment: "No issues found."
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Glob,Grep"
