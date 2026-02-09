@@ -7,6 +7,7 @@ on:
 env:
   COMPONENT: dbmazz
   S3_BUCKET: ez-cdc-releases
+  GCS_BUCKET: ez-cdc-releases-gcp
 
 jobs:
   build:
@@ -105,10 +106,39 @@ jobs:
           aws s3 cp version.txt \
             "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
 
+      # =====================================================================
+      # Upload to GCS (GCP)
+      # =====================================================================
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload versioned binary to GCS
+        run: |
+          gsutil cp target/x86_64-unknown-linux-musl/release/dbmazz \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
+
+          echo "${{ steps.checksum.outputs.CHECKSUM }}  dbmazz-linux-amd64" > checksum.txt
+          gsutil cp checksum.txt \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
+
+      - name: Update latest binary in GCS
+        run: |
+          gsutil cp target/x86_64-unknown-linux-musl/release/dbmazz \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
+
+          echo "${{ steps.version.outputs.VERSION }}" > version.txt
+          gsutil cp version.txt \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
+
       - name: Print deployment info
         run: |
           echo "Deployed dbmazz version: ${{ steps.version.outputs.VERSION }}"
           echo "Checksum (SHA256): ${{ steps.checksum.outputs.CHECKSUM }}"
           echo "Binaries available at:"
-          echo "   - s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
-          echo "   - s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
+          echo "   AWS: s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
+          echo "   GCP: gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
