@@ -6,6 +6,24 @@ use super::error::SetupError;
 use crate::config::Config;
 use crate::utils::validate_sql_identifier;
 
+/// Extract a detailed error message from a tokio_postgres error.
+/// tokio_postgres::Error::Display only prints the error kind (e.g. "db error")
+/// without the actual PostgreSQL message. This function extracts the full detail.
+fn pg_error_message(e: &tokio_postgres::Error) -> String {
+    if let Some(db_err) = e.as_db_error() {
+        let mut msg = format!("{}: {}", db_err.severity(), db_err.message());
+        if let Some(detail) = db_err.detail() {
+            msg.push_str(&format!(" DETAIL: {}", detail));
+        }
+        if let Some(hint) = db_err.hint() {
+            msg.push_str(&format!(" HINT: {}", hint));
+        }
+        msg
+    } else {
+        e.to_string()
+    }
+}
+
 pub struct PostgresSetup<'a> {
     client: &'a Client,
     config: &'a Config,
@@ -54,7 +72,7 @@ impl<'a> PostgresSetup<'a> {
                 .await
                 .map_err(|e| SetupError::PgConnectionFailed {
                     host: "PostgreSQL".to_string(),
-                    error: e.to_string(),
+                    error: pg_error_message(&e),
                 })?
                 .get(0);
 
@@ -94,7 +112,7 @@ impl<'a> PostgresSetup<'a> {
                 .await
                 .map_err(|e| SetupError::PgConnectionFailed {
                     host: "PostgreSQL".to_string(),
-                    error: e.to_string(),
+                    error: pg_error_message(&e),
                 })?;
 
             let replica_identity: i8 = row.get(0);
@@ -111,7 +129,7 @@ impl<'a> PostgresSetup<'a> {
                     .await
                     .map_err(|e| SetupError::PgReplicaIdentityFailed {
                         table: table.clone(),
-                        error: e.to_string(),
+                        error: pg_error_message(&e),
                     })?;
                 info!("  [OK] REPLICA IDENTITY FULL set on {}", table);
             } else {
@@ -140,7 +158,7 @@ impl<'a> PostgresSetup<'a> {
             .await
             .map_err(|e| SetupError::PgPublicationFailed {
                 name: pub_name.clone(),
-                error: e.to_string(),
+                error: pg_error_message(&e),
             })?
             .get(0);
 
@@ -166,7 +184,7 @@ impl<'a> PostgresSetup<'a> {
                     .await
                     .map_err(|e| SetupError::PgPublicationFailed {
                         name: pub_name.clone(),
-                        error: e.to_string(),
+                        error: pg_error_message(&e),
                     })?;
                 info!("  [OK] Table {} added to publication", table);
             }
@@ -190,7 +208,7 @@ impl<'a> PostgresSetup<'a> {
                 .await
                 .map_err(|e| SetupError::PgPublicationFailed {
                     name: pub_name.clone(),
-                    error: e.to_string(),
+                    error: pg_error_message(&e),
                 })?;
             info!("  [OK] Publication {} created", pub_name);
         }
@@ -213,7 +231,7 @@ impl<'a> PostgresSetup<'a> {
             .await
             .map_err(|e| SetupError::PgPublicationFailed {
                 name: pub_name.to_string(),
-                error: e.to_string(),
+                error: pg_error_message(&e),
             })?;
 
         let existing: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
@@ -248,7 +266,7 @@ impl<'a> PostgresSetup<'a> {
             .await
             .map_err(|e| SetupError::PgSlotFailed {
                 name: slot_name.clone(),
-                error: e.to_string(),
+                error: pg_error_message(&e),
             })?;
 
         match slot_info {
@@ -270,7 +288,7 @@ impl<'a> PostgresSetup<'a> {
                         .await
                         .map_err(|e| SetupError::PgSlotFailed {
                             name: slot_name.clone(),
-                            error: format!("failed to drop orphaned slot: {}", e),
+                            error: format!("failed to drop orphaned slot: {}", pg_error_message(&e)),
                         })?;
                     info!("  Creating replication slot {}", slot_name);
                     self.client
@@ -281,7 +299,7 @@ impl<'a> PostgresSetup<'a> {
                         .await
                         .map_err(|e| SetupError::PgSlotFailed {
                             name: slot_name.clone(),
-                            error: e.to_string(),
+                            error: pg_error_message(&e),
                         })?;
                     info!("  [OK] Replication slot {} created", slot_name);
                 }
@@ -297,7 +315,7 @@ impl<'a> PostgresSetup<'a> {
                     .await
                     .map_err(|e| SetupError::PgSlotFailed {
                         name: slot_name.clone(),
-                        error: e.to_string(),
+                        error: pg_error_message(&e),
                     })?;
                 info!("  [OK] Replication slot {} created", slot_name);
             }
@@ -319,7 +337,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
         .await
         .map_err(|e| SetupError::PgConnectionFailed {
             host: clean_url.clone(),
-            error: e.to_string(),
+            error: pg_error_message(&e),
         })?;
 
     // Spawn connection in background
@@ -348,7 +366,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
         .await
         .map_err(|e| SetupError::PgSlotFailed {
             name: slot_name.to_string(),
-            error: e.to_string(),
+            error: pg_error_message(&e),
         })?;
 
     match slot_info {
@@ -398,7 +416,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                         return Ok(());
                     }
                     Err(e) => {
-                        last_error = Some(e.to_string());
+                        last_error = Some(pg_error_message(&e));
                         retries -= 1;
                         if retries > 0 {
                             warn!("  Drop failed, retrying in 1s... ({} retries left)", retries);
