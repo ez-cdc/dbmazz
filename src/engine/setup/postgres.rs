@@ -336,7 +336,7 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
     let (client, connection) = tokio_postgres::connect(&clean_url, NoTls)
         .await
         .map_err(|e| SetupError::PgConnectionFailed {
-            host: clean_url.clone(),
+            host: "PostgreSQL".to_string(),
             error: pg_error_message(&e),
         })?;
 
