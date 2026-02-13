@@ -42,7 +42,7 @@ mod config;
 mod parser;
 mod replication;
 mod setup;
-mod types;
+pub(crate) mod types;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

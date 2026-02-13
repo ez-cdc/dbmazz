@@ -131,6 +131,10 @@ impl StarRocksSink {
 
     /// Converts a PostgreSQL value to the appropriate JSON type
     fn convert_pg_value(&self, text: &str, pg_type_id: u32) -> Value {
+        use crate::connectors::sources::postgres::types::{
+            normalize_timestamptz, parse_pg_array, strip_money_symbol,
+        };
+
         match pg_type_id {
             // Boolean
             16 => {
@@ -151,10 +155,35 @@ impl StarRocksSink {
                     .map(|f| json!(f))
                     .unwrap_or_else(|_| json!(text))
             },
+            // Money - strip currency symbol
+            790 => {
+                let cleaned = strip_money_symbol(text);
+                json!(cleaned)
+            },
             // NUMERIC/DECIMAL - keep as string for precision
             1700 => json!(text),
-            // Timestamp types
-            1114 | 1184 => json!(text),
+            // Timestamp (no TZ) - keep as-is
+            1114 => json!(text),
+            // TimestampTZ - normalize to UTC
+            1184 => {
+                let normalized = normalize_timestamptz(text);
+                json!(normalized)
+            },
+            // Integer arrays
+            1005 | 1007 | 1016 => {
+                let json_str = parse_pg_array(text, "int");
+                sonic_rs::from_str(&json_str).unwrap_or_else(|_| json!(text))
+            },
+            // Float arrays
+            1021 | 1022 => {
+                let json_str = parse_pg_array(text, "float");
+                sonic_rs::from_str(&json_str).unwrap_or_else(|_| json!(text))
+            },
+            // Text/varchar arrays
+            1009 | 1015 => {
+                let json_str = parse_pg_array(text, "text");
+                sonic_rs::from_str(&json_str).unwrap_or_else(|_| json!(text))
+            },
             // Default: string
             _ => json!(text),
         }

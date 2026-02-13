@@ -208,6 +208,10 @@ impl NewSinkAdapter {
 
     /// Convert a PostgreSQL text value to a generic Value based on type OID
     fn convert_pg_value(&self, text: &str, pg_type_id: u32) -> Value {
+        use crate::connectors::sources::postgres::types::{
+            normalize_timestamptz, parse_pg_array, strip_money_symbol,
+        };
+
         match pg_type_id {
             // Boolean
             16 => {
@@ -218,14 +222,24 @@ impl NewSinkAdapter {
             21 | 23 | 20 => text.parse::<i64>().map(Value::Int64).unwrap_or_else(|_| Value::String(text.to_string())),
             // Float types (FLOAT4, FLOAT8)
             700 | 701 => text.parse::<f64>().map(Value::Float64).unwrap_or_else(|_| Value::String(text.to_string())),
+            // Money - strip currency symbol
+            790 => Value::Decimal(strip_money_symbol(text)),
             // NUMERIC/DECIMAL - keep as string for precision
             1700 => Value::Decimal(text.to_string()),
-            // Timestamp types
-            1114 | 1184 => Value::String(text.to_string()),
+            // Timestamp (no TZ) - keep as-is
+            1114 => Value::String(text.to_string()),
+            // TimestampTZ - normalize to UTC
+            1184 => Value::String(normalize_timestamptz(text)),
             // JSON/JSONB
             114 | 3802 => Value::Json(text.to_string()),
             // UUID
             2950 => Value::Uuid(text.to_string()),
+            // Integer arrays
+            1005 | 1007 | 1016 => Value::Json(parse_pg_array(text, "int")),
+            // Float arrays
+            1021 | 1022 => Value::Json(parse_pg_array(text, "float")),
+            // Text/varchar arrays
+            1009 | 1015 => Value::Json(parse_pg_array(text, "text")),
             // Default: string
             _ => Value::String(text.to_string()),
         }

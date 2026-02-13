@@ -181,6 +181,10 @@ impl TypeMapper {
     ///
     /// JSON value suitable for Stream Load
     pub fn pg_text_to_json(&self, text: &str, pg_type_id: u32) -> serde_json::Value {
+        use crate::connectors::sources::postgres::types::{
+            normalize_timestamptz, parse_pg_array, strip_money_symbol,
+        };
+
         match pg_type_id {
             // Boolean
             16 => {
@@ -201,13 +205,38 @@ impl TypeMapper {
                     .map(|f| serde_json::json!(f))
                     .unwrap_or_else(|_| serde_json::json!(text))
             }
+            // Money - strip currency symbol
+            790 => {
+                let cleaned = strip_money_symbol(text);
+                serde_json::json!(cleaned)
+            }
             // NUMERIC/DECIMAL - keep as string for precision
             1700 => serde_json::json!(text),
-            // Timestamp types
-            1114 | 1184 => serde_json::json!(text),
+            // Timestamp (no TZ) - keep as-is
+            1114 => serde_json::json!(text),
+            // TimestampTZ - normalize to UTC
+            1184 => {
+                let normalized = normalize_timestamptz(text);
+                serde_json::json!(normalized)
+            }
             // JSON/JSONB
             114 | 3802 => {
                 serde_json::from_str(text).unwrap_or(serde_json::json!(text))
+            }
+            // Integer arrays
+            1005 | 1007 | 1016 => {
+                let json_str = parse_pg_array(text, "int");
+                serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!(text))
+            }
+            // Float arrays
+            1021 | 1022 => {
+                let json_str = parse_pg_array(text, "float");
+                serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!(text))
+            }
+            // Text/varchar arrays
+            1009 | 1015 => {
+                let json_str = parse_pg_array(text, "text");
+                serde_json::from_str(&json_str).unwrap_or_else(|_| serde_json::json!(text))
             }
             // Default: string
             _ => serde_json::json!(text),
@@ -359,5 +388,57 @@ mod tests {
 
         assert!(result.is_string());
         assert_eq!(result.as_str().unwrap(), "48656c6c6f"); // Hex of "Hello"
+    }
+
+    #[test]
+    fn test_pg_text_to_json_money() {
+        let mapper = TypeMapper::new();
+        assert_eq!(mapper.pg_text_to_json("$99.95", 790), serde_json::json!("99.95"));
+        assert_eq!(mapper.pg_text_to_json("$1,234.56", 790), serde_json::json!("1234.56"));
+        assert_eq!(mapper.pg_text_to_json("-$100.00", 790), serde_json::json!("-100.00"));
+    }
+
+    #[test]
+    fn test_pg_text_to_json_timestamptz() {
+        let mapper = TypeMapper::new();
+        // TimestampTZ gets normalized to UTC
+        assert_eq!(
+            mapper.pg_text_to_json("2024-06-15 17:30:00+05:30", 1184),
+            serde_json::json!("2024-06-15 12:00:00")
+        );
+        // Plain timestamp stays as-is
+        assert_eq!(
+            mapper.pg_text_to_json("2024-06-15 17:30:00", 1114),
+            serde_json::json!("2024-06-15 17:30:00")
+        );
+    }
+
+    #[test]
+    fn test_pg_text_to_json_arrays() {
+        let mapper = TypeMapper::new();
+        // Int array
+        let result = mapper.pg_text_to_json("{10,20,30}", 1007);
+        assert!(result.is_array());
+        assert_eq!(result, serde_json::json!([10, 20, 30]));
+
+        // Float array
+        let result = mapper.pg_text_to_json("{1.5,2.5}", 1022);
+        assert!(result.is_array());
+        assert_eq!(result, serde_json::json!([1.5, 2.5]));
+
+        // Text array
+        let result = mapper.pg_text_to_json("{hello,world}", 1009);
+        assert!(result.is_array());
+        assert_eq!(result, serde_json::json!(["hello", "world"]));
+
+        // Empty array
+        let result = mapper.pg_text_to_json("{}", 1007);
+        assert!(result.is_array());
+        assert_eq!(result, serde_json::json!([]));
+
+        // Array with NULL
+        let result = mapper.pg_text_to_json("{NULL,1,2}", 1007);
+        assert!(result.is_array());
+        assert_eq!(result, serde_json::json!([null, 1, 2]));
     }
 }

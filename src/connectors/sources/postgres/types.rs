@@ -214,13 +214,12 @@ pub fn tuple_data_to_value(data: &TupleData, type_id: u32) -> Value {
                 pg_oid::FLOAT4 | pg_oid::FLOAT8 => {
                     text.parse::<f64>().map(Value::Float64).unwrap_or_else(|_| Value::String(text.to_string()))
                 }
-                pg_oid::NUMERIC | pg_oid::MONEY => Value::Decimal(text.to_string()),
+                pg_oid::NUMERIC => Value::Decimal(text.to_string()),
+                pg_oid::MONEY => Value::Decimal(strip_money_symbol(text)),
                 pg_oid::JSON | pg_oid::JSONB => Value::Json(text.to_string()),
                 pg_oid::UUID => Value::Uuid(text.to_string()),
-                pg_oid::TIMESTAMP | pg_oid::TIMESTAMPTZ => {
-                    // Keep as string for now; could parse to i64 microseconds
-                    Value::String(text.to_string())
-                }
+                pg_oid::TIMESTAMP => Value::String(text.to_string()),
+                pg_oid::TIMESTAMPTZ => Value::String(normalize_timestamptz(text)),
                 pg_oid::BYTEA => {
                     // PostgreSQL sends bytea as hex-encoded with \x prefix
                     if let Some(stripped) = text.strip_prefix("\\x") {
@@ -231,6 +230,15 @@ pub fn tuple_data_to_value(data: &TupleData, type_id: u32) -> Value {
                     } else {
                         Value::Bytes(bytes.to_vec())
                     }
+                }
+                pg_oid::INT2_ARRAY | pg_oid::INT4_ARRAY | pg_oid::INT8_ARRAY => {
+                    Value::Json(parse_pg_array(text, "int"))
+                }
+                pg_oid::FLOAT4_ARRAY | pg_oid::FLOAT8_ARRAY => {
+                    Value::Json(parse_pg_array(text, "float"))
+                }
+                pg_oid::TEXT_ARRAY | pg_oid::VARCHAR_ARRAY => {
+                    Value::Json(parse_pg_array(text, "text"))
                 }
                 _ => Value::String(text.to_string()),
             }
@@ -262,6 +270,200 @@ pub fn columns_to_defs(columns: &[Column]) -> Vec<ColumnDef> {
             ColumnDef::new(col.name.clone(), data_type, nullable)
         })
         .collect()
+}
+
+/// Parse PostgreSQL array text format into a JSON array string.
+///
+/// PostgreSQL arrays use `{elem1,elem2,...}` format. This converts
+/// to JSON array format `[elem1,elem2,...]`.
+///
+/// # Arguments
+/// * `text` - PostgreSQL array text (e.g., `{1,2,3}`, `{hello,"world"}`)
+/// * `element_type` - One of `"int"`, `"float"`, or `"text"`
+pub(crate) fn parse_pg_array(text: &str, element_type: &str) -> String {
+    let trimmed = text.trim();
+
+    if trimmed == "{}" {
+        return "[]".to_string();
+    }
+
+    let inner = match trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        Some(s) => s,
+        None => {
+            // Not a valid PG array, wrap as JSON string
+            return format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+        }
+    };
+
+    let elements = parse_pg_array_elements(inner);
+
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('[');
+
+    for (i, elem) in elements.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+
+        if elem.eq_ignore_ascii_case("NULL") {
+            out.push_str("null");
+        } else {
+            match element_type {
+                "int" => {
+                    if elem.parse::<i64>().is_ok() {
+                        out.push_str(elem);
+                    } else {
+                        json_quote_into(&mut out, elem);
+                    }
+                }
+                "float" => match elem.parse::<f64>() {
+                    Ok(f) if f.is_finite() => out.push_str(elem),
+                    _ => json_quote_into(&mut out, elem),
+                },
+                _ => {
+                    // text: always quote as JSON string
+                    json_quote_into(&mut out, elem);
+                }
+            }
+        }
+    }
+
+    out.push(']');
+    out
+}
+
+/// Parse the inner content of a PG array into individual element strings.
+/// Handles quoted strings with escaped characters.
+fn parse_pg_array_elements(inner: &str) -> Vec<String> {
+    let mut elements = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = inner.chars();
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if ch == '"' {
+                in_quotes = false;
+            } else {
+                current.push(ch);
+            }
+        } else {
+            match ch {
+                '"' => in_quotes = true,
+                ',' => {
+                    elements.push(std::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            }
+        }
+    }
+
+    // Last element
+    if !current.is_empty() || !elements.is_empty() {
+        elements.push(current);
+    }
+
+    elements
+}
+
+/// Write a JSON-escaped quoted string into the buffer.
+fn json_quote_into(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                // Other control characters as unicode escapes
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Normalize a PostgreSQL `timestamptz` text value to UTC without offset.
+///
+/// Parses the offset-aware timestamp, converts to UTC, and formats without
+/// the timezone offset (since StarRocks DATETIME doesn't store TZ info).
+/// Preserves microsecond precision if present in the original.
+///
+/// Falls back to returning the original string if parsing fails.
+pub(crate) fn normalize_timestamptz(text: &str) -> String {
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    // Try parsing directly (works for +HH:MM offsets)
+    let parse_result = DateTime::<FixedOffset>::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .or_else(|_| {
+            // PG may emit short offsets like +05 instead of +05:00
+            let expanded = expand_short_tz_offset(text);
+            DateTime::<FixedOffset>::parse_from_str(&expanded, "%Y-%m-%d %H:%M:%S%.f%:z")
+        });
+
+    match parse_result {
+        Ok(dt) => {
+            let utc = dt.with_timezone(&Utc);
+            if text.contains('.') {
+                utc.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+            } else {
+                utc.format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
+/// Expand short timezone offsets: `+05` -> `+05:00`, `-03` -> `-03:00`.
+fn expand_short_tz_offset(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+
+    // Short offset is exactly +HH or -HH at end (3 chars: sign + 2 digits)
+    if len >= 3 {
+        let sign_pos = len - 3;
+        let sign = bytes[sign_pos];
+        if (sign == b'+' || sign == b'-')
+            && bytes[sign_pos + 1].is_ascii_digit()
+            && bytes[sign_pos + 2].is_ascii_digit()
+        {
+            return format!("{}:00", text);
+        }
+    }
+
+    text.to_string()
+}
+
+/// Strip currency symbols from a PostgreSQL `money` text value.
+///
+/// Converts `$99.95` -> `99.95`, `$1,234.56` -> `1234.56`, `-$100.00` -> `-100.00`.
+/// Handles locale differences: if both `.` and `,` exist, `,` is treated as
+/// thousands separator; if only `,` exists, it's treated as decimal separator.
+pub(crate) fn strip_money_symbol(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '.' || *c == ',')
+        .collect();
+
+    let has_dot = cleaned.contains('.');
+    let has_comma = cleaned.contains(',');
+
+    if has_dot && has_comma {
+        // Both present: comma is thousands separator, remove it
+        cleaned.replace(',', "")
+    } else if has_comma && !has_dot {
+        // Only comma: treat as decimal separator
+        cleaned.replacen(',', ".", 1)
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]
@@ -401,5 +603,148 @@ mod tests {
         assert_eq!(defs[1].name, "name");
         assert_eq!(defs[1].data_type, DataType::String);
         assert!(defs[1].nullable); // non-key column
+    }
+
+    // --- Utility function tests ---
+
+    #[test]
+    fn test_parse_pg_array_int() {
+        assert_eq!(parse_pg_array("{1,2,3}", "int"), "[1,2,3]");
+        assert_eq!(parse_pg_array("{-10,0,42}", "int"), "[-10,0,42]");
+        assert_eq!(parse_pg_array("{}", "int"), "[]");
+        assert_eq!(parse_pg_array("{NULL,1,2}", "int"), "[null,1,2]");
+        assert_eq!(parse_pg_array("{10}", "int"), "[10]");
+    }
+
+    #[test]
+    fn test_parse_pg_array_float() {
+        assert_eq!(parse_pg_array("{1.5,2.3,3.0}", "float"), "[1.5,2.3,3.0]");
+        assert_eq!(parse_pg_array("{NaN}", "float"), "[\"NaN\"]");
+        assert_eq!(parse_pg_array("{Infinity,-Infinity}", "float"), "[\"Infinity\",\"-Infinity\"]");
+        assert_eq!(parse_pg_array("{NULL,1.0}", "float"), "[null,1.0]");
+    }
+
+    #[test]
+    fn test_parse_pg_array_text() {
+        assert_eq!(
+            parse_pg_array("{hello,world}", "text"),
+            "[\"hello\",\"world\"]"
+        );
+        assert_eq!(
+            parse_pg_array("{\"with comma, here\",simple}", "text"),
+            "[\"with comma, here\",\"simple\"]"
+        );
+        assert_eq!(
+            parse_pg_array("{\"with \\\"quotes\\\"\"}", "text"),
+            "[\"with \\\"quotes\\\"\"]"
+        );
+        assert_eq!(parse_pg_array("{}", "text"), "[]");
+        assert_eq!(parse_pg_array("{NULL}", "text"), "[null]");
+    }
+
+    #[test]
+    fn test_normalize_timestamptz() {
+        // Standard offset
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+05:30"),
+            "2024-06-15 12:00:00"
+        );
+        // UTC
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+00:00"),
+            "2024-06-15 17:30:00"
+        );
+        // Short offset (PG often emits +00 instead of +00:00)
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+00"),
+            "2024-06-15 17:30:00"
+        );
+        // Negative offset
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00-03:00"),
+            "2024-06-15 20:30:00"
+        );
+        // With microseconds
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00.123456+05:30"),
+            "2024-06-15 12:00:00.123456"
+        );
+        // Fallback: invalid input returned as-is
+        assert_eq!(
+            normalize_timestamptz("not a timestamp"),
+            "not a timestamp"
+        );
+    }
+
+    #[test]
+    fn test_strip_money_symbol() {
+        assert_eq!(strip_money_symbol("$99.95"), "99.95");
+        assert_eq!(strip_money_symbol("$1,234.56"), "1234.56");
+        assert_eq!(strip_money_symbol("-$100.00"), "-100.00");
+        assert_eq!(strip_money_symbol("$0.00"), "0.00");
+        // European-style with only comma as decimal
+        assert_eq!(strip_money_symbol("€99,95"), "99.95");
+        // Plain number (no symbol)
+        assert_eq!(strip_money_symbol("42.50"), "42.50");
+    }
+
+    #[test]
+    fn test_tuple_data_money() {
+        let val = tuple_data_to_value(
+            &TupleData::Text(Bytes::from("$99.95")),
+            pg_oid::MONEY,
+        );
+        match val {
+            Value::Decimal(s) => assert_eq!(s, "99.95"),
+            _ => panic!("Expected Decimal, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_tuple_data_timestamptz() {
+        let val = tuple_data_to_value(
+            &TupleData::Text(Bytes::from("2024-06-15 17:30:00+05:30")),
+            pg_oid::TIMESTAMPTZ,
+        );
+        match val {
+            Value::String(s) => assert_eq!(s, "2024-06-15 12:00:00"),
+            _ => panic!("Expected String, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_tuple_data_int_array() {
+        let val = tuple_data_to_value(
+            &TupleData::Text(Bytes::from("{10,20,30}")),
+            pg_oid::INT4_ARRAY,
+        );
+        match val {
+            Value::Json(s) => assert_eq!(s, "[10,20,30]"),
+            _ => panic!("Expected Json, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_tuple_data_float_array() {
+        let val = tuple_data_to_value(
+            &TupleData::Text(Bytes::from("{1.5,2.5}")),
+            pg_oid::FLOAT8_ARRAY,
+        );
+        match val {
+            Value::Json(s) => assert_eq!(s, "[1.5,2.5]"),
+            _ => panic!("Expected Json, got {:?}", val),
+        }
+    }
+
+    #[test]
+    fn test_tuple_data_text_array() {
+        let val = tuple_data_to_value(
+            &TupleData::Text(Bytes::from("{hello,world}")),
+            pg_oid::TEXT_ARRAY,
+        );
+        match val {
+            Value::Json(s) => assert_eq!(s, "[\"hello\",\"world\"]"),
+            _ => panic!("Expected Json, got {:?}", val),
+        }
     }
 }
