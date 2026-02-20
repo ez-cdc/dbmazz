@@ -90,7 +90,7 @@ pub async fn handle_xlog_data(
 
             // Update pending events count
             let capacity = tx.capacity();
-            let pending = (flush_size * 2) - capacity;
+            let pending = (flush_size * 2).saturating_sub(capacity);
             shared_state.set_pending(pending as u64);
 
             if let Err(e) = tx.send(event).await {
