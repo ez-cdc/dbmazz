@@ -38,6 +38,6 @@ async fn main() -> Result<()> {
     config.print_banner();
 
     // 2. Create and run CDC engine
-    let engine = CdcEngine::new(config).await?;
+    let engine = CdcEngine::new(config);
     engine.run().await
 }
