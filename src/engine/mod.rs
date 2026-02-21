@@ -25,13 +25,15 @@ use crate::connectors::sinks::create_sink;
 pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
-    state_store: StateStore,
+    state_store: Option<StateStore>,
 }
 
 impl CdcEngine {
     /// Create new CdcEngine
-    pub async fn new(config: Config) -> Result<Self> {
-        // 1. Create SharedState
+    /// NOTE: Does NOT connect to PostgreSQL here. The gRPC server must start first
+    /// so the worker-agent health check can succeed. StateStore is initialized lazily
+    /// in run() after the gRPC server is listening.
+    pub fn new(config: Config) -> Self {
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
@@ -40,21 +42,23 @@ impl CdcEngine {
         };
         let shared_state = SharedState::new(cdc_config);
 
-        // 2. Initialize StateStore
-        let state_store = StateStore::new(&config.database_url).await?;
-        
-        Ok(Self {
+        Self {
             config,
             shared_state,
-            state_store,
-        })
+            state_store: None,
+        }
     }
 
     /// Execute CDC engine
-    pub async fn run(self) -> Result<()> {
-        // Stage: SETUP - gRPC Server
+    pub async fn run(mut self) -> Result<()> {
+        // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)
         self.shared_state.set_stage(Stage::Setup, "Starting gRPC server").await;
         self.start_grpc_server();
+
+        // Stage: SETUP - Initialize StateStore (connects to PostgreSQL for checkpoints)
+        self.shared_state.set_stage(Stage::Setup, "Connecting to checkpoint store").await;
+        let state_store = StateStore::new(&self.config.database_url).await?;
+        self.state_store = Some(state_store);
 
         // Stage: SETUP - Execute automatic setup
         self.shared_state.set_stage(Stage::Setup, "Running automatic setup").await;
@@ -133,7 +137,9 @@ impl CdcEngine {
 
     /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
-        let last_lsn = self.state_store.load_checkpoint(&self.config.slot_name).await?;
+        let state_store = self.state_store.as_ref()
+            .expect("state_store must be initialized before load_checkpoint");
+        let last_lsn = state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
 
         if start_lsn > 0 {
@@ -385,7 +391,9 @@ impl CdcEngine {
         // 3. WAL data is gone → permanent data loss
 
         // 1. Save checkpoint to persistent storage
-        if let Err(e) = self.state_store
+        let state_store = self.state_store.as_ref()
+            .expect("state_store must be initialized before checkpoint feedback");
+        if let Err(e) = state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await
         {
