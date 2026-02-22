@@ -385,6 +385,7 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
                     total_events_processed: current_events,
                     total_batches_sent: shared_state.batches_sent(),
                     cpu_millicores,
+                    replication_lag_ms: shared_state.replication_lag_ms(),
                 };
 
                 if tx.send(Ok(metrics)).await.is_err() {
