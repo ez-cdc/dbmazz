@@ -54,6 +54,7 @@ pub struct SharedState {
     pub events_last_second: AtomicU64,
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
     pub skip_slot_cleanup: AtomicBool,
+    pub replication_lag_ms: AtomicU64,
 }
 
 impl SharedState {
@@ -74,6 +75,7 @@ impl SharedState {
             last_event_time: RwLock::new(std::time::Instant::now()),
             events_last_second: AtomicU64::new(0),
             skip_slot_cleanup: AtomicBool::new(false),
+            replication_lag_ms: AtomicU64::new(0),
         })
     }
 
@@ -170,6 +172,14 @@ impl SharedState {
             Ordering::AcqRel,
             Ordering::Acquire,
         ).is_ok()
+    }
+
+    pub fn set_replication_lag_ms(&self, lag: u64) {
+        self.replication_lag_ms.store(lag, Ordering::Relaxed);
+    }
+
+    pub fn replication_lag_ms(&self) -> u64 {
+        self.replication_lag_ms.load(Ordering::Relaxed)
     }
 }
 

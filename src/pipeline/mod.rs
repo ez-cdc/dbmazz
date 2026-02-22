@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::sink::Sink;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, warn};
 
 pub struct Pipeline {
@@ -17,6 +17,7 @@ pub struct Pipeline {
     batch_timeout: Duration,
     feedback_tx: Option<mpsc::Sender<u64>>,
     shared_state: Option<Arc<SharedState>>,
+    last_commit_timestamp_us: u64,
 }
 
 impl Pipeline {
@@ -34,6 +35,7 @@ impl Pipeline {
             batch_timeout,
             feedback_tx: None,
             shared_state: None,
+            last_commit_timestamp_us: 0,
         }
     }
 
@@ -88,6 +90,11 @@ impl Pipeline {
                                 }
                             }
 
+                            // Track the latest commit timestamp for lag calculation
+                            if let CdcMessage::Commit { timestamp, .. } = &event.message {
+                                self.last_commit_timestamp_us = *timestamp;
+                            }
+
                             batch.push(event.message);
 
                             if batch.len() >= self.batch_size {
@@ -130,6 +137,18 @@ impl Pipeline {
                 // Update metric for batches sent
                 if let Some(ref state) = self.shared_state {
                     state.increment_batches();
+
+                    // Calculate end-to-end replication lag
+                    if self.last_commit_timestamp_us > 0 {
+                        const PG_EPOCH_OFFSET_USEC: u64 = 946_684_800_000_000;
+                        let commit_unix_us = self.last_commit_timestamp_us + PG_EPOCH_OFFSET_USEC;
+                        let now_us = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_micros() as u64;
+                        let lag_ms = now_us.saturating_sub(commit_unix_us) / 1_000;
+                        state.set_replication_lag_ms(lag_ms);
+                    }
                 }
 
                 // Send LSN to the feedback channel to confirm checkpoint
