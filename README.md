@@ -280,18 +280,6 @@ export GRPC_PORT="50051"
 ./target/release/dbmazz
 ```
 
-### Legacy Environment Variables
-
-For backward compatibility, the following legacy variable names are still supported but deprecated:
-
-- `DATABASE_URL` → Use `SOURCE_URL`
-- `SLOT_NAME` → Use `SOURCE_SLOT_NAME`
-- `PUBLICATION_NAME` → Use `SOURCE_PUBLICATION_NAME`
-- `STARROCKS_URL` → Use `SINK_URL`
-- `STARROCKS_DB` → Use `SINK_DATABASE`
-- `STARROCKS_USER` → Use `SINK_USER`
-- `STARROCKS_PASS` → Use `SINK_PASSWORD`
-
 ---
 
 ## gRPC API

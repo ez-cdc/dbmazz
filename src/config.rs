@@ -243,31 +243,12 @@ impl std::fmt::Debug for Config {
 // =============================================================================
 
 /// Read environment variable with fallback to legacy name, logging deprecation warning
-fn env_with_fallback(new_name: &str, legacy_name: &str) -> Option<String> {
-    if let Ok(value) = env::var(new_name) {
-        return Some(value);
-    }
-
-    if let Ok(value) = env::var(legacy_name) {
-        warn!(
-            "Environment variable '{}' is deprecated, use '{}' instead",
-            legacy_name, new_name
-        );
-        return Some(value);
-    }
-
-    None
+fn required_env(name: &str) -> Result<String> {
+    env::var(name).with_context(|| format!("{} must be set", name))
 }
 
-/// Read required environment variable with fallback
-fn required_env_with_fallback(new_name: &str, legacy_name: &str) -> Result<String> {
-    env_with_fallback(new_name, legacy_name)
-        .with_context(|| format!("{} (or legacy {}) must be set", new_name, legacy_name))
-}
-
-/// Read optional environment variable with fallback and default
-fn optional_env_with_fallback(new_name: &str, legacy_name: &str, default: &str) -> String {
-    env_with_fallback(new_name, legacy_name).unwrap_or_else(|| default.to_string())
+fn optional_env(name: &str, default: &str) -> String {
+    env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
 // =============================================================================
@@ -277,22 +258,15 @@ fn optional_env_with_fallback(new_name: &str, legacy_name: &str, default: &str) 
 impl Config {
     /// Load configuration from environment variables
     ///
-    /// Supports both new generic variable names and legacy names for backward compatibility.
-    /// When legacy names are used, a deprecation warning is logged.
-    ///
-    /// # New Variables (preferred)
+    /// # Variables
     /// - SOURCE_URL, SOURCE_TYPE, SOURCE_SLOT_NAME, SOURCE_PUBLICATION_NAME
     /// - SINK_URL, SINK_TYPE, SINK_PORT, SINK_DATABASE, SINK_USER, SINK_PASSWORD
-    ///
-    /// # Legacy Variables (deprecated)
-    /// - DATABASE_URL, SLOT_NAME, PUBLICATION_NAME
-    /// - STARROCKS_URL, STARROCKS_PORT, STARROCKS_DB, STARROCKS_USER, STARROCKS_PASS
     pub fn from_env() -> Result<Self> {
         // Source configuration
         let source_type_str = env::var("SOURCE_TYPE").unwrap_or_else(|_| "postgres".to_string());
         let source_type = SourceType::from_str(&source_type_str)?;
 
-        let source_url = required_env_with_fallback("SOURCE_URL", "DATABASE_URL")?;
+        let source_url = required_env("SOURCE_URL")?;
 
         let tables: Vec<String> = env::var("TABLES")
             .unwrap_or_else(|_| "orders,order_items".to_string())
@@ -302,10 +276,8 @@ impl Config {
             .collect();
 
         // Source-specific config (Postgres)
-        let slot_name =
-            optional_env_with_fallback("SOURCE_SLOT_NAME", "SLOT_NAME", "dbmazz_slot");
-        let publication_name =
-            optional_env_with_fallback("SOURCE_PUBLICATION_NAME", "PUBLICATION_NAME", "dbmazz_pub");
+        let slot_name = optional_env("SOURCE_SLOT_NAME", "dbmazz_slot");
+        let publication_name = optional_env("SOURCE_PUBLICATION_NAME", "dbmazz_pub");
 
         let postgres_config = match source_type {
             SourceType::Postgres => Some(PostgresSourceConfig {
@@ -325,17 +297,17 @@ impl Config {
         let sink_type_str = env::var("SINK_TYPE").unwrap_or_else(|_| "starrocks".to_string());
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
-        let sink_url = required_env_with_fallback("SINK_URL", "STARROCKS_URL")?;
+        let sink_url = required_env("SINK_URL")?;
 
-        let sink_port: u16 = optional_env_with_fallback("SINK_PORT", "STARROCKS_PORT", "9030")
+        let sink_port: u16 = optional_env("SINK_PORT", "9030")
             .parse()
             .unwrap_or(9030);
 
-        let sink_database = required_env_with_fallback("SINK_DATABASE", "STARROCKS_DB")?;
+        let sink_database = required_env("SINK_DATABASE")?;
 
-        let sink_user = optional_env_with_fallback("SINK_USER", "STARROCKS_USER", "root");
+        let sink_user = optional_env("SINK_USER", "root");
 
-        let sink_password = optional_env_with_fallback("SINK_PASSWORD", "STARROCKS_PASS", "");
+        let sink_password = optional_env("SINK_PASSWORD", "");
 
         // Build sink-specific config
         let starrocks_config = match sink_type {
@@ -446,16 +418,6 @@ mod tests {
         env::remove_var("SINK_USER");
         env::remove_var("SINK_PASSWORD");
 
-        // Clear legacy variables
-        env::remove_var("DATABASE_URL");
-        env::remove_var("SLOT_NAME");
-        env::remove_var("PUBLICATION_NAME");
-        env::remove_var("STARROCKS_URL");
-        env::remove_var("STARROCKS_PORT");
-        env::remove_var("STARROCKS_DB");
-        env::remove_var("STARROCKS_USER");
-        env::remove_var("STARROCKS_PASS");
-
         // Clear common variables
         env::remove_var("TABLES");
         env::remove_var("FLUSH_SIZE");
@@ -511,75 +473,6 @@ mod tests {
         assert_eq!(config.starrocks_user, "admin");
         assert_eq!(config.starrocks_pass, "secret");
         assert_eq!(config.tables, vec!["table1", "table2"]);
-
-        clear_env_vars();
-    }
-
-    #[test]
-    #[serial]
-    fn test_legacy_env_vars_fallback() {
-        clear_env_vars();
-
-        // Use legacy variable names
-        env::set_var("DATABASE_URL", "postgres://legacy/db");
-        env::set_var("SLOT_NAME", "legacy_slot");
-        env::set_var("PUBLICATION_NAME", "legacy_pub");
-        env::set_var("STARROCKS_URL", "legacy.starrocks");
-        env::set_var("STARROCKS_PORT", "9031");
-        env::set_var("STARROCKS_DB", "legacydb");
-        env::set_var("STARROCKS_USER", "legacyuser");
-        env::set_var("STARROCKS_PASS", "legacypass");
-
-        let config = Config::from_env().unwrap();
-
-        // Both nested and legacy should have the values
-        assert_eq!(config.source.url, "postgres://legacy/db");
-        assert_eq!(config.database_url, "postgres://legacy/db");
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().slot_name,
-            "legacy_slot"
-        );
-        assert_eq!(config.slot_name, "legacy_slot");
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().publication_name,
-            "legacy_pub"
-        );
-        assert_eq!(config.publication_name, "legacy_pub");
-        assert_eq!(config.sink.url, "legacy.starrocks");
-        assert_eq!(config.starrocks_url, "legacy.starrocks");
-        assert_eq!(config.sink.port, 9031);
-        assert_eq!(config.starrocks_port, 9031);
-        assert_eq!(config.sink.database, "legacydb");
-        assert_eq!(config.starrocks_db, "legacydb");
-        assert_eq!(config.sink.user, "legacyuser");
-        assert_eq!(config.starrocks_user, "legacyuser");
-        assert_eq!(config.sink.password, "legacypass");
-        assert_eq!(config.starrocks_pass, "legacypass");
-
-        clear_env_vars();
-    }
-
-    #[test]
-    #[serial]
-    fn test_new_vars_take_precedence() {
-        clear_env_vars();
-
-        // Set both new and legacy - new should win
-        env::set_var("SOURCE_URL", "postgres://new/db");
-        env::set_var("DATABASE_URL", "postgres://legacy/db");
-        env::set_var("SINK_URL", "new.starrocks");
-        env::set_var("STARROCKS_URL", "legacy.starrocks");
-        env::set_var("SINK_DATABASE", "newdb");
-        env::set_var("STARROCKS_DB", "legacydb");
-
-        let config = Config::from_env().unwrap();
-
-        assert_eq!(config.source.url, "postgres://new/db");
-        assert_eq!(config.database_url, "postgres://new/db");
-        assert_eq!(config.sink.url, "new.starrocks");
-        assert_eq!(config.starrocks_url, "new.starrocks");
-        assert_eq!(config.sink.database, "newdb");
-        assert_eq!(config.starrocks_db, "newdb");
 
         clear_env_vars();
     }
