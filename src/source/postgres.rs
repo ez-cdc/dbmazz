@@ -199,7 +199,7 @@ impl PostgresSource {
         // This function assumes PostgresSource was created with a valid URL
         // In a real scenario, you should store the original URL
         // For now, this is a placeholder that would need the URL from env
-        std::env::var("DATABASE_URL")
+        std::env::var("SOURCE_URL")
             .unwrap_or_default()
             .replace("?replication=database", "")
             .replace("&replication=database", "")
