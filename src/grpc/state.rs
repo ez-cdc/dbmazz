@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::{RwLock, watch};
@@ -26,6 +27,7 @@ impl CdcState {
 pub enum Stage {
     Init,
     Setup,
+    Snapshot,
     Cdc,
 }
 
@@ -36,6 +38,9 @@ pub struct CdcConfig {
     pub tables: Vec<String>,
     pub slot_name: String,
 }
+
+/// Maps relation_id → {(start_pk, end_pk) → hw_lsn} for snapshot deduplication.
+type FinishedChunksMap = HashMap<u32, BTreeMap<(i64, i64), u64>>;
 
 pub struct SharedState {
     pub state: AtomicU8,
@@ -57,11 +62,28 @@ pub struct SharedState {
     pub replication_lag_ms: AtomicU64,
     #[cfg(feature = "demo")]
     pub demo_event_tx: tokio::sync::broadcast::Sender<String>,
+    // Snapshot progress (written by snapshot worker, read by gRPC status service)
+    pub snapshot_chunks_total: AtomicU64,
+    pub snapshot_chunks_done: AtomicU64,
+    pub snapshot_rows_synced: AtomicU64,
+    // Signal channel for on-demand snapshot trigger (set by StartSnapshot RPC)
+    pub snapshot_trigger: watch::Sender<bool>,
+    // True while the snapshot worker is running
+    pub snapshot_active: AtomicBool,
+    // Snapshot error message (set on failure, cleared on new snapshot start)
+    pub snapshot_error: RwLock<Option<String>>,
+    /// Finished snapshot chunks: relation_id -> {(start_pk, end_pk) -> hw_lsn}
+    /// Written by snapshot worker after each chunk, read by WAL handler for should_emit()
+    pub finished_chunks: RwLock<FinishedChunksMap>,
+    /// Relation PK column indices: relation_id -> list of column indices that form the PK
+    /// Populated from Relation messages by the WAL handler
+    pub relation_pk_cols: RwLock<HashMap<u32, Vec<usize>>>,
 }
 
 impl SharedState {
     pub fn new(config: CdcConfig) -> Arc<Self> {
         let (shutdown_tx, _) = watch::channel(false);
+        let (snapshot_trigger, _) = watch::channel(false);
         Arc::new(Self {
             state: AtomicU8::new(CdcState::Running as u8),
             stage: RwLock::new(Stage::Init),
@@ -83,6 +105,14 @@ impl SharedState {
                 let (tx, _) = tokio::sync::broadcast::channel(256);
                 tx
             },
+            snapshot_chunks_total: AtomicU64::new(0),
+            snapshot_chunks_done: AtomicU64::new(0),
+            snapshot_rows_synced: AtomicU64::new(0),
+            snapshot_trigger,
+            snapshot_active: AtomicBool::new(false),
+            snapshot_error: RwLock::new(None),
+            finished_chunks: RwLock::new(HashMap::new()),
+            relation_pk_cols: RwLock::new(HashMap::new()),
         })
     }
 
@@ -187,6 +217,91 @@ impl SharedState {
 
     pub fn replication_lag_ms(&self) -> u64 {
         self.replication_lag_ms.load(Ordering::Relaxed)
+    }
+
+    /// Update snapshot progress counters (called by snapshot worker after each chunk).
+    pub fn update_snapshot_progress(&self, total: u64, done: u64, rows: u64) {
+        self.snapshot_chunks_total.store(total, Ordering::Relaxed);
+        self.snapshot_chunks_done.store(done, Ordering::Relaxed);
+        self.snapshot_rows_synced.store(rows, Ordering::Relaxed);
+    }
+
+    pub fn snapshot_chunks_total(&self) -> u64 {
+        self.snapshot_chunks_total.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot_chunks_done(&self) -> u64 {
+        self.snapshot_chunks_done.load(Ordering::Relaxed)
+    }
+
+    pub fn snapshot_rows_synced(&self) -> u64 {
+        self.snapshot_rows_synced.load(Ordering::Relaxed)
+    }
+
+    /// Subscribe to the snapshot trigger channel (for on-demand snapshot signaling).
+    pub fn subscribe_snapshot_trigger(&self) -> watch::Receiver<bool> {
+        self.snapshot_trigger.subscribe()
+    }
+
+    /// Signal that a snapshot should start (called by StartSnapshot gRPC handler).
+    pub fn trigger_snapshot(&self) {
+        let _ = self.snapshot_trigger.send(true);
+    }
+
+    pub fn set_snapshot_active(&self, active: bool) {
+        self.snapshot_active.store(active, Ordering::Release);
+    }
+
+    pub fn is_snapshot_active(&self) -> bool {
+        self.snapshot_active.load(Ordering::Acquire)
+    }
+
+    pub async fn set_snapshot_error(&self, error: Option<String>) {
+        *self.snapshot_error.write().await = error;
+    }
+
+    #[allow(dead_code)]
+    pub async fn snapshot_error(&self) -> Option<String> {
+        self.snapshot_error.read().await.clone()
+    }
+
+    /// Register a finished chunk so the WAL handler can suppress duplicate events.
+    /// Called by the snapshot worker after each chunk completes.
+    pub async fn register_finished_chunk(&self, relation_id: u32, start_pk: i64, end_pk: i64, hw_lsn: u64) {
+        let mut map = self.finished_chunks.write().await;
+        map.entry(relation_id)
+            .or_insert_with(BTreeMap::new)
+            .insert((start_pk, end_pk), hw_lsn);
+    }
+
+    /// Determine whether a WAL event should be emitted to the pipeline.
+    ///
+    /// Returns `false` (suppress) only when:
+    /// - snapshot is active
+    /// - the event's PK falls within a finished chunk range for the same relation
+    /// - the event's LSN is at or before the chunk's high-watermark LSN
+    ///
+    /// This is O(log n) via BTreeMap range lookup.
+    pub async fn should_emit(&self, relation_id: u32, event_lsn: u64, pk: Option<i64>) -> bool {
+        // Fast path: no snapshot running
+        if !self.is_snapshot_active() {
+            return true;
+        }
+        let Some(pk_val) = pk else {
+            return true; // Can't determine PK → emit (safe)
+        };
+        let map = self.finished_chunks.read().await;
+        let Some(rel_map) = map.get(&relation_id) else {
+            return true; // No chunks for this relation → emit
+        };
+        // Find the last range whose start <= pk_val
+        if let Some(((start, end), &hw_lsn)) = rel_map.range(..=(pk_val, i64::MAX)).next_back() {
+            if *start <= pk_val && pk_val < *end {
+                // PK is inside this chunk; suppress if event is at or before the HW
+                return event_lsn > hw_lsn;
+            }
+        }
+        true // PK not in any finished chunk → emit
     }
 }
 
