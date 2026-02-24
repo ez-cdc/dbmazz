@@ -39,6 +39,9 @@ pub struct CdcConfig {
     pub slot_name: String,
 }
 
+/// Maps relation_id → {(start_pk, end_pk) → hw_lsn} for snapshot deduplication.
+type FinishedChunksMap = HashMap<u32, BTreeMap<(i64, i64), u64>>;
+
 pub struct SharedState {
     pub state: AtomicU8,
     pub stage: RwLock<Stage>,
@@ -67,9 +70,11 @@ pub struct SharedState {
     pub snapshot_trigger: watch::Sender<bool>,
     // True while the snapshot worker is running
     pub snapshot_active: AtomicBool,
-    /// Finished snapshot chunks: (start_pk, end_pk) -> hw_lsn
+    // Snapshot error message (set on failure, cleared on new snapshot start)
+    pub snapshot_error: RwLock<Option<String>>,
+    /// Finished snapshot chunks: relation_id -> {(start_pk, end_pk) -> hw_lsn}
     /// Written by snapshot worker after each chunk, read by WAL handler for should_emit()
-    pub finished_chunks: RwLock<BTreeMap<(i64, i64), u64>>,
+    pub finished_chunks: RwLock<FinishedChunksMap>,
     /// Relation PK column indices: relation_id -> list of column indices that form the PK
     /// Populated from Relation messages by the WAL handler
     pub relation_pk_cols: RwLock<HashMap<u32, Vec<usize>>>,
@@ -105,7 +110,8 @@ impl SharedState {
             snapshot_rows_synced: AtomicU64::new(0),
             snapshot_trigger,
             snapshot_active: AtomicBool::new(false),
-            finished_chunks: RwLock::new(BTreeMap::new()),
+            snapshot_error: RwLock::new(None),
+            finished_chunks: RwLock::new(HashMap::new()),
             relation_pk_cols: RwLock::new(HashMap::new()),
         })
     }
@@ -250,22 +256,33 @@ impl SharedState {
         self.snapshot_active.load(Ordering::Acquire)
     }
 
+    pub async fn set_snapshot_error(&self, error: Option<String>) {
+        *self.snapshot_error.write().await = error;
+    }
+
+    #[allow(dead_code)]
+    pub async fn snapshot_error(&self) -> Option<String> {
+        self.snapshot_error.read().await.clone()
+    }
+
     /// Register a finished chunk so the WAL handler can suppress duplicate events.
     /// Called by the snapshot worker after each chunk completes.
-    pub async fn register_finished_chunk(&self, start_pk: i64, end_pk: i64, hw_lsn: u64) {
+    pub async fn register_finished_chunk(&self, relation_id: u32, start_pk: i64, end_pk: i64, hw_lsn: u64) {
         let mut map = self.finished_chunks.write().await;
-        map.insert((start_pk, end_pk), hw_lsn);
+        map.entry(relation_id)
+            .or_insert_with(BTreeMap::new)
+            .insert((start_pk, end_pk), hw_lsn);
     }
 
     /// Determine whether a WAL event should be emitted to the pipeline.
     ///
     /// Returns `false` (suppress) only when:
     /// - snapshot is active
-    /// - the event's PK falls within a finished chunk range
+    /// - the event's PK falls within a finished chunk range for the same relation
     /// - the event's LSN is at or before the chunk's high-watermark LSN
     ///
     /// This is O(log n) via BTreeMap range lookup.
-    pub async fn should_emit(&self, event_lsn: u64, pk: Option<i64>) -> bool {
+    pub async fn should_emit(&self, relation_id: u32, event_lsn: u64, pk: Option<i64>) -> bool {
         // Fast path: no snapshot running
         if !self.is_snapshot_active() {
             return true;
@@ -274,8 +291,11 @@ impl SharedState {
             return true; // Can't determine PK → emit (safe)
         };
         let map = self.finished_chunks.read().await;
+        let Some(rel_map) = map.get(&relation_id) else {
+            return true; // No chunks for this relation → emit
+        };
         // Find the last range whose start <= pk_val
-        if let Some(((start, end), &hw_lsn)) = map.range(..=(pk_val, i64::MAX)).next_back() {
+        if let Some(((start, end), &hw_lsn)) = rel_map.range(..=(pk_val, i64::MAX)).next_back() {
             if *start <= pk_val && pk_val < *end {
                 // PK is inside this chunk; suppress if event is at or before the HW
                 return event_lsn > hw_lsn;

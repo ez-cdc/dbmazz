@@ -103,7 +103,7 @@ pub async fn handle_xlog_data(
                 CdcMessage::Insert { relation_id, tuple } => {
                     if shared_state.is_snapshot_active() {
                         let pk = extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
-                        if !shared_state.should_emit(lsn, pk).await {
+                        if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }
                     }
@@ -111,22 +111,13 @@ pub async fn handle_xlog_data(
                 CdcMessage::Update { relation_id, new_tuple, .. } => {
                     if shared_state.is_snapshot_active() {
                         let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
-                        if !shared_state.should_emit(lsn, pk).await {
+                        if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }
                     }
                 }
-                CdcMessage::Delete { relation_id, old_tuple } => {
-                    if shared_state.is_snapshot_active() {
-                        let pk = old_tuple.as_ref()
-                            .and_then(|t| None::<i64>.or_else(|| {
-                                // extract_int_pk is async, use blocking version here
-                                // For delete events during snapshot we conservatively emit
-                                None
-                            }));
-                        // For deletes we conservatively emit (can't block on async in closure)
-                        let _ = (relation_id, pk);
-                    }
+                CdcMessage::Delete { .. } => {
+                    // Deletes are always emitted during snapshot (conservative approach)
                 }
                 _ => {}
             }
