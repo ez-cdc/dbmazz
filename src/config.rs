@@ -354,7 +354,8 @@ impl Config {
         let snapshot_chunk_size: u64 = env::var("SNAPSHOT_CHUNK_SIZE")
             .unwrap_or_else(|_| "500000".to_string())
             .parse()
-            .unwrap_or(500_000);
+            .unwrap_or(500_000)
+            .max(1);
 
         let snapshot_parallel_workers: u32 = env::var("SNAPSHOT_PARALLEL_WORKERS")
             .unwrap_or_else(|_| "2".to_string())
@@ -614,7 +615,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     #[serial]
     fn test_backward_compatibility_with_original_api() {
         clear_env_vars();

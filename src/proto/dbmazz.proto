@@ -21,8 +21,8 @@ message HealthCheckResponse {
     STAGE_UNKNOWN = 0;
     STAGE_INIT = 1;
     STAGE_SETUP = 2;
-    STAGE_SNAPSHOT = 3;  // Running initial snapshot / backfill
-    STAGE_CDC = 4;
+    STAGE_CDC = 3;
+    STAGE_SNAPSHOT = 4;  // Running initial snapshot / backfill
   }
   
   ServingStatus status = 1;

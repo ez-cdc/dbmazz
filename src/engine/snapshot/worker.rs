@@ -28,7 +28,9 @@ use crate::grpc::state::{SharedState, Stage};
 use crate::connectors::sinks::starrocks::stream_load::{StreamLoadClient, StreamLoadOptions};
 use crate::connectors::sinks::starrocks::StarRocksSinkConfig;
 use super::chunker::{Chunk, chunk_table};
+use super::quote_ident;
 use super::state_store;
+use super::utils::find_integer_pk_column;
 
 /// Run the full snapshot for all configured tables.
 ///
@@ -38,18 +40,17 @@ pub async fn run_snapshot(
     config: Arc<Config>,
     shared_state: Arc<SharedState>,
 ) -> Result<()> {
-    info!("Snapshot worker starting (chunk_size={}, workers={})",
-        config.snapshot_chunk_size, config.snapshot_parallel_workers);
+    if config.snapshot_parallel_workers > 1 {
+        warn!("SNAPSHOT_PARALLEL_WORKERS > 1 not yet supported; processing sequentially");
+    }
+    info!("Snapshot worker starting (chunk_size={})", config.snapshot_chunk_size);
 
     shared_state.set_snapshot_active(true);
     shared_state.set_stage(Stage::Snapshot, "Connecting to source").await;
 
     // Connect to PostgreSQL (regular connection, not replication).
     // Strip `replication=database` from the URL — DDL is not allowed in replication mode.
-    let plain_url = config.database_url
-        .replace("&replication=database", "")
-        .replace("?replication=database&", "?")
-        .replace("?replication=database", "");
+    let plain_url = strip_replication_param(&config.database_url);
     let (client, connection) = tokio_postgres::connect(&plain_url, NoTls)
         .await
         .context("snapshot worker: failed to connect to PostgreSQL")?;
@@ -68,9 +69,9 @@ pub async fn run_snapshot(
         .context("snapshot worker: failed to build StarRocks config")?;
     let sl_client = StreamLoadClient::new(
         sr_config.http_url.clone(),
-        config.starrocks_db.clone(),
-        config.starrocks_user.clone(),
-        config.starrocks_pass.clone(),
+        sr_config.database.clone(),
+        sr_config.user.clone(),
+        sr_config.password.clone(),
     );
 
     let slot_name = config.slot_name.clone();
@@ -150,7 +151,7 @@ pub async fn run_snapshot(
     Ok(())
 }
 
-/// Process a single chunk: LW watermark → SELECT → Stream Load → HW watermark → mark complete.
+/// Process a single chunk: LW watermark → SELECT → HW watermark → Stream Load → mark complete.
 async fn process_chunk(
     client: &Client,
     sl_client: &StreamLoadClient,
@@ -173,10 +174,10 @@ async fn process_chunk(
 
     // Step 2: SELECT rows for this chunk
     // Extract table name for the destination (strip schema prefix)
-    let dest_table = table.split('.').last().unwrap_or(table);
+    let dest_table = table.rsplit('.').next().unwrap_or(table);
 
     // Find the integer PK column name
-    let pk_col = find_pk_col(client, table).await
+    let pk_col = find_integer_pk_column(client, table).await
         .context("failed to find PK column")?
         .ok_or_else(|| anyhow::anyhow!("no integer PK found for table {}", table))?;
 
@@ -186,14 +187,15 @@ async fn process_chunk(
 
     // Build SELECT with all columns cast to ::text for universal type handling
     let cols_sql: String = col_names.iter()
-        .map(|c| format!("{}::text AS {}", c, c))
+        .map(|c| format!("{}::text AS {}", quote_ident(c), quote_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
+    let quoted_pk = quote_ident(&pk_col);
     let select_query = format!(
         "SELECT {cols} FROM {table} WHERE {pk} >= $1::bigint AND {pk} < $2::bigint",
         cols = cols_sql,
-        table = table,
-        pk = pk_col,
+        table = quote_ident(table),
+        pk = quoted_pk,
     );
     let rows = client.query(&select_query, &[&chunk.start_pk, &chunk.end_pk])
         .await
@@ -201,7 +203,20 @@ async fn process_chunk(
 
     let row_count = rows.len() as i64;
 
-    // Step 3: Serialize rows to JSON (for Stream Load)
+    // Step 3: Emit HW (high watermark) immediately after SELECT — captures LSN
+    // before Stream Load so WAL events during load are correctly deduplicated.
+    let hw_content = format!("HW:{}:{}:{}", table, chunk.start_pk, chunk.end_pk);
+    let hw_row = client.query_one(
+        "SELECT pg_logical_emit_message(false, 'dbmazz', $1)::text",
+        &[&hw_content],
+    ).await.context("failed to emit HW watermark")?;
+
+    // pg_logical_emit_message returns pg_lsn (displayed as hex string like "0/1234AB")
+    let hw_lsn_str: String = hw_row.get(0);
+    let hw_lsn = parse_pg_lsn(&hw_lsn_str)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse HW LSN: '{}'", hw_lsn_str))?;
+
+    // Step 4: Serialize rows to JSON (for Stream Load)
     // All columns are text thanks to ::text cast, so we just read Option<String>
     let body = if rows.is_empty() {
         b"[]".to_vec()
@@ -209,7 +224,7 @@ async fn process_chunk(
         serialize_text_rows_to_json(&rows, &col_names)?
     };
 
-    // Step 4: Stream Load to StarRocks (only if there are rows)
+    // Step 5: Stream Load to StarRocks (only if there are rows)
     if !rows.is_empty() {
         let body_arc = Arc::new(body);
         let result: crate::connectors::sinks::starrocks::stream_load::StreamLoadResult =
@@ -220,24 +235,15 @@ async fn process_chunk(
         debug!("Stream Load chunk {}/{}: {} rows loaded", table, chunk.partition_id, result.loaded_rows);
     }
 
-    // Step 5: Emit HW (high watermark) — returns the LSN of this message
-    let hw_content = format!("HW:{}:{}:{}", table, chunk.start_pk, chunk.end_pk);
-    let hw_row = client.query_one(
-        "SELECT pg_logical_emit_message(false, 'dbmazz', $1)::text",
-        &[&hw_content],
-    ).await.context("failed to emit HW watermark")?;
-
-    // pg_logical_emit_message returns pg_lsn (displayed as hex string like "0/1234AB")
-    let hw_lsn_str: String = hw_row.get(0);
-    let hw_lsn = parse_pg_lsn(&hw_lsn_str).unwrap_or(0);
-
-    // Step 6: Mark chunk complete in state_store
+    // Step 6: Mark chunk complete in state store
     state_store::mark_chunk_complete(
         client, slot_name, table, chunk.partition_id, row_count, hw_lsn as i64,
     ).await?;
 
     // Step 7: Register in SharedState so WAL consumer can deduplicate
-    shared_state.register_finished_chunk(chunk.start_pk, chunk.end_pk, hw_lsn).await;
+    let relation_id = get_relation_id(client, table).await
+        .unwrap_or(0);
+    shared_state.register_finished_chunk(relation_id, chunk.start_pk, chunk.end_pk, hw_lsn).await;
 
     // Update progress counters
     let (total, done) = state_store::chunk_counts(client, slot_name).await?;
@@ -324,6 +330,56 @@ async fn get_column_names(client: &Client, table_name: &str) -> Result<Vec<Strin
     Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
 }
 
+/// Strip the `replication=database` query parameter from a PostgreSQL URL.
+fn strip_replication_param(url_str: &str) -> String {
+    match url::Url::parse(url_str) {
+        Ok(mut parsed) => {
+            let pairs: Vec<(String, String)> = parsed.query_pairs()
+                .filter(|(k, _)| k != "replication")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            if pairs.is_empty() {
+                parsed.set_query(None);
+            } else {
+                let qs = pairs.iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                parsed.set_query(Some(&qs));
+            }
+            parsed.to_string()
+        }
+        Err(_) => {
+            // Fallback: simple string replacement
+            url_str
+                .replace("&replication=database", "")
+                .replace("?replication=database&", "?")
+                .replace("?replication=database", "")
+        }
+    }
+}
+
+/// Get the pg_class OID (relation_id) for a table, matching what the WAL handler sees.
+async fn get_relation_id(client: &Client, table_name: &str) -> Result<u32> {
+    let (schema, table) = if table_name.contains('.') {
+        let parts: Vec<&str> = table_name.splitn(2, '.').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        ("public".to_string(), table_name.to_string())
+    };
+
+    let row = client.query_one(
+        "SELECT c.oid::int4
+         FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = $2",
+        &[&schema, &table],
+    ).await.context("failed to get relation OID")?;
+
+    let oid: i32 = row.get(0);
+    Ok(oid as u32)
+}
+
 /// Parse a PostgreSQL LSN string like "0/1234AB" into a u64.
 fn parse_pg_lsn(s: &str) -> Option<u64> {
     let parts: Vec<&str> = s.split('/').collect();
@@ -335,30 +391,3 @@ fn parse_pg_lsn(s: &str) -> Option<u64> {
     Some((hi << 32) | lo)
 }
 
-/// Find the first integer PK column name for a table.
-async fn find_pk_col(client: &Client, table_name: &str) -> Result<Option<String>> {
-    let (schema, table) = if table_name.contains('.') {
-        let parts: Vec<&str> = table_name.splitn(2, '.').collect();
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        ("public".to_string(), table_name.to_string())
-    };
-
-    let rows = client.query(
-        "SELECT a.attname
-         FROM pg_index i
-         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-         JOIN pg_class c ON c.oid = i.indrelid
-         JOIN pg_namespace n ON n.oid = c.relnamespace
-         JOIN pg_type t ON t.oid = a.atttypid
-         WHERE i.indisprimary
-           AND n.nspname = $1
-           AND c.relname = $2
-           AND t.typname IN ('int2', 'int4', 'int8')
-         ORDER BY a.attnum
-         LIMIT 1",
-        &[&schema, &table],
-    ).await?;
-
-    Ok(rows.first().map(|r| r.get::<_, String>(0)))
-}

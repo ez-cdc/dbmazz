@@ -134,8 +134,16 @@ impl CdcEngine {
             let snap_config = Arc::new(self.config.clone());
             let snap_state = self.shared_state.clone();
             tokio::spawn(async move {
-                if let Err(e) = snapshot::run_snapshot(snap_config, snap_state).await {
-                    error!("Snapshot worker error: {}", e);
+                match snapshot::run_snapshot(snap_config, snap_state.clone()).await {
+                    Ok(()) => {
+                        snap_state.set_snapshot_active(false);
+                        info!("Snapshot completed successfully");
+                    }
+                    Err(e) => {
+                        snap_state.set_snapshot_active(false);
+                        snap_state.set_snapshot_error(Some(format!("{}", e))).await;
+                        error!("Snapshot worker error: {}", e);
+                    }
                 }
             });
             info!("Snapshot worker spawned (DO_SNAPSHOT=true)");
@@ -290,11 +298,21 @@ impl CdcEngine {
                 Ok(()) = snapshot_trigger_rx.changed() => {
                     if *snapshot_trigger_rx.borrow() && !self.shared_state.is_snapshot_active() {
                         info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");
+                        // Reset trigger so it doesn't fire again
+                        let _ = self.shared_state.snapshot_trigger.send(false);
                         let snap_config = Arc::new(self.config.clone());
                         let snap_state = self.shared_state.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = snapshot::run_snapshot(snap_config, snap_state).await {
-                                error!("On-demand snapshot worker error: {}", e);
+                            match snapshot::run_snapshot(snap_config, snap_state.clone()).await {
+                                Ok(()) => {
+                                    snap_state.set_snapshot_active(false);
+                                    info!("On-demand snapshot completed successfully");
+                                }
+                                Err(e) => {
+                                    snap_state.set_snapshot_active(false);
+                                    snap_state.set_snapshot_error(Some(format!("{}", e))).await;
+                                    error!("On-demand snapshot worker error: {}", e);
+                                }
                             }
                         });
                     }

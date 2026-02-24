@@ -66,8 +66,8 @@ impl HealthService for HealthServiceImpl {
         let proto_stage = match stage {
             Stage::Init => 1,      // STAGE_INIT
             Stage::Setup => 2,     // STAGE_SETUP
-            Stage::Snapshot => 3,  // STAGE_SNAPSHOT
-            Stage::Cdc => 4,       // STAGE_CDC
+            Stage::Cdc => 3,       // STAGE_CDC
+            Stage::Snapshot => 4,  // STAGE_SNAPSHOT
         };
 
         Ok(Response::new(HealthCheckResponse {
