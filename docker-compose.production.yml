@@ -1,0 +1,126 @@
+# =============================================================================
+# dbmazz CDC Daemon — Self-Hosted Deployment
+# =============================================================================
+#
+# Two modes:
+#
+#   Quickstart (includes PostgreSQL + StarRocks + sample data):
+#     docker compose -f docker-compose.production.yml --profile quickstart up -d
+#     Open http://localhost:8080 — configure datasources, discover tables, start replication
+#
+#   Production (bring your own databases):
+#     docker compose -f docker-compose.production.yml up -d
+#     Open http://localhost:8080 — connect your own PostgreSQL and StarRocks
+
+services:
+  # ---------------------------------------------------------------------------
+  # Quickstart databases (only start with --profile quickstart)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    profiles: ["quickstart"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dbmazz
+    ports:
+      - "15432:5432"
+    volumes:
+      - ./quickstart/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - pgdata:/var/lib/postgresql/data
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks:
+      - dbmazz
+
+  starrocks:
+    image: starrocks/allin1-ubuntu:latest
+    profiles: ["quickstart"]
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    volumes:
+      - srdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' 2>/dev/null || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+    networks:
+      - dbmazz
+
+  starrocks-init:
+    image: mysql:8.0
+    profiles: ["quickstart"]
+    volumes:
+      - ./quickstart/starrocks-init.sh:/init.sh:ro
+    entrypoint: ["/bin/sh", "/init.sh"]
+    environment:
+      SR_HOST: starrocks
+      SR_PORT: "9030"
+      SR_DATABASE: dbmazz
+    depends_on:
+      starrocks:
+        condition: service_healthy
+    networks:
+      - dbmazz
+
+  # ---------------------------------------------------------------------------
+  # dbmazz CDC daemon (always starts)
+  # ---------------------------------------------------------------------------
+  dbmazz:
+    build:
+      context: .
+      dockerfile: demo/Dockerfile.dbmazz
+      args:
+        CARGO_FEATURES: "http-api"
+    ports:
+      - "${HTTP_API_PORT:-8080}:${HTTP_API_PORT:-8080}"
+      - "${GRPC_PORT:-50051}:${GRPC_PORT:-50051}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Only non-connection settings have defaults.
+      # Connection vars (SOURCE_URL, SINK_URL, etc.) come from .env or browser setup.
+      HTTP_API_PORT: "${HTTP_API_PORT:-8080}"
+      GRPC_PORT: "${GRPC_PORT:-50051}"
+      FLUSH_SIZE: "${FLUSH_SIZE:-2000}"
+      FLUSH_INTERVAL_MS: "${FLUSH_INTERVAL_MS:-2000}"
+      RUST_LOG: "${RUST_LOG:-info}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+      starrocks-init:
+        condition: service_completed_successfully
+        required: false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${HTTP_API_PORT:-8080}/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - dbmazz
+
+networks:
+  dbmazz:
+    driver: bridge
+
+volumes:
+  pgdata:
+  srdata:

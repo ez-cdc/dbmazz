@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Elastic-2.0"
 
+[features]
+default = []
+demo = ["axum", "tower-http", "rand"]
+http-api = ["axum", "tower-http"]
+
 [dependencies]
 # Materialize fork with full support for logical replication
 # SECURITY NOTE: Using branch = "master" is not ideal for production as it can introduce
@@ -48,6 +53,11 @@ parking_lot = "0.12"
 url = "2.5"
 # Force vendored OpenSSL for musl cross-compilation
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+# Demo mode (optional - not compiled in production builds)
+axum = { version = "0.7", features = ["json"], optional = true }
+tower-http = { version = "0.5", features = ["cors"], optional = true }
+rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 serial_test = "3.0"
