@@ -21,7 +21,8 @@ message HealthCheckResponse {
     STAGE_UNKNOWN = 0;
     STAGE_INIT = 1;
     STAGE_SETUP = 2;
-    STAGE_CDC = 3;
+    STAGE_SNAPSHOT = 3;  // Running initial snapshot / backfill
+    STAGE_CDC = 4;
   }
   
   ServingStatus status = 1;
@@ -37,6 +38,7 @@ service CdcControlService {
   rpc DrainAndStop(DrainRequest) returns (ControlResponse);
   rpc Stop(StopRequest) returns (ControlResponse);
   rpc ReloadConfig(ReloadConfigRequest) returns (ControlResponse);
+  rpc StartSnapshot(StartSnapshotRequest) returns (ControlResponse);
 }
 
 message PauseRequest {}
@@ -53,6 +55,8 @@ message ReloadConfigRequest {
   uint64 flush_interval_ms = 2;    // 0 = no change
   repeated string tables = 3;      // empty = no change
 }
+message StartSnapshotRequest {}
+
 message ControlResponse {
   bool success = 1;
   string message = 2;
@@ -77,6 +81,11 @@ message StatusResponse {
   uint64 pending_events = 4;
   string slot_name = 5;
   repeated string tables = 6;
+  // Snapshot stage indicators (non-zero / true only when snapshot is active)
+  bool   snapshot_active         = 7;
+  uint64 snapshot_chunks_total   = 8;
+  uint64 snapshot_chunks_done    = 9;
+  uint64 snapshot_rows_synced    = 10;
 }
 
 // Streaming metrics

@@ -193,6 +193,11 @@ pub struct Config {
 
     // gRPC
     pub grpc_port: u16,
+
+    // Snapshot / backfill
+    pub do_snapshot: bool,
+    pub snapshot_chunk_size: u64,
+    pub snapshot_parallel_workers: u32,
 }
 
 impl std::fmt::Debug for Config {
@@ -341,6 +346,21 @@ impl Config {
             .parse()
             .unwrap_or(50051);
 
+        // Snapshot / backfill configuration
+        let do_snapshot = env::var("DO_SNAPSHOT")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+
+        let snapshot_chunk_size: u64 = env::var("SNAPSHOT_CHUNK_SIZE")
+            .unwrap_or_else(|_| "500000".to_string())
+            .parse()
+            .unwrap_or(500_000);
+
+        let snapshot_parallel_workers: u32 = env::var("SNAPSHOT_PARALLEL_WORKERS")
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .unwrap_or(2);
+
         Ok(Self {
             // New nested config
             source,
@@ -361,6 +381,11 @@ impl Config {
             flush_size,
             flush_interval_ms,
             grpc_port,
+
+            // Snapshot
+            do_snapshot,
+            snapshot_chunk_size,
+            snapshot_parallel_workers,
         })
     }
 
@@ -590,18 +615,19 @@ mod tests {
 
     #[test]
     #[serial]
+    #[serial]
     fn test_backward_compatibility_with_original_api() {
         clear_env_vars();
 
-        // Simulate original environment setup
-        env::set_var("DATABASE_URL", "postgres://localhost/db");
-        env::set_var("SLOT_NAME", "my_slot");
-        env::set_var("PUBLICATION_NAME", "my_pub");
-        env::set_var("STARROCKS_URL", "starrocks.local");
-        env::set_var("STARROCKS_PORT", "9030");
-        env::set_var("STARROCKS_DB", "mydb");
-        env::set_var("STARROCKS_USER", "myuser");
-        env::set_var("STARROCKS_PASS", "mypass");
+        // Use current env var names (SOURCE_URL/SINK_URL API)
+        env::set_var("SOURCE_URL", "postgres://localhost/db");
+        env::set_var("SOURCE_SLOT_NAME", "my_slot");
+        env::set_var("SOURCE_PUBLICATION_NAME", "my_pub");
+        env::set_var("SINK_URL", "starrocks.local");
+        env::set_var("SINK_PORT", "9030");
+        env::set_var("SINK_DATABASE", "mydb");
+        env::set_var("SINK_USER", "myuser");
+        env::set_var("SINK_PASSWORD", "mypass");
         env::set_var("TABLES", "orders,items");
         env::set_var("FLUSH_SIZE", "5000");
         env::set_var("FLUSH_INTERVAL_MS", "3000");
@@ -609,7 +635,7 @@ mod tests {
 
         let config = Config::from_env().unwrap();
 
-        // All legacy field access should work exactly as before
+        // Verify flat accessors still work
         assert_eq!(config.database_url, "postgres://localhost/db");
         assert_eq!(config.slot_name, "my_slot");
         assert_eq!(config.publication_name, "my_pub");

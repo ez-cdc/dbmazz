@@ -349,6 +349,10 @@ impl PostgresSource {
             CdcMessage::Unknown => {
                 // Ignore unknown messages
             }
+
+            CdcMessage::LogicalMessage { .. } => {
+                // Watermark messages (LW/HW) from snapshot worker — skip, no record to emit
+            }
         }
 
         Ok(())

@@ -179,6 +179,7 @@ impl NewSinkAdapter {
             }),
 
             CdcMessage::Unknown => None,
+            CdcMessage::LogicalMessage { .. } => None, // watermark messages — skip
         }
     }
 
