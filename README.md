@@ -60,6 +60,7 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 | **Fast** | 300K+ events with SIMD-optimized parsing. Sub-second replication lag. |
 | **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
 | **Reliable** | Exactly-once delivery via LSN checkpointing. No data loss, no duplicates. |
+| **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
 | **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
 | **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
 
@@ -125,6 +126,16 @@ cp .env.example .env    # fill in your connection details
 docker compose -f docker-compose.production.yml up -d
 ```
 
+### With initial snapshot (backfill existing data)
+
+```bash
+# Add to your .env:
+DO_SNAPSHOT=true
+SNAPSHOT_CHUNK_SIZE=500000
+
+docker compose -f docker-compose.production.yml up -d
+```
+
 ### Stop
 
 ```bash
@@ -156,6 +167,9 @@ When built with `--features http-api`, all connection variables are optional —
 | `GRPC_PORT` | `50051` | gRPC server port |
 | `HTTP_API_PORT` | `8080` | HTTP API port (`--features http-api`) |
 | `RUST_LOG` | `info` | Log level |
+| `DO_SNAPSHOT` | `false` | Enable initial snapshot/backfill of existing data |
+| `SNAPSHOT_CHUNK_SIZE` | `500000` | Rows per snapshot chunk (min: 1) |
+| `SNAPSHOT_PARALLEL_WORKERS` | `2` | Reserved for future use (currently sequential) |
 
 </details>
 
@@ -187,6 +201,48 @@ curl -X POST http://localhost:8080/resume
 </details>
 
 <details>
+<summary><strong>Snapshot / Backfill</strong></summary>
+
+Snapshot loads all existing rows from PostgreSQL into StarRocks before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
+
+### Enable on startup
+
+Set `DO_SNAPSHOT=true` to run a full snapshot when the daemon starts:
+
+```bash
+DO_SNAPSHOT=true SNAPSHOT_CHUNK_SIZE=500000 ./target/release/dbmazz
+```
+
+The snapshot divides each table into PK-range chunks and processes them sequentially. Progress is tracked in a `dbmazz_snapshot_state` table in PostgreSQL, so interrupted snapshots resume from the last completed chunk.
+
+### Trigger on-demand (via gRPC)
+
+You can trigger a snapshot at any time while CDC is running:
+
+```bash
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
+```
+
+### How it works
+
+Uses the [Flink CDC concurrent snapshot algorithm](https://nightlies.apache.org/flink/flink-docs-stable/docs/connectors/table/jdbc/#scan-incremental-snapshot):
+
+1. For each chunk: emit low-watermark (LW) → SELECT rows → emit high-watermark (HW) → Stream Load to StarRocks
+2. The WAL consumer checks `should_emit()` for each event — events within a completed chunk's PK range with LSN <= HW are suppressed (already loaded by snapshot)
+3. Events outside chunk ranges or with LSN > HW are emitted normally
+
+This ensures exactly-once semantics even with concurrent writes during the snapshot.
+
+### Monitor progress
+
+```bash
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
+# snapshot_active: true, snapshot_chunks_total: 100, snapshot_chunks_done: 42, snapshot_rows_synced: 21000000
+```
+
+</details>
+
+<details>
 <summary><strong>gRPC API</strong></summary>
 
 gRPC with reflection enabled — `grpcurl` works without `.proto` files.
@@ -196,6 +252,7 @@ grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
 grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Resume
+grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
 ```
 
 </details>
