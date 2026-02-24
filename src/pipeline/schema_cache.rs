@@ -74,4 +74,8 @@ impl SchemaCache {
     pub fn get(&self, id: u32) -> Option<&TableSchema> {
         self.cache.get(&id)
     }
+
+    pub fn get_table_name(&self, id: u32) -> Option<String> {
+        self.cache.get(&id).map(|s| s.name.clone())
+    }
 }

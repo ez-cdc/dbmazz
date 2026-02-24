@@ -1,207 +1,32 @@
 #!/bin/bash
-
-# dbmazz Demo Launcher
-# One-command setup for commercial demonstration
-
 set -e
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+# Ensure we run from the demo directory
+cd "$(dirname "$0")"
 
-echo -e "${MAGENTA}"
-echo "╔══════════════════════════════════════════════════════════╗"
-echo "║                                                          ║"
-echo "║              dbmazz - CDC Demo Launcher                  ║"
-echo "║          PostgreSQL → StarRocks in Real-Time             ║"
-echo "║                                                          ║"
-echo "╚══════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
+echo ""
+echo "  Starting dbmazz demo..."
+echo ""
 
 # Check Docker
-echo -e "${CYAN}🔍 Checking prerequisites...${NC}"
 if ! command -v docker &> /dev/null; then
-    echo -e "${RED}❌ Docker not found. Please install Docker first.${NC}"
+    echo "Error: Docker not found. Please install Docker first."
     exit 1
 fi
 
-if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-    echo -e "${RED}❌ Docker Compose not found. Please install Docker Compose first.${NC}"
-    exit 1
-fi
+# Build and start
+docker compose -f docker-compose.demo.yml up --build -d
 
-echo -e "${GREEN}✅ Docker is available${NC}"
-
-# Cleanup function
-cleanup() {
-    echo -e "\n${YELLOW}🧹 Cleaning up...${NC}"
-    docker-compose -f docker-compose.demo.yml down
-    echo -e "${GREEN}✅ Cleanup complete${NC}"
-}
-
-trap cleanup EXIT
-
-# Start services
-echo -e "\n${CYAN}🚀 Starting services...${NC}"
-docker-compose -f docker-compose.demo.yml up -d postgres starrocks
-
-echo -e "${YELLOW}⏳ Waiting for PostgreSQL to be ready...${NC}"
-TIMEOUT=60  # 60 segundos máximo
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    if docker exec dbmazz-demo-postgres pg_isready -U postgres > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ PostgreSQL is ready${NC}"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-    echo -e "${YELLOW}   Checking... (${ELAPSED}s/${TIMEOUT}s)${NC}"
-done
-
-if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo -e "${RED}❌ PostgreSQL timeout${NC}"
-    exit 1
-fi
-
-# Limpiar datos previos para demo fresco
-echo -e "\n${CYAN}🧹 Cleaning previous demo data...${NC}"
-docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -c "
-    TRUNCATE TABLE order_items CASCADE;
-    TRUNCATE TABLE orders CASCADE;
-    TRUNCATE TABLE toast_test CASCADE;
-    DELETE FROM dbmazz_checkpoints WHERE slot_name = 'dbmazz_demo_slot';
-" 2>/dev/null || echo -e "${YELLOW}  Note: Some tables may not exist yet (normal on first run)${NC}"
-
-# Recrear replication slot desde cero
-echo -e "${CYAN}🔄 Resetting replication slot...${NC}"
-docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -c "
-    SELECT pg_drop_replication_slot('dbmazz_demo_slot') 
-    WHERE EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = 'dbmazz_demo_slot');
-" 2>/dev/null || echo -e "${YELLOW}  Note: Slot may not exist (normal on first run)${NC}"
-
-echo -e "${GREEN}✅ Demo data cleaned - starting fresh${NC}"
-
-# Verificar y reportar REPLICA IDENTITY de las tablas
-echo -e "\n${CYAN}🔍 Checking REPLICA IDENTITY configuration...${NC}"
-REPLICA_CHECK=$(docker exec dbmazz-demo-postgres psql -U postgres -d demo_db -t -A -c \
-    "SELECT tablename, CASE relreplident 
-        WHEN 'f' THEN 'FULL' 
-        WHEN 'd' THEN 'DEFAULT' 
-        WHEN 'n' THEN 'NOTHING' 
-        WHEN 'i' THEN 'INDEX' 
-     END as replica_identity 
-     FROM pg_tables t 
-     JOIN pg_class c ON t.tablename = c.relname 
-     WHERE schemaname = 'public' AND tablename IN ('orders', 'order_items');" 2>/dev/null)
-
-echo "$REPLICA_CHECK" | while IFS='|' read -r table identity; do
-    if [ "$identity" = "FULL" ]; then
-        echo -e "${GREEN}  ✅ $table: REPLICA IDENTITY $identity${NC}"
-    else
-        echo -e "${YELLOW}  ⚠️  $table: REPLICA IDENTITY $identity (should be FULL for soft deletes)${NC}"
-    fi
-done
-
-echo -e "${YELLOW}⏳ Waiting for StarRocks FE to be ready...${NC}"
-TIMEOUT=300  # 5 minutos máximo para StarRocks
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    if docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -e "SELECT 1" > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ StarRocks FE is ready${NC}"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-    echo -e "${YELLOW}   Checking FE... (${ELAPSED}s/${TIMEOUT}s)${NC}"
-done
-
-if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo -e "${RED}❌ StarRocks FE timeout${NC}"
-    exit 1
-fi
-
-# Esperar a que el Backend (BE) esté listo
-echo -e "${YELLOW}⏳ Waiting for StarRocks BE (Backend) to be ready...${NC}"
-ELAPSED=0
-while [ $ELAPSED -lt $TIMEOUT ]; do
-    # Verificar que hay al menos un BE alive
-    BE_ALIVE=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -sNe "SHOW BACKENDS;" 2>/dev/null | grep -c "true" || echo "0")
-    if [ "$BE_ALIVE" -gt "0" ]; then
-        echo -e "${GREEN}✅ StarRocks BE is ready ($BE_ALIVE backends alive)${NC}"
-        break
-    fi
-    sleep 5
-    ELAPSED=$((ELAPSED + 5))
-    echo -e "${YELLOW}   Checking BE... (${ELAPSED}s/${TIMEOUT}s)${NC}"
-done
-
-if [ $ELAPSED -ge $TIMEOUT ]; then
-    echo -e "${RED}❌ StarRocks BE timeout - no backends available${NC}"
-    exit 1
-fi
-
-# Limpiar tablas previas de StarRocks
-echo -e "\n${CYAN}🧹 Cleaning previous StarRocks tables...${NC}"
-docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root demo_db -e "
-    DROP TABLE IF EXISTS order_items;
-    DROP TABLE IF EXISTS orders;
-    DROP TABLE IF EXISTS toast_test;
-" 2>/dev/null || echo -e "${YELLOW}  Note: Tables may not exist (normal on first run)${NC}"
-echo -e "${GREEN}✅ StarRocks tables cleaned${NC}"
-
-# Initialize StarRocks schema (manual execution needed as allin1 doesn't auto-run init scripts)
-echo -e "\n${CYAN}📝 Initializing StarRocks schema...${NC}"
-# Ejecutar script de inicialización
-docker exec -i dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root < starrocks/init.sql 2>&1
-
-# Verificar que demo_db se creó
-DEMO_DB_EXISTS=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -e "SHOW DATABASES LIKE 'demo_db';" 2>/dev/null | grep -c "demo_db" || echo "0")
-
-if [ "$DEMO_DB_EXISTS" -gt "0" ]; then
-    # Verificar que las tablas se crearon (incluyendo toast_test)
-    TABLE_COUNT=$(docker exec dbmazz-demo-starrocks mysql -h 127.0.0.1 -P 9030 -u root -D demo_db -e "SHOW TABLES;" 2>/dev/null | grep -c -E "(orders|order_items|toast_test)" || echo "0")
-    
-    if [ "$TABLE_COUNT" -ge "3" ]; then
-        echo -e "${GREEN}✅ StarRocks schema initialized (demo_db + $TABLE_COUNT tables including toast_test)${NC}"
-    else
-        echo -e "${YELLOW}⚠️  Warning: Expected 3 tables, found $TABLE_COUNT${NC}"
-    fi
-else
-    echo -e "${RED}❌ Failed to create demo_db${NC}"
-    exit 1
-fi
-
-# Start dbmazz
-echo -e "\n${CYAN}🔧 Starting dbmazz CDC service...${NC}"
-docker-compose -f docker-compose.demo.yml up -d dbmazz
-sleep 3
-echo -e "${GREEN}✅ dbmazz is running${NC}"
-
-# Start traffic generator
-echo -e "\n${CYAN}📊 Starting traffic generator...${NC}"
-docker-compose -f docker-compose.demo.yml up -d traffic-generator
-sleep 2
-echo -e "${GREEN}✅ Traffic generator is running${NC}"
-
-# Start TOAST generator for Partial Update testing
-echo -e "\n${CYAN}🧪 Starting TOAST generator (Partial Update test)...${NC}"
-docker-compose -f docker-compose.demo.yml up -d toast-generator
-sleep 2
-echo -e "${GREEN}✅ TOAST generator is running${NC}"
-echo -e "${BLUE}   → Watch for '🔄 Partial update' messages in CDC logs${NC}"
-echo -e "${BLUE}   → Run: docker logs dbmazz-demo-cdc -f | grep partial${NC}"
-
-# Start monitor
-echo -e "\n${CYAN}📺 Starting real-time monitor...${NC}"
-echo -e "${YELLOW}Press Ctrl+C to stop the demo${NC}\n"
-sleep 2
-
-docker-compose -f docker-compose.demo.yml up monitor
-
-# Note: cleanup() will run automatically on exit
-
+echo ""
+echo "  ██████╗ ██████╗ ███╗   ███╗ █████╗ ███████╗███████╗"
+echo "  ██╔══██╗██╔══██╗████╗ ████║██╔══██╗╚══███╔╝╚══███╔╝"
+echo "  ██║  ██║██████╔╝██╔████╔██║███████║  ███╔╝   ███╔╝ "
+echo "  ██║  ██║██╔══██╗██║╚██╔╝██║██╔══██║ ███╔╝   ███╔╝  "
+echo "  ██████╔╝██████╔╝██║ ╚═╝ ██║██║  ██║███████╗███████╗"
+echo "  ╚═════╝ ╚═════╝ ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝"
+echo ""
+echo "  Open http://localhost:3000 to get started"
+echo ""
+echo "  StarRocks takes ~60s to start on first run."
+echo "  Stop with: docker compose -f docker-compose.demo.yml down -v"
+echo ""

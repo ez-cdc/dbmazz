@@ -134,6 +134,36 @@ impl Pipeline {
     async fn flush_batch(&mut self, batch: &[CdcMessage], lsn: u64) -> bool {
         match self.sink.push_batch(batch, &self.schema_cache, lsn).await {
             Ok(_) => {
+                // Emit CDC events to demo broadcast channel (compiled out in production)
+                #[cfg(feature = "demo")]
+                {
+                    if let Some(ref state) = self.shared_state {
+                        for msg in batch {
+                            let summary = match msg {
+                                CdcMessage::Insert { relation_id, .. } => {
+                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
+                                    Some(format!("INSERT:{}", table))
+                                }
+                                CdcMessage::Update { relation_id, .. } => {
+                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
+                                    Some(format!("UPDATE:{}", table))
+                                }
+                                CdcMessage::Delete { relation_id, .. } => {
+                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
+                                    Some(format!("DELETE:{}", table))
+                                }
+                                _ => None,
+                            };
+                            if let Some(s) = summary {
+                                let _ = state.demo_event_tx.send(s);
+                            }
+                        }
+                    }
+                }
+
                 // Update metric for batches sent
                 if let Some(ref state) = self.shared_state {
                     state.increment_batches();

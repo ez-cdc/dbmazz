@@ -55,6 +55,8 @@ pub struct SharedState {
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
     pub skip_slot_cleanup: AtomicBool,
     pub replication_lag_ms: AtomicU64,
+    #[cfg(feature = "demo")]
+    pub demo_event_tx: tokio::sync::broadcast::Sender<String>,
 }
 
 impl SharedState {
@@ -76,6 +78,11 @@ impl SharedState {
             events_last_second: AtomicU64::new(0),
             skip_slot_cleanup: AtomicBool::new(false),
             replication_lag_ms: AtomicU64::new(0),
+            #[cfg(feature = "demo")]
+            demo_event_tx: {
+                let (tx, _) = tokio::sync::broadcast::channel(256);
+                tx
+            },
         })
     }
 

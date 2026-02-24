@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:14
@@ -24,9 +22,9 @@ services:
       - "max_wal_senders=10"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
+      interval: 2s
       timeout: 5s
-      retries: 5
+      retries: 30
     networks:
       - dbmazz-demo
 
@@ -41,12 +39,11 @@ services:
       - "8040:8040"  # BE HTTP
     volumes:
       - starrocks_data:/data
-      - ./starrocks/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9030"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD-SHELL", "mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' 2>/dev/null || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 60
       start_period: 60s
     networks:
       - dbmazz-demo
@@ -55,90 +52,23 @@ services:
     build:
       context: ..
       dockerfile: demo/Dockerfile.dbmazz
+      args:
+        CARGO_FEATURES: "demo"
     container_name: dbmazz-demo-cdc
     ports:
-      - "50051:50051"  # gRPC API
+      - "3000:3000"    # Demo web UI
+      - "50051:50051"  # gRPC (for advanced users)
     environment:
-      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db?replication=database"
-      SLOT_NAME: "dbmazz_demo_slot"
-      PUBLICATION_NAME: "dbmazz_pub"
-      STARROCKS_URL: "http://starrocks:8030"  # FE - con redirect inteligente
-      STARROCKS_DB: "demo_db"
-      STARROCKS_USER: "root"
-      STARROCKS_PASS: ""
-      FLUSH_INTERVAL_MS: "5000"
-      FLUSH_SIZE: "1500"
-      GRPC_PORT: "50051"
+      DEMO_MODE: "true"
+      DEMO_PORT: "3000"
       RUST_LOG: "info"
     depends_on:
       postgres:
         condition: service_healthy
-      # StarRocks tarda mucho, no esperamos su health check
       starrocks:
-        condition: service_started
-    networks:
-      - dbmazz-demo
-    restart: unless-stopped
-    command: ["/usr/local/bin/dbmazz"]
-
-  traffic-generator:
-    build:
-      context: ./traffic-generator
-    container_name: dbmazz-demo-traffic
-    environment:
-      DATABASE_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
-      TARGET_EVENTS_PER_SECOND: "500"  # Configurable: target events/sec (ajustado para overhead)
-      INSERT_RATIO: "0.70"               # 70% inserts
-      UPDATE_RATIO: "0.25"               # 25% updates
-      DELETE_RATIO: "0.05"               # 5% deletes
-      PYTHONUNBUFFERED: "1"              # Unbuffered logs for real-time output
-    depends_on:
-      postgres:
         condition: service_healthy
     networks:
       - dbmazz-demo
-    restart: unless-stopped
-
-  # TOAST Generator - Para probar Partial Update con JSONs grandes
-  toast-generator:
-    build:
-      context: ./toast-generator
-    container_name: dbmazz-demo-toast
-    environment:
-      PG_HOST: "postgres"
-      PG_PORT: "5432"
-      PG_USER: "postgres"
-      PG_PASSWORD: "postgres"
-      PG_DATABASE: "demo_db"
-      JSON_SIZE_KB: "100"        # Tamaño del JSON en KB (100KB es suficiente para TOAST)
-      NUM_RECORDS: "10"          # Número de registros iniciales
-      UPDATE_INTERVAL: "10"      # Segundos entre UPDATEs
-      PYTHONUNBUFFERED: "1"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      dbmazz:
-        condition: service_started
-    networks:
-      - dbmazz-demo
-    restart: unless-stopped
-
-  monitor:
-    build:
-      context: ./monitor
-    container_name: dbmazz-demo-monitor
-    environment:
-      POSTGRES_URL: "postgres://postgres:postgres@postgres:5432/demo_db"
-      STARROCKS_HOST: "starrocks"
-      STARROCKS_PORT: "9030"
-      STARROCKS_USER: "root"
-    depends_on:
-      - postgres
-      - starrocks
-    networks:
-      - dbmazz-demo
-    stdin_open: true
-    tty: true
 
 networks:
   dbmazz-demo:
@@ -147,4 +77,3 @@ networks:
 volumes:
   postgres_data:
   starrocks_data:
-

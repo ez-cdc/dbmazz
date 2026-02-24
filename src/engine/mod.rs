@@ -49,6 +49,12 @@ impl CdcEngine {
         }
     }
 
+    /// Returns a clone of the SharedState Arc.
+    /// Used by the demo mode to read metrics while the engine runs.
+    pub fn shared_state(&self) -> Arc<SharedState> {
+        Arc::clone(&self.shared_state)
+    }
+
     /// Execute CDC engine
     pub async fn run(mut self) -> Result<()> {
         // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)

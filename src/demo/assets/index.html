@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dbmazz — Interactive Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --elevated: #1c2128;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  .app-header {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--surface);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+
+  .logo { display: flex; align-items: baseline; gap: 10px; }
+  .logo-text {
+    font-size: 20px;
+    font-weight: 700;
+    color: var(--accent);
+    font-family: var(--font-mono);
+    letter-spacing: -0.5px;
+  }
+  .logo-sub {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-weight: 400;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .container { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+
+  .card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .card-title .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--border);
+    flex-shrink: 0;
+  }
+
+  /* ── Grid ── */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+  /* ── Form fields ── */
+  .field { margin-bottom: 12px; }
+  .field label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+  }
+  .field input {
+    width: 100%;
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 7px 10px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .field input:focus { border-color: var(--accent); }
+  .field input::placeholder { color: var(--text-muted); opacity: 0.6; }
+
+  .field-row { display: flex; gap: 10px; }
+  .field-row .field { flex: 1; margin-bottom: 0; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 16px;
+    transition: filter 0.15s, opacity 0.15s;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { filter: brightness(1.12); }
+  .btn:active:not(:disabled) { filter: brightness(0.92); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .btn-primary { background: var(--accent); color: #0d1117; }
+  .btn-ghost {
+    background: var(--elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover:not(:disabled) { color: var(--text); filter: brightness(1.1); }
+  .btn-green { background: var(--green); color: #0d1117; }
+  .btn-orange { background: var(--orange); color: #0d1117; }
+  .btn-red { background: var(--red); color: #fff; }
+  .btn-lg { padding: 12px 28px; font-size: 15px; font-weight: 600; border-radius: 8px; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+  .btn-full { width: 100%; }
+
+  /* ── Status area ── */
+  .status-area {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+  }
+  .status-area.idle { background: var(--elevated); color: var(--text-muted); }
+  .status-area.loading { background: var(--elevated); color: var(--accent); }
+  .status-area.ok { background: rgba(63,185,80,0.12); color: var(--green); border: 1px solid rgba(63,185,80,0.25); }
+  .status-area.err { background: rgba(248,81,73,0.12); color: var(--red); border: 1px solid rgba(248,81,73,0.25); }
+
+  /* ── Section spacing ── */
+  .section { margin-top: 24px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; }
+
+  /* ── Table list ── */
+  .table-list { display: flex; flex-direction: column; gap: 6px; }
+  .table-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: var(--elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 9px 12px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .table-item:hover { border-color: var(--accent); }
+  .table-item input[type="checkbox"] {
+    width: 15px; height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .table-name { font-family: var(--font-mono); font-size: 13px; flex: 1; }
+  .table-meta { font-size: 11px; color: var(--text-muted); }
+
+  .badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 12px;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+  }
+  .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent); }
+  .badge-orange { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .badge-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .badge-red { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  .start-row { margin-top: 24px; display: flex; justify-content: center; }
+
+  /* ── Dashboard ── */
+  .metrics-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px; }
+  .metric-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  .metric-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
+  .metric-value {
+    font-family: var(--font-mono);
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--text);
+    line-height: 1;
+  }
+  .metric-unit { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+  .chart-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  .chart-title { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  #throughput-chart { width: 100%; height: 150px; display: block; border-radius: 4px; }
+
+  .events-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0;
+    overflow: hidden;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  .events-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .events-feed {
+    max-height: 250px;
+    overflow-y: auto;
+    padding: 8px 0;
+    scroll-behavior: smooth;
+  }
+  .events-feed::-webkit-scrollbar { width: 4px; }
+  .events-feed::-webkit-scrollbar-track { background: transparent; }
+  .events-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .event-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    border-bottom: 1px solid rgba(48,54,61,0.5);
+    transition: background 0.1s;
+  }
+  .event-row:last-child { border-bottom: none; }
+  .event-row:hover { background: var(--elevated); }
+  .event-time { color: var(--text-muted); min-width: 80px; }
+  .event-table { color: var(--text); flex: 1; }
+
+  .controls-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  /* ── Replication status badge ── */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .status-pill::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+  }
+  .pill-green { background: rgba(63,185,80,0.15); color: var(--green); }
+  .pill-yellow { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .pill-red { background: rgba(248,81,73,0.15); color: var(--red); }
+
+  /* ── Spinner ── */
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner {
+    display: inline-block;
+    width: 12px; height: 12px;
+    border: 2px solid transparent;
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    flex-shrink: 0;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    .two-col { grid-template-columns: 1fr; }
+    .metrics-row { grid-template-columns: 1fr; }
+    .container { padding: 20px 16px; }
+    .app-header { padding: 12px 16px; }
+    .metric-value { font-size: 26px; }
+    .controls-row { flex-direction: column; }
+    .btn-lg { width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════
+     SETUP VIEW
+════════════════════════════════════════════ -->
+<div id="setup-view">
+  <header class="app-header">
+    <div class="logo">
+      <span class="logo-text">dbmazz</span>
+      <span class="logo-sub">Interactive Demo</span>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="two-col">
+      <!-- PostgreSQL Source -->
+      <div class="card">
+        <div class="card-title"><span class="dot" style="background:var(--accent)"></span>PostgreSQL Source</div>
+        <div class="field-row">
+          <div class="field" style="flex:2">
+            <label for="pg-host">Host</label>
+            <input type="text" id="pg-host" value="postgres" placeholder="localhost">
+          </div>
+          <div class="field" style="flex:1">
+            <label for="pg-port">Port</label>
+            <input type="text" id="pg-port" value="5432" placeholder="5432">
+          </div>
+        </div>
+        <div class="field">
+          <label for="pg-db">Database</label>
+          <input type="text" id="pg-db" value="demo_db" placeholder="postgres">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="pg-user">User</label>
+            <input type="text" id="pg-user" value="postgres" placeholder="postgres">
+          </div>
+          <div class="field">
+            <label for="pg-pass">Password</label>
+            <input type="password" id="pg-pass" value="postgres" placeholder="">
+          </div>
+        </div>
+        <button class="btn btn-ghost btn-full" onclick="testConnection('postgres')">
+          Test Connection
+        </button>
+        <div id="pg-status" class="status-area idle">Awaiting connection test…</div>
+      </div>
+
+      <!-- StarRocks Sink -->
+      <div class="card">
+        <div class="card-title"><span class="dot" style="background:var(--green)"></span>StarRocks Sink</div>
+        <div class="field">
+          <label for="sr-host">Host</label>
+          <input type="text" id="sr-host" value="starrocks" placeholder="localhost">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="sr-http-port">FE HTTP Port</label>
+            <input type="text" id="sr-http-port" value="8030" placeholder="8030">
+          </div>
+          <div class="field">
+            <label for="sr-mysql-port">FE MySQL Port</label>
+            <input type="text" id="sr-mysql-port" value="9030" placeholder="9030">
+          </div>
+        </div>
+        <div class="field">
+          <label for="sr-db">Database</label>
+          <input type="text" id="sr-db" value="demo_db" placeholder="demo_db">
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="sr-user">User</label>
+            <input type="text" id="sr-user" value="root" placeholder="root">
+          </div>
+          <div class="field">
+            <label for="sr-pass">Password</label>
+            <input type="password" id="sr-pass" value="" placeholder="">
+          </div>
+        </div>
+        <button class="btn btn-ghost btn-full" onclick="testConnection('starrocks')">
+          Test Connection
+        </button>
+        <div id="sr-status" class="status-area idle">Awaiting connection test…</div>
+      </div>
+    </div>
+
+    <!-- Table Discovery -->
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">Table Discovery</span>
+        <button id="discover-btn" class="btn btn-ghost btn-sm" disabled onclick="discoverTables()">
+          Discover Tables
+        </button>
+      </div>
+      <div id="tables-container" class="card" style="padding:16px">
+        <p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px 0">
+          Test both connections to enable table discovery
+        </p>
+      </div>
+    </div>
+
+    <div class="start-row">
+      <button id="start-btn" class="btn btn-primary btn-lg" disabled onclick="startReplication()">
+        Start Replication
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════
+     DASHBOARD VIEW
+════════════════════════════════════════════ -->
+<div id="dashboard-view" style="display:none">
+  <header class="app-header">
+    <div class="logo">
+      <span class="logo-text">dbmazz</span>
+    </div>
+    <div id="repl-status" class="status-pill pill-green">Replicating</div>
+  </header>
+
+  <div class="container">
+    <!-- Metrics -->
+    <div class="metrics-row">
+      <div class="metric-card">
+        <div class="metric-label">Throughput</div>
+        <div class="metric-value" id="m-throughput">0</div>
+        <div class="metric-unit">/s &nbsp;events per second</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Latency</div>
+        <div class="metric-value" id="m-latency">--</div>
+        <div class="metric-unit">ms &nbsp;replication lag</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Total Events</div>
+        <div class="metric-value" id="m-total">0</div>
+        <div class="metric-unit">events replicated</div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-card">
+      <div class="chart-title">Throughput — last 60s</div>
+      <canvas id="throughput-chart"></canvas>
+    </div>
+
+    <!-- Live Events -->
+    <div class="events-card">
+      <div class="events-header">
+        <span>Live Events</span>
+        <span id="events-count" style="font-variant-numeric:tabular-nums">0 events</span>
+      </div>
+      <div class="events-feed" id="events-feed">
+        <div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">
+          Waiting for CDC events…
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls-row">
+      <button id="traffic-btn" class="btn btn-green" onclick="toggleTraffic()">Generate Traffic</button>
+      <button id="pause-btn" class="btn btn-orange" onclick="togglePause()">Pause</button>
+      <button class="btn btn-red" onclick="stopReplication()">Stop Replication</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── State ────────────────────────────────────────────────────────────────
+  let phase = 'setup';
+  let eventSource = null;
+  let metricsHistory = [];
+  let trafficRunning = false;
+  let paused = false;
+  let totalEvents = 0;
+  let eventsDisplayed = 0;
+  const MAX_HISTORY = 60;
+  const MAX_EVENTS = 100;
+
+  const connStatus = { postgres: false, starrocks: false };
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  function formatNumber(n) { return Number(n).toLocaleString(); }
+
+  function formatTime(iso) {
+    const d = new Date(iso);
+    return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function setStatus(id, cls, html) {
+    const el = document.getElementById(id);
+    el.className = 'status-area ' + cls;
+    el.innerHTML = html;
+  }
+
+  function pgFields() {
+    return {
+      host: document.getElementById('pg-host').value.trim(),
+      port: parseInt(document.getElementById('pg-port').value.trim(), 10),
+      database: document.getElementById('pg-db').value.trim(),
+      user: document.getElementById('pg-user').value.trim(),
+      password: document.getElementById('pg-pass').value,
+    };
+  }
+
+  function srFields() {
+    return {
+      host: document.getElementById('sr-host').value.trim(),
+      http_port: parseInt(document.getElementById('sr-http-port').value.trim(), 10),
+      mysql_port: parseInt(document.getElementById('sr-mysql-port').value.trim(), 10),
+      database: document.getElementById('sr-db').value.trim(),
+      user: document.getElementById('sr-user').value.trim(),
+      password: document.getElementById('sr-pass').value,
+    };
+  }
+
+  function updateDiscoverBtn() {
+    document.getElementById('discover-btn').disabled = !(connStatus.postgres && connStatus.starrocks);
+  }
+
+  function checkStartBtn() {
+    const anyChecked = [...document.querySelectorAll('.table-checkbox:checked')].length > 0;
+    document.getElementById('start-btn').disabled = !anyChecked;
+  }
+
+  // ── Connection Tests ─────────────────────────────────────────────────────
+  async function testConnection(type) {
+    const statusId = type === 'postgres' ? 'pg-status' : 'sr-status';
+    setStatus(statusId, 'loading', '<span class="spinner"></span> Testing connection…');
+
+    const body = type === 'postgres'
+      ? { type: 'postgres', ...pgFields() }
+      : { type: 'starrocks', ...srFields() };
+
+    try {
+      const res = await fetch('/api/datasources/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'Connection failed');
+
+      const info = type === 'postgres'
+        ? `PostgreSQL ${data.version || ''} · wal_level=${data.wal_level || 'logical'}`
+        : `StarRocks ${data.version || ''}`;
+
+      setStatus(statusId, 'ok', '&#10003; ' + info);
+      connStatus[type === 'postgres' ? 'postgres' : 'starrocks'] = true;
+    } catch (err) {
+      setStatus(statusId, 'err', '&#10007; ' + (err.message || 'Connection failed'));
+      connStatus[type === 'postgres' ? 'postgres' : 'starrocks'] = false;
+    }
+
+    updateDiscoverBtn();
+  }
+
+  // ── Table Discovery ──────────────────────────────────────────────────────
+  async function discoverTables() {
+    const btn = document.getElementById('discover-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Discovering…';
+
+    const container = document.getElementById('tables-container');
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px 0"><span class="spinner"></span> Scanning tables…</p>';
+
+    try {
+      const res = await fetch('/api/tables/discover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ postgres: pgFields() }),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!Array.isArray(data)) throw new Error(data.error || 'Discovery failed');
+
+      renderTableList(data);
+    } catch (err) {
+      container.innerHTML = `<p style="color:var(--red);font-size:13px;text-align:center;padding:12px 0">&#10007; ${err.message}</p>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Discover Tables';
+    }
+  }
+
+  function renderTableList(tables) {
+    const container = document.getElementById('tables-container');
+
+    if (!tables || tables.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-muted);font-size:13px;text-align:center;padding:12px 0">No user tables found.</p>';
+      return;
+    }
+
+    const replicaColor = (ri) => {
+      if (ri === 'FULL') return 'badge-green';
+      if (ri === 'DEFAULT') return 'badge-blue';
+      return 'badge-orange';
+    };
+
+    container.innerHTML = '<div class="table-list">' + tables.map(t => `
+      <label class="table-item">
+        <input type="checkbox" class="table-checkbox" value="${t.name}" checked onchange="checkStartBtn()">
+        <span class="table-name">${t.schema}.<strong>${t.name}</strong></span>
+        <span class="table-meta">${t.column_count ?? '?'} cols</span>
+        <span class="badge ${replicaColor(t.replica_identity)}">${t.replica_identity || 'DEFAULT'}</span>
+      </label>
+    `).join('') + '</div>';
+
+    checkStartBtn();
+  }
+
+  // ── Start / Stop Replication ─────────────────────────────────────────────
+  async function startReplication() {
+    const selected = [...document.querySelectorAll('.table-checkbox:checked')].map(cb => cb.value);
+    if (selected.length === 0) return;
+
+    const btn = document.getElementById('start-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Starting…';
+
+    try {
+      const res = await fetch('/api/replication/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tables: selected, postgres: pgFields(), starrocks: srFields() }),
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      switchToDashboard();
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = 'Start Replication';
+      alert('Failed to start replication: ' + err.message);
+    }
+  }
+
+  async function stopReplication() {
+    if (!confirm('Stop replication?')) return;
+
+    try {
+      await fetch('/api/replication/stop', { method: 'POST' });
+    } catch (_) {}
+
+    if (eventSource) { eventSource.close(); eventSource = null; }
+
+    document.getElementById('repl-status').className = 'status-pill pill-red';
+    document.getElementById('repl-status').textContent = 'Stopped';
+
+    setTimeout(() => switchToSetup(), 1200);
+  }
+
+  function switchToDashboard() {
+    document.getElementById('setup-view').style.display = 'none';
+    document.getElementById('dashboard-view').style.display = '';
+    phase = 'dashboard';
+    metricsHistory = [];
+    totalEvents = 0;
+    eventsDisplayed = 0;
+    drawChart();
+    connectSSE();
+  }
+
+  function switchToSetup() {
+    document.getElementById('dashboard-view').style.display = 'none';
+    document.getElementById('setup-view').style.display = '';
+    phase = 'setup';
+    paused = false;
+    trafficRunning = false;
+    document.getElementById('pause-btn').textContent = 'Pause';
+    document.getElementById('traffic-btn').textContent = 'Generate Traffic';
+  }
+
+  // ── Pause / Resume ───────────────────────────────────────────────────────
+  async function togglePause() {
+    const endpoint = paused ? '/api/replication/resume' : '/api/replication/pause';
+    try {
+      await fetch(endpoint, { method: 'POST' });
+      paused = !paused;
+      document.getElementById('pause-btn').textContent = paused ? 'Resume' : 'Pause';
+      const pill = document.getElementById('repl-status');
+      pill.className = 'status-pill ' + (paused ? 'pill-yellow' : 'pill-green');
+      pill.textContent = paused ? 'Paused' : 'Replicating';
+    } catch (err) {
+      console.error('Toggle pause failed:', err);
+    }
+  }
+
+  // ── Traffic ──────────────────────────────────────────────────────────────
+  async function toggleTraffic() {
+    const endpoint = trafficRunning ? '/api/traffic/stop' : '/api/traffic/start';
+    try {
+      await fetch(endpoint, { method: 'POST' });
+      trafficRunning = !trafficRunning;
+      const btn = document.getElementById('traffic-btn');
+      btn.textContent = trafficRunning ? 'Stop Traffic' : 'Generate Traffic';
+      btn.className = trafficRunning ? 'btn btn-ghost' : 'btn btn-green';
+    } catch (err) {
+      console.error('Toggle traffic failed:', err);
+    }
+  }
+
+  // ── SSE ──────────────────────────────────────────────────────────────────
+  function connectSSE() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/api/metrics/stream');
+
+    eventSource.addEventListener('metrics', (e) => {
+      const data = JSON.parse(e.data);
+      updateMetrics(data);
+    });
+
+    eventSource.addEventListener('cdc_event', (e) => {
+      const data = JSON.parse(e.data);
+      appendEvent(data);
+    });
+
+    eventSource.onerror = () => {
+      if (phase !== 'dashboard') return;
+      setTimeout(() => { if (phase === 'dashboard') connectSSE(); }, 2000);
+    };
+  }
+
+  // ── Metrics Update ───────────────────────────────────────────────────────
+  function updateMetrics(data) {
+    const tps = data.events_per_second ?? 0;
+    const latency = data.replication_lag_ms != null ? data.replication_lag_ms : '--';
+    const total = data.events_processed ?? totalEvents;
+
+    totalEvents = typeof total === 'number' ? total : totalEvents;
+
+    document.getElementById('m-throughput').textContent = formatNumber(Math.round(tps));
+    document.getElementById('m-latency').textContent = latency !== '--' ? formatNumber(Math.round(latency)) : '--';
+    document.getElementById('m-total').textContent = formatNumber(totalEvents);
+
+    metricsHistory.push(tps);
+    if (metricsHistory.length > MAX_HISTORY) metricsHistory.shift();
+
+    drawChart();
+  }
+
+  // ── Live Events ──────────────────────────────────────────────────────────
+  const OP_BADGE = {
+    INSERT: 'badge-green',
+    UPDATE: 'badge-orange',
+    DELETE: 'badge-red',
+  };
+
+  function appendEvent(data) {
+    const feed = document.getElementById('events-feed');
+
+    // Clear placeholder
+    if (eventsDisplayed === 0) feed.innerHTML = '';
+
+    const op = (data.op || 'INSERT').toUpperCase();
+    const badgeCls = OP_BADGE[op] || 'badge-blue';
+    const time = data.ts ? formatTime(new Date(data.ts).toISOString()) : formatTime(new Date().toISOString());
+    const table = data.table || 'unknown';
+
+    const row = document.createElement('div');
+    row.className = 'event-row';
+    row.innerHTML = `
+      <span class="event-time">${time}</span>
+      <span class="badge ${badgeCls}">${op}</span>
+      <span class="event-table">${table}</span>
+    `;
+
+    feed.appendChild(row);
+    eventsDisplayed++;
+
+    // Prune oldest
+    while (feed.children.length > MAX_EVENTS) {
+      feed.removeChild(feed.firstChild);
+    }
+
+    feed.scrollTop = feed.scrollHeight;
+    document.getElementById('events-count').textContent = formatNumber(eventsDisplayed) + ' events';
+  }
+
+  // ── Chart ────────────────────────────────────────────────────────────────
+  function drawChart() {
+    const canvas = document.getElementById('throughput-chart');
+    if (!canvas) return;
+
+    // Responsive width
+    const parent = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    const w = parent.clientWidth - 40; // account for card padding
+    const h = 150;
+
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, w, h);
+
+    const data = metricsHistory;
+    if (data.length < 2) {
+      ctx.fillStyle = 'rgba(88,166,255,0.06)';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = 'rgba(139,148,158,0.4)';
+      ctx.font = '12px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('Waiting for data…', w / 2, h / 2);
+      return;
+    }
+
+    const maxVal = Math.max(...data, 1);
+    const pad = { top: 12, right: 4, bottom: 4, left: 4 };
+    const plotW = w - pad.left - pad.right;
+    const plotH = h - pad.top - pad.bottom;
+
+    const xStep = plotW / (MAX_HISTORY - 1);
+
+    const xAt = (i) => pad.left + (MAX_HISTORY - data.length + i) * xStep;
+    const yAt = (v) => pad.top + plotH - (v / maxVal) * plotH;
+
+    // Fill gradient
+    const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+    grad.addColorStop(0, 'rgba(88,166,255,0.25)');
+    grad.addColorStop(1, 'rgba(88,166,255,0.02)');
+
+    ctx.beginPath();
+    ctx.moveTo(xAt(0), yAt(data[0]));
+    for (let i = 1; i < data.length; i++) {
+      ctx.lineTo(xAt(i), yAt(data[i]));
+    }
+    ctx.lineTo(xAt(data.length - 1), pad.top + plotH);
+    ctx.lineTo(xAt(0), pad.top + plotH);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Line
+    ctx.beginPath();
+    ctx.moveTo(xAt(0), yAt(data[0]));
+    for (let i = 1; i < data.length; i++) {
+      ctx.lineTo(xAt(i), yAt(data[i]));
+    }
+    ctx.strokeStyle = '#58a6ff';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.stroke();
+  }
+
+  window.addEventListener('resize', () => { if (phase === 'dashboard') drawChart(); });
+</script>
+</body>
+</html>

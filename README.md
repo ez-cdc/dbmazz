@@ -1,486 +1,243 @@
-<p align="center">
-  <a href="https://ez-cdc.com">
-    <img src="assets/banner.jpg" alt="EZ-CDC Banner" width="600">
-  </a>
-</p>
+<div align="center">
 
 # dbmazz
 
-High-performance CDC daemon with pluggable source and sink connectors
+**Blazing fast PostgreSQL to StarRocks replication**
+
+Sub-second latency · 5MB memory · Zero config · Written in Rust
+
+[![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
+
+[Quickstart](#quickstart) · [Why dbmazz](#why-dbmazz) · [EZ-CDC Cloud](#scale-with-ez-cdc-cloud) · [Docs](#reference)
+
+</div>
 
 ---
 
-## Overview
+## Quickstart
 
-dbmazz is a Rust-based Change Data Capture (CDC) daemon that enables real-time replication between databases. It uses a pluggable connector architecture where sources and sinks can be easily added to support new databases.
-
-dbmazz can be used as a standalone CDC daemon, or as part of the EZ-CDC platform.
-
-> **Looking for a managed solution?** [EZ-CDC Cloud](https://ez-cdc.com) provides a complete CDC platform with web portal, deployment automation, monitoring, and enterprise support. Deploy in your own AWS account (BYOC) with zero infrastructure management.
-
-## Supported Connectors
-
-### Sources
-
-| Source | CDC Method | Status | Documentation |
-|--------|------------|--------|---------------|
-| PostgreSQL | Logical Replication (pgoutput) | Stable | [postgres/README.md](src/connectors/sources/postgres/README.md) |
-
-### Sinks
-
-| Sink | Loading Method | Status | Documentation |
-|------|----------------|--------|---------------|
-| StarRocks | Stream Load HTTP API | Stable | [starrocks/README.md](src/connectors/sinks/starrocks/README.md) |
-
-Want to add a new connector? See [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md) for a complete guide.
-
----
-
-## Features
-
-- **Pluggable Architecture**: Trait-based connectors for easy addition of new sources and sinks
-- **Real-time CDC**: Streams INSERT, UPDATE, and DELETE operations with sub-second latency
-- **Exactly-once Delivery**: Position-based checkpointing ensures no data loss or duplication
-- **Schema Evolution**: Automatically detects and handles schema changes
-- **Automatic Setup**: Zero-configuration deployment - creates publications, replication slots, and audit columns automatically
-- **gRPC API**: Remote control and monitoring via gRPC with reflection support
-- **Metrics**: Real-time throughput, lag, and health metrics
-- **Normalized Data Model**: Database-agnostic CdcRecord format for interoperability
-- **High Performance**: SIMD-optimized parsing, zero-copy operations, and connection pooling
-
----
-
-## Architecture
-
-### High-Level Overview
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Source Connectors                            │
-│  (Postgres, MySQL, Oracle, etc.)                                │
-│                                                                  │
-│  Each implements: Source trait                                  │
-│  Each emits: CdcRecord                                          │
-└────────────────┬────────────────────────────────────────────────┘
-                 │
-                 │ CdcRecord (normalized format)
-                 │
-                 ▼
-        ┌─────────────────┐
-        │   Pipeline      │
-        │                 │
-        │ - Batching      │
-        │ - Schema cache  │
-        │ - Checkpointing │
-        └─────────┬───────┘
-                  │
-                  │ CdcRecord batches
-                  │
-                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Sink Connectors                              │
-│  (StarRocks, ClickHouse, Snowflake, etc.)                       │
-│                                                                  │
-│  Each implements: Sink trait                                    │
-│  Each accepts: Vec<CdcRecord>                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Pluggable Connector Architecture
-
-dbmazz uses a trait-based architecture for connectors:
-
-- **Source Trait**: Defines interface for reading CDC events from databases
-- **Sink Trait**: Defines interface for writing CDC events to databases
-- **CdcRecord**: Normalized, database-agnostic representation of change events
-- **Factory Pattern**: Sources and sinks are instantiated via factory functions
-
-All connectors exchange data using the `CdcRecord` format, which includes:
-- INSERT, UPDATE, DELETE operations
-- Schema changes
-- Transaction boundaries (BEGIN/COMMIT)
-- Heartbeats for lag tracking
-
-This design allows:
-- Easy addition of new sources and sinks
-- Mix-and-match any source with any sink
-- Protocol and type-mapping isolation
-- Testability and maintainability
-
-For details on adding connectors, see [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md).
-
-### Detailed Architecture (PostgreSQL → StarRocks Example)
-
-```
-┌──────────────────┐
-│   PostgreSQL     │
-│                  │
-│  Logical WAL     │
-│  (pgoutput)      │
-└────────┬─────────┘
-         │
-         │ Replication Protocol
-         │
-         ▼
-┌──────────────────────────────────────────┐
-│             dbmazz                       │
-│                                          │
-│  ┌──────────┐   ┌────────┐   ┌────────┐ │
-│  │  Source  │──▶│Pipeline│──▶│  Sink  │ │
-│  │ (Trait)  │   │        │   │(Trait) │ │
-│  └──────────┘   └────────┘   └────────┘ │
-│       ▲             │             │      │
-│       │             │             │      │
-│  ┌────┴─────┐  ┌───▼────┐   ┌────▼────┐ │
-│  │Checkpoint│  │ Schema │   │ Metrics │ │
-│  │  Store   │  │ Cache  │   │         │ │
-│  └──────────┘  └────────┘   └─────────┘ │
-│                                          │
-│  ┌──────────────────────────────────┐   │
-│  │       gRPC Server (Tonic)        │   │
-│  │  - Health    - Control           │   │
-│  │  - Metrics   - Status            │   │
-│  └──────────────────────────────────┘   │
-└──────────────────┬───────────────────────┘
-                   │
-                   │ Stream Load API
-                   │
-                   ▼
-         ┌──────────────────┐
-         │    StarRocks     │
-         │                  │
-         │  Target Tables   │
-         │  + Audit Columns │
-         └──────────────────┘
-```
-
----
-
-## Requirements
-
-- **Source Database**: See connector-specific requirements in [Sources](src/connectors/sources/)
-- **Sink Database**: See connector-specific requirements in [Sinks](src/connectors/sinks/)
-- **Rust**: Version 1.70 or higher (for building from source)
-
-### Example: PostgreSQL → StarRocks
-
-- **PostgreSQL**: Version 12 or higher with `wal_level = 'logical'`
-- **StarRocks**: Version 2.5 or higher
-
----
-
-## Quick Start
-
-The fastest way to try dbmazz is using the included demo:
+Clone and run — PostgreSQL, StarRocks, and sample data included:
 
 ```bash
-cd demo
-./demo-start.sh
-```
-
-This will:
-- Start PostgreSQL and StarRocks in Docker
-- Create 3 sample tables with real-time replication
-- Launch a metrics dashboard
-- Process 300K+ events to demonstrate performance
-
-To stop the demo:
-```bash
-./demo-stop.sh
-```
-
-For detailed demo documentation, see [demo/README.md](demo/README.md).
-
----
-
-## Installation
-
-### Build from Source
-
-```bash
-# Install Rust toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone the repository
-git clone https://github.com/your-org/dbmazz.git
+git clone https://github.com/dbmazz/dbmazz.git
 cd dbmazz
-
-# Build the release binary
-cargo build --release
-
-# Binary will be available at
-./target/release/dbmazz
+docker compose -f docker-compose.production.yml --profile quickstart up -d
 ```
 
-### Source Configuration
+Open **[http://localhost:8080](http://localhost:8080)** — you'll see a live dashboard with real-time metrics, throughput chart, and replication controls.
 
-Configuration depends on which source connector you're using. See connector-specific documentation:
-
-- [PostgreSQL Source Configuration](src/connectors/sources/postgres/README.md)
-
-### Sink Configuration
-
-Configuration depends on which sink connector you're using. See connector-specific documentation:
-
-- [StarRocks Sink Configuration](src/connectors/sinks/starrocks/README.md)
-
----
-
-## Configuration
-
-dbmazz is configured entirely through environment variables. The configuration uses a generic format that works with any source/sink connector combination.
-
-### Common Variables
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `SOURCE_TYPE` | No | `postgres` | Source connector type (postgres, mysql, etc.) |
-| `SOURCE_URL` | Yes | - | Source database connection URL |
-| `SINK_TYPE` | No | `starrocks` | Sink connector type (starrocks, clickhouse, etc.) |
-| `SINK_URL` | Yes | - | Sink database connection URL |
-| `SINK_DATABASE` | Yes | - | Target database name |
-| `TABLES` | Yes | - | Comma-separated list of tables to replicate |
-| `FLUSH_SIZE` | No | 10000 | Number of events per batch |
-| `FLUSH_INTERVAL_MS` | No | 5000 | Maximum time (ms) between flushes |
-| `GRPC_PORT` | No | 50051 | gRPC server port for control and monitoring |
-
-### Connector-Specific Variables
-
-Each connector may have additional configuration variables. See connector documentation:
-
-- **PostgreSQL Source**: `SOURCE_SLOT_NAME`, `SOURCE_PUBLICATION_NAME` ([details](src/connectors/sources/postgres/README.md))
-- **StarRocks Sink**: `SINK_PORT`, `SINK_USER`, `SINK_PASSWORD` ([details](src/connectors/sinks/starrocks/README.md))
-
-### Example Configuration (PostgreSQL → StarRocks)
+That's it. Data is already flowing from PostgreSQL to StarRocks.
 
 ```bash
-# Source configuration
-export SOURCE_TYPE="postgres"
-export SOURCE_URL="postgres://user:pass@localhost:5432/mydb"
-export SOURCE_SLOT_NAME="dbmazz_slot"
-export SOURCE_PUBLICATION_NAME="dbmazz_pub"
+# Verify it's running
+curl -s http://localhost:8080/healthz
+# {"status":"ok","stage":"cdc","uptime_secs":42}
+```
 
-# Sink configuration
-export SINK_TYPE="starrocks"
-export SINK_URL="http://localhost:8040"
-export SINK_PORT="9030"
-export SINK_DATABASE="analytics"
-export SINK_USER="root"
-export SINK_PASSWORD="mypassword"
+> StarRocks takes ~60s to initialize on first run. The dashboard is available immediately.
 
-# Tables and performance
-export TABLES="orders,order_items,customers"
-export FLUSH_SIZE="2000"
-export FLUSH_INTERVAL_MS="3000"
+### Use your own databases
 
-# Optional: gRPC API
-export GRPC_PORT="50051"
+Run without env vars and configure everything from the browser:
 
-# Start the daemon
+```bash
+cargo build --release --features http-api
 ./target/release/dbmazz
 ```
 
+Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets you test connections, discover tables, and start replication with one click. No config files needed.
+
 ---
 
-## gRPC API
+## Why dbmazz?
 
-dbmazz exposes a gRPC API for remote control and monitoring. The server has **gRPC Reflection** enabled, so tools like `grpcurl` work without `.proto` files.
+|  |  |
+|--|--|
+| **Fast** | 300K+ events with SIMD-optimized parsing. Sub-second replication lag. |
+| **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| **Reliable** | Exactly-once delivery via LSN checkpointing. No data loss, no duplicates. |
+| **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
+| **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
 
-### Services
+---
 
-#### 1. HealthService
+## Scale with EZ-CDC Cloud
 
-Check daemon health and lifecycle stage:
+dbmazz is the open-source CDC engine at the core of **[EZ-CDC](https://ez-cdc.com)**. It's fast, reliable, and free to use.
+
+But running CDC in production means managing multiple jobs, monitoring them, handling failures, and keeping everything running 24/7. That's what EZ-CDC Cloud does.
+
+|  | **dbmazz** (open source) | **EZ-CDC Cloud** |
+|--|--------------------------|-------------------|
+| **Engine** | Full CDC engine (this repo) | Same engine, fully managed |
+| **Jobs** | 1 instance = 1 job | Unlimited jobs, one dashboard |
+| **Deployment** | You build, deploy, maintain | BYOC — deploys in your AWS/GCP via Terraform |
+| **Availability** | Manual restarts | Auto-healing workers, zero downtime |
+| **Monitoring** | Per-instance dashboard | Centralized metrics, alerting, historical dashboards |
+| **Security** | You manage credentials | AES-256 encryption, RBAC, audit logs, API keys |
+| **Web portal** | Status page at `:8080` | Full management portal for your team |
+| **API** | HTTP + gRPC per instance | REST API + MCP server (Claude, Cursor) |
+| **Support** | GitHub Issues | Enterprise SLAs |
+| **Cost** | Free | Pay per deployment |
+
+### When to use dbmazz
+
+- Single PostgreSQL → StarRocks pipeline
+- You're comfortable managing the process yourself
+- You want to embed the CDC engine in your own tooling
+
+### When to use EZ-CDC
+
+- Multiple replication jobs across databases
+- Zero-downtime with auto-healing and restarts
+- Centralized observability for all jobs
+- BYOC deployment with Terraform automation
+- Web portal for your team — no CLI needed
+- Enterprise security — encrypted configs, RBAC, API keys
+
+<p align="center">
+  <br>
+  <a href="https://ez-cdc.com"><strong>Get started with EZ-CDC Cloud →</strong></a>
+  <br><br>
+</p>
+
+---
+
+## Reference
+
+<details>
+<summary><strong>Docker deployment</strong></summary>
+
+### Quickstart (batteries included)
+
+```bash
+docker compose -f docker-compose.production.yml --profile quickstart up -d
+```
+
+### Production (bring your own databases)
+
+```bash
+cp .env.example .env    # fill in your connection details
+docker compose -f docker-compose.production.yml up -d
+```
+
+### Stop
+
+```bash
+docker compose -f docker-compose.production.yml --profile quickstart down
+```
+
+</details>
+
+<details>
+<summary><strong>Configuration</strong></summary>
+
+Configured via environment variables. See [`.env.example`](.env.example) for a full reference.
+
+When built with `--features http-api`, all connection variables are optional — you can configure everything from the browser instead.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOURCE_URL` | — | PostgreSQL connection string (`?replication=database` required) |
+| `SOURCE_SLOT_NAME` | `dbmazz_slot` | Logical replication slot name |
+| `SOURCE_PUBLICATION_NAME` | `dbmazz_pub` | Publication name |
+| `TABLES` | `orders,order_items` | Comma-separated list of tables to replicate |
+| `SINK_URL` | — | StarRocks FE HTTP URL (e.g. `http://starrocks:8030`) |
+| `SINK_PORT` | `9030` | StarRocks FE MySQL port |
+| `SINK_DATABASE` | — | Target database in StarRocks |
+| `SINK_USER` | `root` | StarRocks user |
+| `SINK_PASSWORD` | *(empty)* | StarRocks password |
+| `FLUSH_SIZE` | `10000` | Max events per batch |
+| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing a batch |
+| `GRPC_PORT` | `50051` | gRPC server port |
+| `HTTP_API_PORT` | `8080` | HTTP API port (`--features http-api`) |
+| `RUST_LOG` | `info` | Log level |
+
+</details>
+
+<details>
+<summary><strong>HTTP API</strong></summary>
+
+Build with `--features http-api` to enable the web UI and HTTP endpoints.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Web UI (setup wizard or live dashboard) |
+| GET | `/healthz` | Health check |
+| GET | `/status` | Full metrics JSON |
+| GET | `/metrics/prometheus` | Prometheus metrics |
+| POST | `/pause` | Pause replication |
+| POST | `/resume` | Resume replication |
+| POST | `/drain-stop` | Graceful drain and stop |
+| POST | `/api/datasources/test` | Test connection |
+| POST | `/api/tables/discover` | Discover tables |
+| POST | `/api/replication/start` | Start replication |
+| POST | `/api/replication/stop` | Stop replication |
+
+```bash
+curl http://localhost:8080/healthz
+curl -X POST http://localhost:8080/pause
+curl -X POST http://localhost:8080/resume
+```
+
+</details>
+
+<details>
+<summary><strong>gRPC API</strong></summary>
+
+gRPC with reflection enabled — `grpcurl` works without `.proto` files.
 
 ```bash
 grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
-```
-
-Response (healthy):
-```json
-{
-  "status": "SERVING",
-  "stage": "STAGE_CDC",
-  "stageDetail": "Replicating",
-  "errorDetail": ""
-}
-```
-
-Response (error):
-```json
-{
-  "status": "NOT_SERVING",
-  "stage": "STAGE_SETUP",
-  "stageDetail": "Setup failed",
-  "errorDetail": "Table 'orders' not found in PostgreSQL. Verify the table exists and is accessible."
-}
-```
-
-Lifecycle stages:
-- `STAGE_INIT`: Initializing daemon
-- `STAGE_SETUP`: Configuring PostgreSQL and StarRocks
-- `STAGE_CDC`: Actively replicating
-
-#### 2. CdcControlService
-
-Control daemon behavior:
-
-```bash
-# Pause replication
+grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
-
-# Resume replication
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Resume
-
-# Hot-reload configuration
-grpcurl -plaintext -d '{"flush_size": 2000}' localhost:50051 \
-  dbmazz.CdcControlService/ReloadConfig
-
-# Graceful shutdown
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/DrainAndStop
 ```
 
-#### 3. CdcMetricsService
+</details>
 
-Stream real-time metrics:
+<details>
+<summary><strong>Architecture</strong></summary>
+
+```
+PostgreSQL                  dbmazz                    StarRocks
+┌──────────┐    WAL     ┌──────────────┐  Stream  ┌──────────┐
+│  Tables   │──────────▶│  Pipeline    │─────────▶│  Tables   │
+│           │  logical  │  - Batching  │  Load    │  + audit  │
+│  INSERT   │  replic.  │  - Schema    │  HTTP    │  columns  │
+│  UPDATE   │           │  - Checkpoint│          │           │
+│  DELETE   │           └──────────────┘          └──────────┘
+└──────────┘               5MB RAM                    <1s lag
+```
+
+dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, transforms events into batches, and loads them into StarRocks via the Stream Load HTTP API. Each instance handles one replication job.
+
+| Source | Method | Status |
+|--------|--------|--------|
+| **PostgreSQL** | Logical Replication (pgoutput) | Stable |
+
+| Sink | Method | Status |
+|------|--------|--------|
+| **StarRocks** | Stream Load HTTP API | Stable |
+
+</details>
+
+<details>
+<summary><strong>Build from source</strong></summary>
 
 ```bash
-# Stream metrics every 2 seconds
-grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 \
-  dbmazz.CdcMetricsService/StreamMetrics
+cargo build --release                    # Minimal binary (no HTTP)
+cargo build --release --features http-api # With web UI + HTTP API
 ```
 
-Response:
-```json
-{
-  "eventsPerSecond": 287.5,
-  "lagBytes": "1024",
-  "lagEvents": "15",
-  "memoryBytes": "15360",
-  "totalEventsProcessed": "150000",
-  "totalBatchesSent": "100"
-}
-```
-
-#### 4. CdcStatusService
-
-Get current replication status:
-
-```bash
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
-```
-
-Response:
-```json
-{
-  "state": "RUNNING",
-  "currentLsn": "2610650456",
-  "confirmedLsn": "2610596368",
-  "pendingEvents": "10",
-  "slotName": "dbmazz_slot",
-  "tables": ["orders", "order_items"]
-}
-```
-
-### API Discovery
-
-Explore the API using gRPC reflection:
-
-```bash
-# List all services
-grpcurl -plaintext localhost:50051 list
-
-# Describe a service
-grpcurl -plaintext localhost:50051 describe dbmazz.HealthService
-
-# Describe a message type
-grpcurl -plaintext localhost:50051 describe dbmazz.HealthCheckResponse
-```
-
----
-
-## Monitoring
-
-### Metrics
-
-dbmazz exposes the following metrics via gRPC:
-
-| Metric | Description |
-|--------|-------------|
-| `eventsPerSecond` | Throughput of events processed |
-| `lagBytes` | Replication lag in bytes |
-| `lagEvents` | Number of events pending processing |
-| `memoryBytes` | Current memory usage |
-| `totalEventsProcessed` | Cumulative events processed since start |
-| `totalBatchesSent` | Cumulative batches sent to StarRocks |
-
-### Health Checks
-
-Health checks return detailed error messages for troubleshooting:
-
-```bash
-grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
-```
-
-Common error scenarios:
-- Table not found in PostgreSQL or StarRocks
-- Connection failures
-- Permission issues
-- Replication slot conflicts
-
-### Performance Characteristics
-
-Measured under real-world conditions:
-
-| Metric | Value |
-|--------|-------|
-| Throughput | 300K+ events processed |
-| CPU Usage | ~25% (1 core) at 287 events/sec |
-| Memory Usage | ~5MB |
-| Replication Lag | <1KB under normal load |
-| p99 Latency | <5 seconds |
+</details>
 
 ---
 
 ## Contributing
 
-Contributions are welcome!
-
-- **General contributions**: See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
-- **Adding new connectors**: See [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md) for a complete guide to adding source and sink connectors
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md) for general guidelines and [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md) for adding new connectors.
 
 ## License
 
-This project is licensed under the Elastic License v2.0. See the [LICENSE](../LICENSE) file for details.
-
-The Elastic License v2.0 allows you to:
-- Use dbmazz for commercial and non-commercial purposes
-- Modify and distribute the source codevamos con opcion 1
-
-- Use dbmazz as part of a larger application
-
-With the following limitations:
-- You may not provide dbmazz as a managed service to third parties
-- You may not remove or obscure licensing, copyright, or trademark notices
-
-For questions about licensing, please contact the project maintainers.
-
----
-
-## Related Projects
-
-dbmazz is part of the **EZ-CDC** ecosystem:
-
-- **[EZ-CDC](https://github.com/your-org/ez-cdc)**: Complete CDC platform with control plane, web portal, and BYOC deployment automation
-- **worker-agent**: Rust agent that orchestrates dbmazz daemons in customer VPCs
-- **control-plane**: Go-based API server for mala parnaging CDC deployments
-
-If you need a complete managed CDC solution with multi-tenancy, authentication, and Terraform-based deployment, check out EZ-CDC. If you need a standalone CDC daemon, dbmazz is the right choice.
-
----
-
-## Support
-
-For questions, bug reports, or feature requests, please open an issue on GitHub.
+[Elastic License v2.0](LICENSE) — free for commercial and non-commercial use. Cannot be offered as a managed service.
