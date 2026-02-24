@@ -53,7 +53,7 @@
 
 mod config;
 mod setup;
-mod stream_load;
+pub mod stream_load;
 mod types;
 
 use anyhow::{Result, anyhow};

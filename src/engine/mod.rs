@@ -2,6 +2,7 @@
 // Licensed under the Elastic License v2.0
 
 mod setup;
+pub mod snapshot;
 
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
@@ -126,6 +127,20 @@ impl CdcEngine {
         self.shared_state.set_stage(Stage::Cdc, "Replicating").await;
         info!("Connected! Streaming CDC events...");
 
+        // Spawn snapshot worker concurrently if enabled (DO_SNAPSHOT=true)
+        // The WAL consumer continues running in parallel; deduplication is handled
+        // via should_emit() in wal_handler using the finished_chunks BTreeMap.
+        if self.config.do_snapshot {
+            let snap_config = Arc::new(self.config.clone());
+            let snap_state = self.shared_state.clone();
+            tokio::spawn(async move {
+                if let Err(e) = snapshot::run_snapshot(snap_config, snap_state).await {
+                    error!("Snapshot worker error: {}", e);
+                }
+            });
+            info!("Snapshot worker spawned (DO_SNAPSHOT=true)");
+        }
+
         // 6. Execute main loop
         self.run_main_loop(
             replication_stream,
@@ -239,6 +254,8 @@ impl CdcEngine {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let mut shutdown_rx = self.shared_state.shutdown_tx.subscribe();
+        // Subscribe to on-demand snapshot trigger (fired by StartSnapshot gRPC RPC)
+        let mut snapshot_trigger_rx = self.shared_state.subscribe_snapshot_trigger();
         let mut iteration = 0u64;
 
         loop {
@@ -266,6 +283,20 @@ impl CdcEngine {
                     if *shutdown_rx.borrow() {
                         info!("Shutdown signal received");
                         break;
+                    }
+                }
+
+                // On-demand snapshot trigger (from StartSnapshot gRPC RPC)
+                Ok(()) = snapshot_trigger_rx.changed() => {
+                    if *snapshot_trigger_rx.borrow() && !self.shared_state.is_snapshot_active() {
+                        info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");
+                        let snap_config = Arc::new(self.config.clone());
+                        let snap_state = self.shared_state.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = snapshot::run_snapshot(snap_config, snap_state).await {
+                                error!("On-demand snapshot worker error: {}", e);
+                            }
+                        });
                     }
                 }
 

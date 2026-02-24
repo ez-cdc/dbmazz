@@ -100,6 +100,19 @@ pub enum CdcMessage {
         reply_requested: bool,
     },
 
+    /// Logical replication message (via pg_logical_emit_message)
+    /// Used for snapshot watermarks (LW/HW markers)
+    LogicalMessage {
+        /// True if emitted inside a transaction
+        transactional: bool,
+        /// LSN of the message
+        lsn: u64,
+        /// Message prefix (e.g. "dbmazz")
+        prefix: String,
+        /// Message content (e.g. "LW:table:1:1000" or "HW:table:1:1000")
+        content: Bytes,
+    },
+
     /// Unknown message type
     Unknown,
 }
@@ -243,6 +256,7 @@ impl PgOutputParser {
             b'U' => Self::parse_update(&mut body),
             b'D' => Self::parse_delete(&mut body),
             b'k' => Self::parse_keepalive(&mut body),
+            b'M' => Self::parse_logical_message(&mut body),
             _ => Ok(Some(CdcMessage::Unknown)),
         }
     }
@@ -356,6 +370,32 @@ impl PgOutputParser {
         Ok(Some(CdcMessage::Delete {
             relation_id,
             old_tuple,
+        }))
+    }
+
+    /// Parse a logical replication message ('M' tag — from pg_logical_emit_message)
+    ///
+    /// Format: Byte1(transactional) | UInt64(lsn) | CString(prefix) | UInt32(content_len) | Byte[n](content)
+    fn parse_logical_message(data: &mut Bytes) -> Result<Option<CdcMessage>> {
+        if data.remaining() < 9 {
+            return Ok(None);
+        }
+        let transactional = data.get_u8() != 0;
+        let lsn = data.get_u64();
+        let prefix = Self::read_string(data)?;
+        if data.remaining() < 4 {
+            return Ok(None);
+        }
+        let content_len = data.get_u32() as usize;
+        if data.remaining() < content_len {
+            return Ok(None);
+        }
+        let content = data.split_to(content_len);
+        Ok(Some(CdcMessage::LogicalMessage {
+            transactional,
+            lsn,
+            prefix,
+            content,
         }))
     }
 
