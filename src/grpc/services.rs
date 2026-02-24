@@ -22,6 +22,7 @@ use dbmazz::{
     HealthCheckRequest, HealthCheckResponse,
     health_check_response::ServingStatus,
     PauseRequest, ResumeRequest, DrainRequest, StopRequest, ReloadConfigRequest,
+    StartSnapshotRequest,
     ControlResponse,
     StatusRequest, StatusResponse,
     status_response::CdcState as ProtoCdcState,
@@ -63,9 +64,10 @@ impl HealthService for HealthServiceImpl {
         };
 
         let proto_stage = match stage {
-            Stage::Init => 1,    // STAGE_INIT
-            Stage::Setup => 2,   // STAGE_SETUP
-            Stage::Cdc => 3,     // STAGE_CDC
+            Stage::Init => 1,      // STAGE_INIT
+            Stage::Setup => 2,     // STAGE_SETUP
+            Stage::Cdc => 3,       // STAGE_CDC
+            Stage::Snapshot => 4,  // STAGE_SNAPSHOT
         };
 
         Ok(Response::new(HealthCheckResponse {
@@ -253,6 +255,17 @@ impl CdcControlService for CdcControlServiceImpl {
             }))
         }
     }
+
+    async fn start_snapshot(
+        &self,
+        _request: Request<StartSnapshotRequest>,
+    ) -> Result<Response<ControlResponse>, Status> {
+        self.shared_state.trigger_snapshot();
+        Ok(Response::new(ControlResponse {
+            success: true,
+            message: "Snapshot triggered".to_string(),
+        }))
+    }
 }
 
 pub fn control_service(
@@ -282,6 +295,7 @@ impl CdcStatusService for CdcStatusServiceImpl {
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
         let state = self.shared_state.state();
+        let (stage, _) = self.shared_state.stage().await;
         let config = self.shared_state.config.read().await;
 
         let proto_state = match state {
@@ -291,6 +305,8 @@ impl CdcStatusService for CdcStatusServiceImpl {
             CdcState::Stopped => ProtoCdcState::Stopped,
         };
 
+        let snapshot_active = stage == Stage::Snapshot;
+
         Ok(Response::new(StatusResponse {
             state: proto_state as i32,
             current_lsn: self.shared_state.current_lsn(),
@@ -298,6 +314,10 @@ impl CdcStatusService for CdcStatusServiceImpl {
             pending_events: self.shared_state.pending_events(),
             slot_name: config.slot_name.clone(),
             tables: config.tables.clone(),
+            snapshot_active,
+            snapshot_chunks_total: self.shared_state.snapshot_chunks_total(),
+            snapshot_chunks_done: self.shared_state.snapshot_chunks_done(),
+            snapshot_rows_synced: self.shared_state.snapshot_rows_synced(),
         }))
     }
 }

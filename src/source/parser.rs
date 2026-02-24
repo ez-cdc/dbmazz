@@ -48,6 +48,12 @@ pub enum CdcMessage {
         timestamp: u64,
         reply_requested: bool,
     },
+    LogicalMessage {
+        transactional: bool,
+        lsn: u64,
+        prefix: String,
+        content: Bytes,
+    },
     Unknown,
 }
 
@@ -57,6 +63,15 @@ pub struct Column {
     pub name: String,
     pub type_id: u32,
     pub type_mod: i32,
+}
+
+impl Column {
+    /// Returns true if this column is part of the replica identity key.
+    /// In pgoutput, flags == 1 means the column is a key column.
+    #[inline]
+    pub fn is_key(&self) -> bool {
+        self.flags == 1
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +133,16 @@ pub enum TupleData {
     Toast,
 }
 
+impl TupleData {
+    /// Returns the text content as a `&str` for `Text` variants, or `None` otherwise.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            TupleData::Text(b) => std::str::from_utf8(b).ok(),
+            _ => None,
+        }
+    }
+}
+
 pub struct PgOutputParser;
 
 impl PgOutputParser {
@@ -130,6 +155,7 @@ impl PgOutputParser {
             b'U' => Self::parse_update(&mut body),
             b'D' => Self::parse_delete(&mut body),
             b'k' => Self::parse_keepalive(&mut body),
+            b'M' => Self::parse_logical_message(&mut body),
             _ => Ok(Some(CdcMessage::Unknown)),
         }
     }
@@ -201,6 +227,18 @@ impl PgOutputParser {
             None
         };
         Ok(Some(CdcMessage::Delete { relation_id, old_tuple }))
+    }
+
+    fn parse_logical_message(data: &mut Bytes) -> Result<Option<CdcMessage>> {
+        if data.remaining() < 9 { return Ok(None); }
+        let transactional = data.get_u8() != 0;
+        let lsn = data.get_u64();
+        let prefix = Self::read_string(data)?;
+        if data.remaining() < 4 { return Ok(None); }
+        let content_len = data.get_u32() as usize;
+        if data.remaining() < content_len { return Ok(None); }
+        let content = data.split_to(content_len);
+        Ok(Some(CdcMessage::LogicalMessage { transactional, lsn, prefix, content }))
     }
 
     fn parse_keepalive(data: &mut Bytes) -> Result<Option<CdcMessage>> {
