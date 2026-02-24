@@ -241,8 +241,10 @@ async fn process_chunk(
     ).await?;
 
     // Step 7: Register in SharedState so WAL consumer can deduplicate
-    let relation_id = get_relation_id(client, table).await
-        .unwrap_or(0);
+    let relation_id = get_relation_id(client, table).await.unwrap_or_else(|e| {
+        tracing::warn!("Could not resolve relation OID for table '{}': {}. WAL dedup may be incomplete.", table, e);
+        0
+    });
     shared_state.register_finished_chunk(relation_id, chunk.start_pk, chunk.end_pk, hw_lsn).await;
 
     // Update progress counters

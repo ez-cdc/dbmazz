@@ -59,6 +59,7 @@ pub async fn healthz(State(state): State<Arc<HttpAppState>>) -> impl IntoRespons
             Stage::Init => "init",
             Stage::Setup => "setup",
             Stage::Cdc => "cdc",
+            Stage::Snapshot => "snapshot",
         }
     } else {
         "waiting_for_config"
@@ -83,6 +84,7 @@ pub async fn status(State(state): State<Arc<HttpAppState>>) -> impl IntoResponse
             Stage::Init => "init",
             Stage::Setup => "setup",
             Stage::Cdc => "cdc",
+            Stage::Snapshot => "snapshot",
         };
         let cdc_state = s.state();
         let state_str = match cdc_state {
@@ -534,6 +536,9 @@ pub async fn start_replication(
         flush_size: 2000,
         flush_interval_ms: 2000,
         grpc_port: 50051,
+        do_snapshot: false,
+        snapshot_chunk_size: 500_000,
+        snapshot_parallel_workers: 2,
     };
 
     let engine = CdcEngine::new(config);
