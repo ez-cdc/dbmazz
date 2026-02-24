@@ -1,6 +1,10 @@
 <div align="center">
 
-# dbmazz
+<a href="https://ez-cdc.com">
+  <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="280">
+</a>
+
+<br><br>
 
 **Blazing fast PostgreSQL to StarRocks replication**
 
