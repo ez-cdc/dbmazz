@@ -320,6 +320,9 @@ impl<'a> PostgresSetup<'a> {
                             error: pg_error_message(&e),
                         })?;
                     info!("  [OK] Replication slot {} created", slot_name);
+
+                    // Clear stale snapshot state — the old slot's progress is invalid
+                    self.clear_snapshot_state(slot_name).await;
                 }
             }
             None => {
@@ -336,10 +339,32 @@ impl<'a> PostgresSetup<'a> {
                         error: pg_error_message(&e),
                     })?;
                 info!("  [OK] Replication slot {} created", slot_name);
+
+                // Clear stale snapshot state — new slot means fresh start
+                self.clear_snapshot_state(slot_name).await;
             }
         }
 
         Ok(())
+    }
+
+    /// Clear snapshot state for a slot when the slot is (re)created.
+    /// A new replication slot means the snapshot must run from scratch;
+    /// stale COMPLETE records would cause the snapshot worker to skip all chunks.
+    async fn clear_snapshot_state(&self, slot_name: &str) {
+        match self.client
+            .execute(
+                "DELETE FROM dbmazz_snapshot_state WHERE slot_name = $1",
+                &[&slot_name],
+            )
+            .await
+        {
+            Ok(n) if n > 0 => {
+                info!("  [OK] Cleared {} stale snapshot state rows for slot {}", n, slot_name);
+            }
+            Ok(_) => {} // No rows to clear
+            Err(_) => {} // Table may not exist yet, that's fine
+        }
     }
 }
 
