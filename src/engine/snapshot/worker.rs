@@ -125,20 +125,49 @@ pub async fn run_snapshot(
     info!("Snapshot: {} total chunks, {} already done, {} to run",
         total, done_at_start, chunks_to_run.len());
 
-    // Process chunks with bounded parallelism
-    let semaphore = Arc::new(Semaphore::new(config.snapshot_parallel_workers as usize));
+    // Open N-1 additional PG connections for truly parallel SELECTs.
+    // Each worker gets a dedicated connection so queries execute concurrently on PG
+    // (vs pipelining on one connection, which PG still serializes internally).
+    let n_workers = (config.snapshot_parallel_workers as usize).max(1);
+    let mut pool_conns: Vec<Arc<Client>> = vec![Arc::clone(&client)];
+    for i in 1..n_workers {
+        let (c, conn) = tokio_postgres::connect(&plain_url, NoTls)
+            .await
+            .with_context(|| format!("snapshot worker: failed to open PG connection {}", i))?;
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                error!("snapshot PG connection {} error: {}", i, e);
+            }
+        });
+        pool_conns.push(Arc::new(c));
+    }
+    if n_workers > 1 {
+        info!("Opened {} PG connections for parallel snapshot", n_workers);
+    }
+
+    // Connection pool: semaphore limits concurrency, pool assigns dedicated connections.
+    let pool = Arc::new(tokio::sync::Mutex::new(pool_conns));
+    let semaphore = Arc::new(Semaphore::new(n_workers));
     let mut join_set = JoinSet::new();
 
     for (table, chunk) in chunks_to_run {
-        let client = Arc::clone(&client);
-        let sl_client = Arc::clone(&sl_client);
+        let pool = Arc::clone(&pool);
         let semaphore = Arc::clone(&semaphore);
+        let sl_client = Arc::clone(&sl_client);
         let slot_name = slot_name.clone();
         let shared_state = Arc::clone(&shared_state);
 
         join_set.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
-            process_chunk(&client, &sl_client, &slot_name, &table, &chunk, &shared_state).await
+            let pg_client = match pool.lock().await.pop() {
+                Some(c) => c,
+                None => return Err(anyhow::anyhow!("snapshot pool exhausted")),
+            };
+            let result = process_chunk(
+                &pg_client, &sl_client, &slot_name, &table, &chunk, &shared_state,
+            ).await;
+            pool.lock().await.push(pg_client);
+            result
         });
     }
 
