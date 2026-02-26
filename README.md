@@ -1,7 +1,7 @@
 <div align="center">
 
 <a href="https://ez-cdc.com">
-  <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="280">
+  <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="360">
 </a>
 
 <br><br>
@@ -12,7 +12,7 @@ Sub-second latency · 5MB memory · Zero config · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#quickstart) · [Why dbmazz](#why-dbmazz) · [EZ-CDC Cloud](#scale-with-ez-cdc-cloud) · [Docs](#reference)
+[Quickstart](#quickstart) · [Why dbmazz?](#why-dbmazz) · [EZ-CDC Cloud](#scale-with-ez-cdc-cloud) · [Reference](#reference)
 
 </div>
 
@@ -23,7 +23,7 @@ Sub-second latency · 5MB memory · Zero config · Written in Rust
 Clone and run — PostgreSQL, StarRocks, and sample data included:
 
 ```bash
-git clone https://github.com/dbmazz/dbmazz.git
+git clone https://github.com/ez-cdc/dbmazz.git
 cd dbmazz
 docker compose -f docker-compose.production.yml --profile quickstart up -d
 ```
@@ -57,9 +57,9 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 |  |  |
 |--|--|
-| **Fast** | 300K+ events with SIMD-optimized parsing. Sub-second replication lag. |
+| **Fast** | 300K+ events/sec. Sub-second replication lag. |
 | **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
-| **Reliable** | Exactly-once delivery via LSN checkpointing. No data loss, no duplicates. |
+| **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
 | **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
 | **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
 | **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
@@ -231,7 +231,7 @@ Uses the [Flink CDC concurrent snapshot algorithm](https://nightlies.apache.org/
 2. The WAL consumer checks `should_emit()` for each event — events within a completed chunk's PK range with LSN <= HW are suppressed (already loaded by snapshot)
 3. Events outside chunk ranges or with LSN > HW are emitted normally
 
-This ensures exactly-once semantics even with concurrent writes during the snapshot.
+This ensures consistent delivery even with concurrent writes during the snapshot.
 
 ### Monitor progress
 

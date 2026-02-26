@@ -1,0 +1,8 @@
+<svg width="500" height="500" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- E Section -->
+  <path d="M20 30H45" stroke="#0070f3" stroke-width="10" stroke-linecap="round"/>
+  <path d="M25 50H40" stroke="#0070f3" stroke-width="10" stroke-linecap="round"/>
+  <path d="M20 70H45" stroke="#0070f3" stroke-width="10" stroke-linecap="round"/>
+  <!-- Lightning/Z Section -->
+  <path d="M70 15L40 55H60L50 85L85 45H65L75 15H70Z" fill="#0070f3"/>
+</svg>
