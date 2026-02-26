@@ -21,6 +21,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
@@ -41,10 +43,10 @@ pub async fn run_snapshot(
     config: Arc<Config>,
     shared_state: Arc<SharedState>,
 ) -> Result<()> {
-    if config.snapshot_parallel_workers > 1 {
-        warn!("SNAPSHOT_PARALLEL_WORKERS > 1 not yet supported; processing sequentially");
-    }
-    info!("Snapshot worker starting (chunk_size={})", config.snapshot_chunk_size);
+    info!(
+        "Snapshot worker starting (chunk_size={}, workers={})",
+        config.snapshot_chunk_size, config.snapshot_parallel_workers
+    );
 
     shared_state.set_snapshot_active(true);
     shared_state.set_stage(Stage::Snapshot, "Connecting to source").await;
@@ -55,6 +57,7 @@ pub async fn run_snapshot(
     let (client, connection) = tokio_postgres::connect(&plain_url, NoTls)
         .await
         .context("snapshot worker: failed to connect to PostgreSQL")?;
+    let client = Arc::new(client);
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -68,12 +71,12 @@ pub async fn run_snapshot(
     // Build the Stream Load client using the normalized HTTP URL from the sink config
     let sr_config = StarRocksSinkConfig::from_sink_config(&config.sink)
         .context("snapshot worker: failed to build StarRocks config")?;
-    let sl_client = StreamLoadClient::new(
+    let sl_client = Arc::new(StreamLoadClient::new(
         sr_config.http_url.clone(),
         sr_config.database.clone(),
         sr_config.user.clone(),
         sr_config.password.clone(),
-    );
+    ));
 
     let slot_name = config.slot_name.clone();
     let tables = config.tables.clone();
@@ -122,13 +125,28 @@ pub async fn run_snapshot(
     info!("Snapshot: {} total chunks, {} already done, {} to run",
         total, done_at_start, chunks_to_run.len());
 
-    // Process chunks sequentially (parallel workers are future work)
-    for (table, chunk) in &chunks_to_run {
-        if let Err(e) = process_chunk(
-            &client, &sl_client, &slot_name, table, chunk, &shared_state,
-        ).await {
-            error!("Chunk {}/{} failed: {:#}", table, chunk.partition_id, e);
-            // Continue with next chunk — failed chunks will be retried on restart
+    // Process chunks with bounded parallelism
+    let semaphore = Arc::new(Semaphore::new(config.snapshot_parallel_workers as usize));
+    let mut join_set = JoinSet::new();
+
+    for (table, chunk) in chunks_to_run {
+        let client = Arc::clone(&client);
+        let sl_client = Arc::clone(&sl_client);
+        let semaphore = Arc::clone(&semaphore);
+        let slot_name = slot_name.clone();
+        let shared_state = Arc::clone(&shared_state);
+
+        join_set.spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            process_chunk(&client, &sl_client, &slot_name, &table, &chunk, &shared_state).await
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!("Chunk failed: {:#}", e),
+            Err(e) => error!("Chunk task panicked: {}", e),
         }
     }
 
