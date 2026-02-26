@@ -54,7 +54,7 @@
 mod config;
 mod setup;
 pub mod stream_load;
-mod types;
+pub(crate) mod types;
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
