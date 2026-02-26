@@ -1,6 +1,6 @@
 <div align="center">
 
-<a href="https://ez-cdc.com">
+<a href="https://ez-cdc.com" target="_blank">
   <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="360">
 </a>
 
@@ -68,7 +68,7 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ## ☁️ Scale with EZ-CDC Cloud
 
-dbmazz is the open-source CDC engine at the core of **[EZ-CDC](https://ez-cdc.com)**. It's fast, reliable, and free to use.
+dbmazz is the open-source CDC engine at the core of **<a href="https://ez-cdc.com" target="_blank">EZ-CDC</a>**. It's fast, reliable, and free to use.
 
 But running CDC in production means managing multiple jobs, monitoring them, handling failures, and keeping everything running 24/7. That's what EZ-CDC Cloud does.
 
@@ -102,7 +102,7 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 
 <p align="center">
   <br>
-  <a href="https://ez-cdc.com"><strong>Get started with EZ-CDC Cloud →</strong></a>
+  <a href="https://ez-cdc.com" target="_blank"><strong>Get started with EZ-CDC Cloud →</strong></a>
   <br><br>
 </p>
 
