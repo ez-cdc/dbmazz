@@ -351,10 +351,13 @@ impl Config {
             .unwrap_or_else(|_| "false".to_string())
             .to_lowercase() == "true";
 
+        // Default 50K rows per chunk. Each chunk is fully loaded in RAM (rows + JSON),
+        // so for wide tables (~5-10 KB/row) this uses ~500 MB-1 GB peak memory.
+        // Previous default of 500K could OOM on 4 GB VMs with wide rows.
         let snapshot_chunk_size: u64 = env::var("SNAPSHOT_CHUNK_SIZE")
-            .unwrap_or_else(|_| "500000".to_string())
+            .unwrap_or_else(|_| "50000".to_string())
             .parse()
-            .unwrap_or(500_000)
+            .unwrap_or(50_000)
             .max(1);
 
         let snapshot_parallel_workers: u32 = env::var("SNAPSHOT_PARALLEL_WORKERS")

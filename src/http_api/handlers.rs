@@ -537,7 +537,7 @@ pub async fn start_replication(
         flush_interval_ms: 2000,
         grpc_port: 50051,
         do_snapshot: false,
-        snapshot_chunk_size: 500_000,
+        snapshot_chunk_size: 50_000,
         snapshot_parallel_workers: 2,
     };
 
