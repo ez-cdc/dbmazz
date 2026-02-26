@@ -200,7 +200,7 @@ dbmazz/
 │   ├── sink/                # Destinations (StarRocks)
 │   ├── source/              # Sources (PostgreSQL)
 │   └── state_store.rs       # Checkpointing
-├── demo/                    # Complete commercial demo
+├── examples/                # Demo environment
 └── CHANGELOG.md             # This file
 ```
 

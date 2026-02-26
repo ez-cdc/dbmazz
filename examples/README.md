@@ -176,7 +176,7 @@ docker logs dbmazz-demo-cdc | grep "Connected"
 ## 📁 Estructura del Demo
 
 ```
-demo/
+examples/
 ├── demo-start.sh              # Iniciar todo
 ├── demo-stop.sh               # Detener todo
 ├── docker-compose.demo.yml    # Servicios Docker

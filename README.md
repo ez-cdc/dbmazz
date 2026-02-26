@@ -25,7 +25,7 @@ Clone and run — PostgreSQL, StarRocks, and sample data included:
 ```bash
 git clone https://github.com/ez-cdc/dbmazz.git
 cd dbmazz
-docker compose -f docker-compose.production.yml --profile quickstart up -d
+docker compose -f deploy/docker-compose.yml --profile quickstart up -d
 ```
 
 Open **[http://localhost:8080](http://localhost:8080)** — you'll see a live dashboard with real-time metrics, throughput chart, and replication controls.
@@ -116,14 +116,14 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 ### Quickstart (batteries included)
 
 ```bash
-docker compose -f docker-compose.production.yml --profile quickstart up -d
+docker compose -f deploy/docker-compose.yml --profile quickstart up -d
 ```
 
 ### Production (bring your own databases)
 
 ```bash
-cp .env.example .env    # fill in your connection details
-docker compose -f docker-compose.production.yml up -d
+cp deploy/.env.example deploy/.env    # fill in your connection details
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### With initial snapshot (backfill existing data)
@@ -133,13 +133,13 @@ docker compose -f docker-compose.production.yml up -d
 DO_SNAPSHOT=true
 SNAPSHOT_CHUNK_SIZE=500000
 
-docker compose -f docker-compose.production.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### Stop
 
 ```bash
-docker compose -f docker-compose.production.yml --profile quickstart down
+docker compose -f deploy/docker-compose.yml --profile quickstart down
 ```
 
 </details>
@@ -147,7 +147,7 @@ docker compose -f docker-compose.production.yml --profile quickstart down
 <details>
 <summary><strong>⚙️ Configuration</strong></summary>
 
-Configured via environment variables. See [`.env.example`](.env.example) for a full reference.
+Configured via environment variables. See [`deploy/.env.example`](deploy/.env.example) for a full reference.
 
 When built with `--features http-api`, all connection variables are optional — you can configure everything from the browser instead.
 
@@ -297,7 +297,7 @@ cargo build --release --features http-api # With web UI + HTTP API
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for general guidelines and [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md) for adding new connectors.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for general guidelines and [docs/contributing-connectors.md](docs/contributing-connectors.md) for adding new connectors.
 
 ## 📄 License
 
