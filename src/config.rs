@@ -198,6 +198,7 @@ pub struct Config {
     pub do_snapshot: bool,
     pub snapshot_chunk_size: u64,
     pub snapshot_parallel_workers: u32,
+    pub initial_snapshot_only: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -365,6 +366,10 @@ impl Config {
             .parse()
             .unwrap_or(2);
 
+        let initial_snapshot_only = env::var("INITIAL_SNAPSHOT_ONLY")
+            .unwrap_or_else(|_| "false".to_string())
+            .to_lowercase() == "true";
+
         Ok(Self {
             // New nested config
             source,
@@ -390,6 +395,7 @@ impl Config {
             do_snapshot,
             snapshot_chunk_size,
             snapshot_parallel_workers,
+            initial_snapshot_only,
         })
     }
 
@@ -452,6 +458,7 @@ mod tests {
         env::remove_var("FLUSH_SIZE");
         env::remove_var("FLUSH_INTERVAL_MS");
         env::remove_var("GRPC_PORT");
+        env::remove_var("INITIAL_SNAPSHOT_ONLY");
 
     }
 

@@ -133,11 +133,16 @@ impl CdcEngine {
         if self.config.do_snapshot {
             let snap_config = Arc::new(self.config.clone());
             let snap_state = self.shared_state.clone();
+            let initial_snapshot_only = self.config.initial_snapshot_only;
             tokio::spawn(async move {
                 match snapshot::run_snapshot(snap_config, snap_state.clone()).await {
                     Ok(()) => {
                         snap_state.set_snapshot_active(false);
                         info!("Snapshot completed successfully");
+                        if initial_snapshot_only {
+                            info!("Initial snapshot only mode: triggering graceful shutdown");
+                            let _ = snap_state.shutdown_tx.send(true);
+                        }
                     }
                     Err(e) => {
                         snap_state.set_snapshot_active(false);
