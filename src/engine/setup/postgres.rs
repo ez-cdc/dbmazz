@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::Result;
 use tokio_postgres::{Client, NoTls};
 use tracing::{info, warn};
@@ -5,6 +7,22 @@ use tracing::{info, warn};
 use super::error::SetupError;
 use crate::config::Config;
 use crate::utils::validate_sql_identifier;
+
+/// Column information from PostgreSQL catalog
+#[derive(Debug, Clone)]
+pub struct PgColumnInfo {
+    pub name: String,
+    pub type_oid: u32,
+    pub type_mod: i32,
+    pub not_null: bool,
+}
+
+/// Schema information for a PostgreSQL table
+#[derive(Debug, Clone)]
+pub struct PgTableSchema {
+    pub columns: Vec<PgColumnInfo>,
+    pub pk_columns: Vec<String>,
+}
 
 /// Extract a detailed error message from a tokio_postgres error.
 /// tokio_postgres::Error::Display only prints the error kind (e.g. "db error")
@@ -348,6 +366,96 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
     });
 
     Ok(client)
+}
+
+/// Batch query column types and primary key info for multiple tables in 2 SQL queries.
+/// Much more efficient than per-table queries (2 queries for N tables instead of 2N).
+///
+/// `table_names` should be fully qualified ("schema.table") or bare ("table" → assumes "public").
+pub async fn get_table_schemas_batch(
+    client: &Client,
+    table_names: &[String],
+) -> Result<HashMap<String, PgTableSchema>, SetupError> {
+    if table_names.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Build qualified names for matching: "schema.table"
+    let qualified: Vec<String> = table_names.iter().map(|t| {
+        if t.contains('.') { t.clone() } else { format!("public.{}", t) }
+    }).collect();
+
+    // Query 1: All columns for all tables in one shot
+    let col_rows = client.query(
+        "SELECT n.nspname || '.' || c.relname AS qualified,
+                a.attname, a.atttypid::int4, a.atttypmod, a.attnotnull
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE (n.nspname || '.' || c.relname) = ANY($1)
+           AND a.attnum > 0 AND NOT a.attisdropped
+         ORDER BY n.nspname, c.relname, a.attnum",
+        &[&qualified],
+    ).await.map_err(|e| SetupError::PgConnectionFailed {
+        host: "PostgreSQL".to_string(),
+        error: pg_error_message(&e),
+    })?;
+
+    // Query 2: All PK columns for all tables in one shot
+    let pk_rows = client.query(
+        "SELECT n.nspname || '.' || c.relname AS qualified,
+                a.attname
+         FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+         JOIN pg_class c ON c.oid = i.indrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE i.indisprimary
+           AND (n.nspname || '.' || c.relname) = ANY($1)
+         ORDER BY n.nspname, c.relname, a.attnum",
+        &[&qualified],
+    ).await.map_err(|e| SetupError::PgConnectionFailed {
+        host: "PostgreSQL".to_string(),
+        error: pg_error_message(&e),
+    })?;
+
+    // Group columns by qualified table name
+    let mut schemas: HashMap<String, PgTableSchema> = HashMap::new();
+
+    for row in &col_rows {
+        let qual: String = row.get(0);
+        let entry = schemas.entry(qual).or_insert_with(|| PgTableSchema {
+            columns: Vec::new(),
+            pk_columns: Vec::new(),
+        });
+        entry.columns.push(PgColumnInfo {
+            name: row.get::<_, String>(1),
+            type_oid: row.get::<_, i32>(2) as u32,
+            type_mod: row.get::<_, i32>(3),
+            not_null: row.get::<_, bool>(4),
+        });
+    }
+
+    for row in &pk_rows {
+        let qual: String = row.get(0);
+        if let Some(schema) = schemas.get_mut(&qual) {
+            schema.pk_columns.push(row.get::<_, String>(1));
+        }
+    }
+
+    // Map back to original table names (preserve user's naming: "public.orders" or "orders")
+    let mut result = HashMap::new();
+    for original in table_names {
+        let qual = if original.contains('.') {
+            original.clone()
+        } else {
+            format!("public.{}", original)
+        };
+        if let Some(schema) = schemas.remove(&qual) {
+            result.insert(original.clone(), schema);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Cleanup PostgreSQL resources on daemon shutdown

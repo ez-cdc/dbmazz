@@ -20,6 +20,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
@@ -218,10 +219,11 @@ async fn process_chunk(
 
     // Step 4: Serialize rows to JSON (for Stream Load)
     // All columns are text thanks to ::text cast, so we just read Option<String>
+    let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let body = if rows.is_empty() {
         b"[]".to_vec()
     } else {
-        serialize_text_rows_to_json(&rows, &col_names)?
+        serialize_text_rows_to_json(&rows, &col_names, &synced_at, hw_lsn)?
     };
 
     // Step 5: Stream Load to StarRocks (only if there are rows)
@@ -262,9 +264,17 @@ async fn process_chunk(
 /// Format: `[{"col1":"val1","col2":"val2"}, ...]`
 /// Serialize rows to JSON where all columns were cast to ::text in the query.
 /// Each column is read as Option<String> — no type-specific conversions needed.
-fn serialize_text_rows_to_json(rows: &[tokio_postgres::Row], col_names: &[String]) -> Result<Vec<u8>> {
+/// Appends CDC audit columns (dbmazz_op_type, dbmazz_is_deleted, dbmazz_synced_at, dbmazz_cdc_version).
+fn serialize_text_rows_to_json(
+    rows: &[tokio_postgres::Row],
+    col_names: &[String],
+    synced_at: &str,
+    hw_lsn: u64,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.push(b'[');
+
+    let cdc_version_str = (hw_lsn as i64).to_string();
 
     for (row_idx, row) in rows.iter().enumerate() {
         if row_idx > 0 {
@@ -302,6 +312,16 @@ fn serialize_text_rows_to_json(rows: &[tokio_postgres::Row], col_names: &[String
                 None => out.extend_from_slice(b"null"),
             }
         }
+
+        // Append CDC audit columns
+        out.extend_from_slice(b",\"dbmazz_op_type\":0");
+        out.extend_from_slice(b",\"dbmazz_is_deleted\":false");
+        out.extend_from_slice(b",\"dbmazz_synced_at\":\"");
+        out.extend_from_slice(synced_at.as_bytes());
+        out.extend_from_slice(b"\"");
+        out.extend_from_slice(b",\"dbmazz_cdc_version\":");
+        out.extend_from_slice(cdc_version_str.as_bytes());
+
         out.push(b'}');
     }
 
