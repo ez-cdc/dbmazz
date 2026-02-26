@@ -5,10 +5,7 @@ use mysql_async::{Pool, Conn, prelude::Queryable};
 use tracing::info;
 
 use super::error::SetupError;
-use super::postgres::PgTableSchema;
 use crate::config::Config;
-use crate::connectors::sources::postgres::types::pg_type_to_data_type;
-use crate::connectors::sinks::starrocks::types::TypeMapper;
 use crate::utils::validate_sql_identifier;
 
 /// CDC audit columns that must exist in StarRocks
@@ -30,14 +27,7 @@ impl<'a> StarRocksSetup<'a> {
     }
 
     /// Execute complete StarRocks setup.
-    ///
-    /// - `pg_schemas`: PG table schemas only for tables that need to be created (lazy-loaded).
-    /// - `existing_sr_tables`: set of table names already in StarRocks (from orchestrator, avoids re-query).
-    pub async fn run(
-        &self,
-        pg_schemas: &HashMap<String, PgTableSchema>,
-        existing_sr_tables: &HashSet<String>,
-    ) -> Result<(), SetupError> {
+    pub async fn run(&self) -> Result<(), SetupError> {
         info!("StarRocks Setup:");
 
         let mut conn = self.get_conn().await?;
@@ -47,19 +37,36 @@ impl<'a> StarRocksSetup<'a> {
             .map_err(|e| self.sr_error(e.to_string()))?;
         info!("  [OK] StarRocks connection OK");
 
-        // 2. Create missing tables (DDL can't be batched, but we only iterate missing ones)
-        let mut newly_created: HashSet<String> = HashSet::new();
+        // 2. Verify all tables exist
+        self.verify_tables_exist(&mut conn).await?;
+
+        // 3. Batch ensure audit columns
+        let tables: Vec<&str> = self.config.tables.iter()
+            .map(|t| t.split('.').next_back().unwrap_or(t))
+            .collect();
+
+        self.ensure_audit_columns_batch(&mut conn, &tables).await?;
+
+        info!("[OK] StarRocks setup complete");
+        Ok(())
+    }
+
+    /// Verify that all configured tables exist in StarRocks.
+    async fn verify_tables_exist(&self, conn: &mut Conn) -> Result<(), SetupError> {
+        let rows: Vec<(String,)> = conn
+            .exec(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+                (&self.config.starrocks_db,),
+            )
+            .await
+            .map_err(|e| self.sr_error(e.to_string()))?;
+
+        let existing: HashSet<String> = rows.into_iter().map(|(n,)| n).collect();
 
         for table in &self.config.tables {
             let table_name = table.split('.').next_back().unwrap_or(table);
-
-            if existing_sr_tables.contains(table_name) {
+            if existing.contains(table_name) {
                 info!("  [OK] Table {} exists in StarRocks", table_name);
-            } else if let Some(pg_schema) = pg_schemas.get(table) {
-                info!("  Table {} not found in StarRocks, creating from source schema...", table_name);
-                self.create_table_from_source(&mut conn, table_name, pg_schema).await?;
-                info!("  [OK] Table {} created in StarRocks", table_name);
-                newly_created.insert(table_name.to_string());
             } else {
                 return Err(SetupError::SrTableNotFound {
                     table: table.clone(),
@@ -67,18 +74,6 @@ impl<'a> StarRocksSetup<'a> {
             }
         }
 
-        // 3. Batch ensure audit columns (1 query for all pre-existing tables)
-        //    Skip newly created tables — they already have audit columns in the DDL.
-        let pre_existing: Vec<&str> = self.config.tables.iter()
-            .map(|t| t.split('.').next_back().unwrap_or(t))
-            .filter(|t| !newly_created.contains(*t))
-            .collect();
-
-        if !pre_existing.is_empty() {
-            self.ensure_audit_columns_batch(&mut conn, &pre_existing).await?;
-        }
-
-        info!("[OK] StarRocks setup complete");
         Ok(())
     }
 
@@ -149,68 +144,6 @@ impl<'a> StarRocksSetup<'a> {
         Ok(())
     }
 
-    /// Create a StarRocks table based on the source PostgreSQL schema.
-    async fn create_table_from_source(
-        &self,
-        conn: &mut Conn,
-        table_name: &str,
-        schema: &PgTableSchema,
-    ) -> Result<(), SetupError> {
-        validate_sql_identifier(table_name)
-            .map_err(|e| self.sr_error(format!("Invalid table name: {}", e)))?;
-        validate_sql_identifier(&self.config.starrocks_db)
-            .map_err(|e| self.sr_error(format!("Invalid database name: {}", e)))?;
-
-        let type_mapper = TypeMapper::new();
-
-        // Build column definitions from PG schema
-        let mut col_defs = Vec::new();
-        for col in &schema.columns {
-            let data_type = pg_type_to_data_type(col.type_oid, col.type_mod);
-            let sr_type = type_mapper.to_starrocks_type(&data_type);
-            let not_null = if col.not_null { " NOT NULL" } else { "" };
-            col_defs.push(format!("    `{}` {}{}", col.name, sr_type, not_null));
-        }
-
-        // Add audit columns
-        for (col_name, col_def) in AUDIT_COLUMNS {
-            col_defs.push(format!("    `{}` {}", col_name, col_def));
-        }
-
-        // Determine key type and distribution
-        let (key_clause, dist_cols) = if schema.pk_columns.is_empty() {
-            let first_col = &schema.columns[0].name;
-            (
-                format!("DUPLICATE KEY (`{}`)", first_col),
-                format!("`{}`", first_col),
-            )
-        } else {
-            let pk_list: String = schema.pk_columns.iter()
-                .map(|c| format!("`{}`", c))
-                .collect::<Vec<_>>()
-                .join(", ");
-            (
-                format!("PRIMARY KEY ({})", pk_list),
-                pk_list.clone(),
-            )
-        };
-
-        let ddl = format!(
-            "CREATE TABLE IF NOT EXISTS `{}`.`{}` (\n{}\n) ENGINE=OLAP\n{}\nDISTRIBUTED BY HASH({}) BUCKETS 4\nPROPERTIES ('replication_num' = '1')",
-            self.config.starrocks_db,
-            table_name,
-            col_defs.join(",\n"),
-            key_clause,
-            dist_cols,
-        );
-
-        conn.query_drop(&ddl).await.map_err(|e| SetupError::SrConnectionFailed {
-            host: self.config.starrocks_url.clone(),
-            error: format!("Failed to create table {}: {}", table_name, e),
-        })?;
-
-        Ok(())
-    }
 }
 
 /// Helper to create StarRocks connection pool
