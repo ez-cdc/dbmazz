@@ -1,6 +1,6 @@
 target/
 .git/
-demo/traffic-generator/
-demo/toast-generator/
-demo/monitor/
+examples/
+docs/
+assets/
 *.md

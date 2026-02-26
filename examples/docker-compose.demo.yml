@@ -51,7 +51,7 @@ services:
   dbmazz:
     build:
       context: ..
-      dockerfile: demo/Dockerfile.dbmazz
+      dockerfile: deploy/Dockerfile
       args:
         CARGO_FEATURES: "demo"
     container_name: dbmazz-demo-cdc

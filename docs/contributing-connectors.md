@@ -747,7 +747,7 @@ Run with: `cargo test --features integration-tests`
 
 ### Manual Testing
 
-1. Test with the demo environment (adapt `demo/` if needed)
+1. Test with the demo environment (adapt `examples/` if needed)
 2. Verify all CDC operations: INSERT, UPDATE, DELETE
 3. Test schema evolution
 4. Test error handling and recovery
