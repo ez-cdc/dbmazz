@@ -12,13 +12,13 @@ Sub-second latency · 5MB memory · Zero config · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#quickstart) · [Why dbmazz?](#why-dbmazz) · [EZ-CDC Cloud](#scale-with-ez-cdc-cloud) · [Reference](#reference)
+[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
 ---
 
-## Quickstart
+## 🚀 Quickstart
 
 Clone and run — PostgreSQL, StarRocks, and sample data included:
 
@@ -57,16 +57,16 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 |  |  |
 |--|--|
-| **Fast** | 300K+ events/sec. Sub-second replication lag. |
-| **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
-| **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
-| **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
-| **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
-| **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
+| ⚡ **Fast** | 300K+ events/sec. Sub-second replication lag. |
+| 🪶 **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| 🔒 **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
+| 📸 **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
+| 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
+| 📊 **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
 
 ---
 
-## Scale with EZ-CDC Cloud
+## ☁️ Scale with EZ-CDC Cloud
 
 dbmazz is the open-source CDC engine at the core of **[EZ-CDC](https://ez-cdc.com)**. It's fast, reliable, and free to use.
 
@@ -108,10 +108,10 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 
 ---
 
-## Reference
+## 📖 Reference
 
 <details>
-<summary><strong>Docker deployment</strong></summary>
+<summary><strong>🐳 Docker deployment</strong></summary>
 
 ### Quickstart (batteries included)
 
@@ -145,7 +145,7 @@ docker compose -f docker-compose.production.yml --profile quickstart down
 </details>
 
 <details>
-<summary><strong>Configuration</strong></summary>
+<summary><strong>⚙️ Configuration</strong></summary>
 
 Configured via environment variables. See [`.env.example`](.env.example) for a full reference.
 
@@ -174,7 +174,7 @@ When built with `--features http-api`, all connection variables are optional —
 </details>
 
 <details>
-<summary><strong>HTTP API</strong></summary>
+<summary><strong>🌐 HTTP API</strong></summary>
 
 Build with `--features http-api` to enable the web UI and HTTP endpoints.
 
@@ -201,7 +201,7 @@ curl -X POST http://localhost:8080/resume
 </details>
 
 <details>
-<summary><strong>Snapshot / Backfill</strong></summary>
+<summary><strong>📸 Snapshot / Backfill</strong></summary>
 
 Snapshot loads all existing rows from PostgreSQL into StarRocks before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
 
@@ -243,7 +243,7 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
 </details>
 
 <details>
-<summary><strong>gRPC API</strong></summary>
+<summary><strong>🔌 gRPC API</strong></summary>
 
 gRPC with reflection enabled — `grpcurl` works without `.proto` files.
 
@@ -258,7 +258,7 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapsho
 </details>
 
 <details>
-<summary><strong>Architecture</strong></summary>
+<summary><strong>🏗️ Architecture</strong></summary>
 
 ```
 PostgreSQL                  dbmazz                    StarRocks
@@ -284,7 +284,7 @@ dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, transforms 
 </details>
 
 <details>
-<summary><strong>Build from source</strong></summary>
+<summary><strong>🔨 Build from source</strong></summary>
 
 ```bash
 cargo build --release                    # Minimal binary (no HTTP)
@@ -295,10 +295,10 @@ cargo build --release --features http-api # With web UI + HTTP API
 
 ---
 
-## Contributing
+## 🤝 Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for general guidelines and [CONTRIBUTING_CONNECTORS.md](CONTRIBUTING_CONNECTORS.md) for adding new connectors.
 
-## License
+## 📄 License
 
 [Elastic License v2.0](LICENSE) — free for commercial and non-commercial use. Cannot be offered as a managed service.
