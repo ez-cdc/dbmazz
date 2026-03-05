@@ -39,12 +39,74 @@ dbmazz (single binary, tokio async runtime)
   - `types.rs` - StarRocks type mapping
   - `config.rs` - Sink configuration
   - `setup.rs` - Table validation and DDL
-- `src/pipeline/` - Data pipeline (schema cache, transformation)
+- `src/pipeline/` - Data pipeline (schema cache, transformation, batching)
 - `src/core/` - Core abstractions (Record, Position, traits, errors)
+- `src/engine/` - Engine orchestration
+  - `snapshot/` - Snapshot/backfill worker (Flink CDC concurrent snapshot algorithm)
+  - `setup/` - Source/sink setup phase
+- `src/replication/` - WAL handler and replication state
+- `src/http_api/` - HTTP API + web UI (--features http-api)
+- `src/demo/` - Demo/quickstart data generation (--features demo)
 - `src/grpc/` - gRPC server (state, services, metrics)
 - `src/config.rs` - Configuration from environment variables
 - `src/source/` - Source abstraction layer
 - `src/sink/` - Sink abstraction layer
+
+## Feature Flags
+
+- `--features http-api` - Enables HTTP API + web UI on port 8080 (setup wizard, dashboard, REST endpoints)
+- `--features demo` - Enables demo mode with sample data generation
+
+## HTTP API (--features http-api)
+
+When built with `--features http-api`, dbmazz exposes a web UI and REST endpoints on `HTTP_API_PORT` (default 8080):
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Web UI (setup wizard or live dashboard) |
+| GET | `/healthz` | Health check |
+| GET | `/status` | Full metrics JSON |
+| GET | `/metrics/prometheus` | Prometheus metrics |
+| POST | `/pause` | Pause replication |
+| POST | `/resume` | Resume replication |
+| POST | `/drain-stop` | Graceful drain and stop |
+| POST | `/api/datasources/test` | Test connection |
+| POST | `/api/tables/discover` | Discover tables |
+| POST | `/api/replication/start` | Start replication |
+| POST | `/api/replication/stop` | Stop replication |
+
+## Snapshot / Backfill
+
+Set `DO_SNAPSHOT=true` for initial data backfill. Uses Flink CDC concurrent snapshot algorithm:
+1. Chunks table by PK ranges (`SNAPSHOT_CHUNK_SIZE`, default 50000 rows)
+2. For each chunk: low-watermark → SELECT → high-watermark → Stream Load
+3. WAL consumer checks `should_emit()` to suppress duplicate events within completed chunks
+4. Progress tracked in `dbmazz_snapshot_state` table (resumable)
+
+Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
+
+## gRPC Services
+
+- `HealthService` - Health check
+- `CdcControlService` - Pause/Resume/StartSnapshot/DrainStop
+- `CdcStatusService` - GetStatus (LSN, events, snapshot progress)
+- `CdcMetricsService` - StreamMetrics (streaming metrics at configurable interval)
+
+## Key Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOURCE_URL` | — | PostgreSQL connection string |
+| `SOURCE_TYPE` | `postgres` | Source connector type |
+| `SINK_URL` | — | StarRocks FE HTTP URL |
+| `SINK_TYPE` | `starrocks` | Sink connector type |
+| `FLUSH_SIZE` | `10000` | Max events per batch |
+| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
+| `GRPC_PORT` | `50051` | gRPC server port |
+| `HTTP_API_PORT` | `8080` | HTTP API port |
+| `DO_SNAPSHOT` | `false` | Enable initial snapshot |
+| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
+| `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot (no CDC) |
 
 ## Build & Test
 

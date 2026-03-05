@@ -131,7 +131,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ```bash
 # Add to your .env:
 DO_SNAPSHOT=true
-SNAPSHOT_CHUNK_SIZE=500000
+SNAPSHOT_CHUNK_SIZE=50000
 
 docker compose -f deploy/docker-compose.yml up -d
 ```
@@ -168,7 +168,7 @@ When built with `--features http-api`, all connection variables are optional —
 | `HTTP_API_PORT` | `8080` | HTTP API port (`--features http-api`) |
 | `RUST_LOG` | `info` | Log level |
 | `DO_SNAPSHOT` | `false` | Enable initial snapshot/backfill of existing data |
-| `SNAPSHOT_CHUNK_SIZE` | `500000` | Rows per snapshot chunk (min: 1) |
+| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk (min: 1) |
 | `SNAPSHOT_PARALLEL_WORKERS` | `2` | Reserved for future use (currently sequential) |
 
 </details>
@@ -210,7 +210,7 @@ Snapshot loads all existing rows from PostgreSQL into StarRocks before CDC takes
 Set `DO_SNAPSHOT=true` to run a full snapshot when the daemon starts:
 
 ```bash
-DO_SNAPSHOT=true SNAPSHOT_CHUNK_SIZE=500000 ./target/release/dbmazz
+DO_SNAPSHOT=true SNAPSHOT_CHUNK_SIZE=50000 ./target/release/dbmazz
 ```
 
 The snapshot divides each table into PK-range chunks and processes them sequentially. Progress is tracked in a `dbmazz_snapshot_state` table in PostgreSQL, so interrupted snapshots resume from the last completed chunk.
