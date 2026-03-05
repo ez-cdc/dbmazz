@@ -223,17 +223,33 @@ impl CdcEngine {
         sink: NewSinkAdapter,
         caps: &crate::core::SinkCapabilities,
     ) -> (mpsc::Sender<crate::source::parser::CdcEvent>, mpsc::Receiver<u64>) {
-        // Use sink capabilities to configure batching, with config as fallback
-        let batch_size = caps.max_batch_size.unwrap_or(self.config.flush_size);
-        let flush_interval_ms = if caps.optimal_flush_interval_ms > 0 {
+        // Job/config values always win. Sink capabilities are only fallback/advisory.
+        let batch_size = if self.config.flush_size > 0 {
+            self.config.flush_size
+        } else {
+            caps.max_batch_size.unwrap_or(10_000)
+        };
+        let flush_interval_ms = if self.config.flush_interval_ms > 0 {
+            self.config.flush_interval_ms
+        } else if caps.optimal_flush_interval_ms > 0 {
             caps.optimal_flush_interval_ms
         } else {
-            self.config.flush_interval_ms
+            5_000
         };
 
-        info!("  Pipeline config (from sink capabilities):");
-        info!("    - batch_size: {} (config: {})", batch_size, self.config.flush_size);
-        info!("    - flush_interval: {}ms (config: {}ms)", flush_interval_ms, self.config.flush_interval_ms);
+        info!("  Pipeline config (effective):");
+        info!(
+            "    - batch_size: {} (job/config: {}, sink_max: {:?})",
+            batch_size,
+            self.config.flush_size,
+            caps.max_batch_size
+        );
+        info!(
+            "    - flush_interval: {}ms (job/config: {}ms, sink_optimal: {}ms)",
+            flush_interval_ms,
+            self.config.flush_interval_ms,
+            caps.optimal_flush_interval_ms
+        );
 
         let (tx, rx) = mpsc::channel(batch_size * 2);
         let (feedback_tx, feedback_rx) = mpsc::channel::<u64>(100);
@@ -484,4 +500,3 @@ enum ControlFlow {
     Continue,
     Break,
 }
-

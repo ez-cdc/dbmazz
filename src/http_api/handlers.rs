@@ -41,6 +41,10 @@ pub struct TestConnectionRequest {
 #[derive(Deserialize)]
 pub struct StartReplicationRequest {
     tables: Vec<String>,
+    #[serde(default)]
+    flush_size: Option<usize>,
+    #[serde(default)]
+    flush_interval_ms: Option<u64>,
 }
 
 // =============================================================================
@@ -500,6 +504,20 @@ pub async fn start_replication(
     let publication_name = "dbmazz_pub".to_string();
     let starrocks_url = format!("http://{}:{}", sink.host, sink.fe_http_port);
     let tables = req.tables.clone();
+    let flush_size = req
+        .flush_size
+        .filter(|v| *v > 0)
+        .or_else(|| std::env::var("FLUSH_SIZE").ok().and_then(|v| v.parse::<usize>().ok()))
+        .unwrap_or(2000);
+    let flush_interval_ms = req
+        .flush_interval_ms
+        .filter(|v| *v > 0)
+        .or_else(|| {
+            std::env::var("FLUSH_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(2000);
 
     let source_config = SourceConfig {
         source_type: SourceType::Postgres,
@@ -533,12 +551,13 @@ pub async fn start_replication(
         starrocks_db: sink.database,
         starrocks_user: sink.user,
         starrocks_pass: sink.password,
-        flush_size: 2000,
-        flush_interval_ms: 2000,
+        flush_size,
+        flush_interval_ms,
         grpc_port: 50051,
         do_snapshot: false,
         snapshot_chunk_size: 50_000,
         snapshot_parallel_workers: 2,
+        initial_snapshot_only: false,
     };
 
     let engine = CdcEngine::new(config);

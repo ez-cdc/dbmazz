@@ -102,6 +102,9 @@ impl Pipeline {
                                     break; // Stop on flush failure
                                 }
                                 batch.clear();
+                                if let Some(ref state) = self.shared_state {
+                                    state.set_pending(0);
+                                }
                             }
                         }
                         None => {
@@ -117,6 +120,9 @@ impl Pipeline {
                             break; // Stop on flush failure
                         }
                         batch.clear();
+                        if let Some(ref state) = self.shared_state {
+                            state.set_pending(0);
+                        }
                     }
                 }
             }

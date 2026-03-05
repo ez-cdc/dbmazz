@@ -416,6 +416,24 @@
       </div>
     </div>
 
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">Replication Tuning</span>
+      </div>
+      <div class="card">
+        <div class="field-row">
+          <div class="field">
+            <label for="flush-size">Flush Size (events)</label>
+            <input type="number" id="flush-size" value="2000" min="1" step="1" placeholder="2000">
+          </div>
+          <div class="field">
+            <label for="flush-interval-ms">Flush Interval (ms)</label>
+            <input type="number" id="flush-interval-ms" value="2000" min="1" step="1" placeholder="2000">
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="start-row">
       <button id="start-btn" class="btn btn-primary btn-lg" disabled onclick="startReplication()">
         Start Replication
@@ -638,6 +656,17 @@
   async function startReplication() {
     const selected = [...document.querySelectorAll('.table-checkbox:checked')].map(cb => cb.value);
     if (selected.length === 0) return;
+    const flushSize = parseInt(document.getElementById('flush-size').value.trim(), 10);
+    const flushIntervalMs = parseInt(document.getElementById('flush-interval-ms').value.trim(), 10);
+
+    if (!Number.isInteger(flushSize) || flushSize <= 0) {
+      alert('Flush Size must be a positive integer.');
+      return;
+    }
+    if (!Number.isInteger(flushIntervalMs) || flushIntervalMs <= 0) {
+      alert('Flush Interval (ms) must be a positive integer.');
+      return;
+    }
 
     const btn = document.getElementById('start-btn');
     btn.disabled = true;
@@ -647,7 +676,11 @@
       const res = await fetch('/api/replication/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tables: selected }),
+        body: JSON.stringify({
+          tables: selected,
+          flush_size: flushSize,
+          flush_interval_ms: flushIntervalMs
+        }),
       });
 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
