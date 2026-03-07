@@ -35,6 +35,12 @@ use super::quote_ident;
 use super::state_store;
 use super::utils::find_integer_pk_column;
 
+/// Pre-computed metadata for a snapshot table (avoids redundant catalog queries per chunk).
+struct TableMeta {
+    pk_col: String,
+    col_names: Vec<String>,
+}
+
 /// Run the full snapshot for all configured tables.
 ///
 /// This function is spawned as a concurrent task alongside the WAL consumer.
@@ -50,6 +56,7 @@ pub async fn run_snapshot(
 
     shared_state.set_snapshot_active(true);
     shared_state.set_stage(Stage::Snapshot, "Connecting to source").await;
+    let snapshot_start = std::time::Instant::now();
 
     // Connect to PostgreSQL (regular connection, not replication).
     // Strip `replication=database` from the URL — DDL is not allowed in replication mode.
@@ -101,6 +108,16 @@ pub async fn run_snapshot(
         info!("Table {}: {} chunks queued", table, n);
         all_chunks.extend(chunks.into_iter().map(|c| (table.clone(), c)));
     }
+
+    // Pre-compute table metadata to avoid redundant catalog queries per chunk
+    let mut table_meta: std::collections::HashMap<String, TableMeta> = std::collections::HashMap::new();
+    for table in &tables {
+        if let Some(pk_col) = find_integer_pk_column(&client, table).await? {
+            let col_names = get_column_names(&client, table).await?;
+            table_meta.insert(table.clone(), TableMeta { pk_col, col_names });
+        }
+    }
+    let table_meta = Arc::new(table_meta);
 
     // Load pending chunks (skips already-complete ones from previous runs)
     let pending = state_store::load_pending_chunks(&client, &slot_name).await?;
@@ -156,15 +173,18 @@ pub async fn run_snapshot(
         let sl_client = Arc::clone(&sl_client);
         let slot_name = slot_name.clone();
         let shared_state = Arc::clone(&shared_state);
+        let table_meta = Arc::clone(&table_meta);
 
         join_set.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
+            let meta = table_meta.get(&table)
+                .ok_or_else(|| anyhow::anyhow!("no metadata for table {}", table))?;
             let pg_client = match pool.lock().await.pop() {
                 Some(c) => c,
                 None => return Err(anyhow::anyhow!("snapshot pool exhausted")),
             };
             let result = process_chunk(
-                &pg_client, &sl_client, &slot_name, &table, &chunk, &shared_state,
+                &pg_client, &sl_client, &slot_name, &table, &chunk, &shared_state, meta,
             ).await;
             pool.lock().await.push(pg_client);
             result
@@ -186,12 +206,20 @@ pub async fn run_snapshot(
         final_total as u64, final_done as u64, final_rows as u64,
     );
 
+    let elapsed = snapshot_start.elapsed();
     if state_store::all_chunks_complete(&client, &slot_name).await? {
-        info!("Snapshot complete: {} chunks, {} rows synced", final_total, final_rows);
+        info!(
+            "Snapshot complete: {} chunks, {} rows synced in {:.1}s ({:.0} rows/sec)",
+            final_total, final_rows, elapsed.as_secs_f64(),
+            final_rows as f64 / elapsed.as_secs_f64().max(0.001)
+        );
         shared_state.set_snapshot_active(false);
         shared_state.set_stage(Stage::Cdc, "Replicating").await;
     } else {
-        warn!("Snapshot finished with some failed chunks — will retry on next start");
+        warn!(
+            "Snapshot finished with some failed chunks in {:.1}s — will retry on next start",
+            elapsed.as_secs_f64()
+        );
         shared_state.set_snapshot_active(false);
         shared_state.set_stage(Stage::Cdc, "Replicating (snapshot incomplete)").await;
     }
@@ -207,6 +235,7 @@ async fn process_chunk(
     table: &str,
     chunk: &Chunk,
     shared_state: &SharedState,
+    meta: &TableMeta,
 ) -> Result<()> {
     debug!("Processing chunk {}/{}: pk=[{}, {})",
         table, chunk.partition_id, chunk.start_pk, chunk.end_pk);
@@ -224,21 +253,15 @@ async fn process_chunk(
     // Extract table name for the destination (strip schema prefix)
     let dest_table = table.rsplit('.').next().unwrap_or(table);
 
-    // Find the integer PK column name
-    let pk_col = find_integer_pk_column(client, table).await
-        .context("failed to find PK column")?
-        .ok_or_else(|| anyhow::anyhow!("no integer PK found for table {}", table))?;
-
-    // Get column names for this table so we can cast all to text (handles any PG type)
-    let col_names = get_column_names(client, table).await
-        .with_context(|| format!("failed to get columns for {}", table))?;
+    // Use pre-computed metadata (avoids redundant catalog queries per chunk)
+    let col_names = &meta.col_names;
 
     // Build SELECT with all columns cast to ::text for universal type handling
     let cols_sql: String = col_names.iter()
         .map(|c| format!("{}::text AS {}", quote_ident(c), quote_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
-    let quoted_pk = quote_ident(&pk_col);
+    let quoted_pk = quote_ident(&meta.pk_col);
     let select_query = format!(
         "SELECT {cols} FROM {table} WHERE {pk} >= $1::bigint AND {pk} < $2::bigint",
         cols = cols_sql,
@@ -340,20 +363,8 @@ fn serialize_text_rows_to_json(
             match val {
                 Some(s) => {
                     out.push(b'"');
-                    // Escape special JSON characters
-                    for ch in s.chars() {
-                        match ch {
-                            '"' => out.extend_from_slice(b"\\\""),
-                            '\\' => out.extend_from_slice(b"\\\\"),
-                            '\n' => out.extend_from_slice(b"\\n"),
-                            '\r' => out.extend_from_slice(b"\\r"),
-                            '\t' => out.extend_from_slice(b"\\t"),
-                            c => {
-                                let mut buf = [0u8; 4];
-                                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                            }
-                        }
-                    }
+                    // Escape JSON-special chars at byte level (avoids UTF-8 decode/re-encode)
+                    write_json_escaped(&mut out, &s);
                     out.push(b'"');
                 }
                 None => out.extend_from_slice(b"null"),
@@ -374,6 +385,31 @@ fn serialize_text_rows_to_json(
 
     out.push(b']');
     Ok(out)
+}
+
+/// Write a JSON-escaped string directly at the byte level.
+///
+/// JSON-special characters (`"`, `\`, `\n`, `\r`, `\t`) are all ASCII (< 0x80).
+/// Multi-byte UTF-8 continuation bytes are >= 0x80 and never match these,
+/// so we can safely scan and copy byte slices between escape points.
+#[inline]
+fn write_json_escaped(out: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        let escape: &[u8] = match b {
+            b'"'  => b"\\\"",
+            b'\\' => b"\\\\",
+            b'\n' => b"\\n",
+            b'\r' => b"\\r",
+            b'\t' => b"\\t",
+            _ => continue,
+        };
+        out.extend_from_slice(&bytes[start..i]);
+        out.extend_from_slice(escape);
+        start = i + 1;
+    }
+    out.extend_from_slice(&bytes[start..]);
 }
 
 /// Get column names for a table.
