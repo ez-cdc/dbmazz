@@ -6,27 +6,15 @@
 //! Stores progress in `dbmazz_snapshot_state` so snapshots can be resumed
 //! after a restart (chunks with status COMPLETE are skipped).
 
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
 use tokio_postgres::Client;
-use tracing::{debug, info};
+use tracing::debug;
 
 pub const STATUS_PENDING: &str = "PENDING";
 pub const STATUS_IN_PROGRESS: &str = "IN_PROGRESS";
 pub const STATUS_COMPLETE: &str = "COMPLETE";
-pub const STATUS_FAILED: &str = "FAILED";
-
-/// One chunk's state as loaded from the state table.
-#[derive(Debug, Clone)]
-pub struct ChunkState {
-    pub table_name: String,
-    pub partition_id: i32,
-    pub start_pk: i64,
-    pub end_pk: i64,
-    pub rows_synced: i64,
-    pub status: String,
-    pub hw_lsn: Option<i64>,
-}
-
 /// Create the state table if it doesn't exist.
 pub async fn ensure_state_table(client: &Client) -> Result<()> {
     client.execute(
@@ -48,26 +36,20 @@ pub async fn ensure_state_table(client: &Client) -> Result<()> {
     Ok(())
 }
 
-/// Load all non-complete chunks for a given slot (PENDING, IN_PROGRESS, FAILED).
-/// Already-COMPLETE chunks are skipped — resumability.
-pub async fn load_pending_chunks(client: &Client, slot_name: &str) -> Result<Vec<ChunkState>> {
+/// Load partition IDs of already-COMPLETE chunks for a specific table.
+/// Used during streaming chunk computation to skip completed chunks (resumability).
+pub async fn load_complete_partition_ids(
+    client: &Client,
+    slot_name: &str,
+    table_name: &str,
+) -> Result<HashSet<i32>> {
     let rows = client.query(
-        "SELECT table_name, partition_id, start_pk, end_pk, rows_synced, status, hw_lsn
-         FROM dbmazz_snapshot_state
-         WHERE slot_name = $1 AND status != $2
-         ORDER BY table_name, partition_id",
-        &[&slot_name, &STATUS_COMPLETE],
-    ).await.context("failed to load pending snapshot chunks")?;
+        "SELECT partition_id FROM dbmazz_snapshot_state
+         WHERE slot_name = $1 AND table_name = $2 AND status = $3",
+        &[&slot_name, &table_name, &STATUS_COMPLETE],
+    ).await.context("failed to load complete chunk IDs")?;
 
-    Ok(rows.iter().map(|r| ChunkState {
-        table_name: r.get(0),
-        partition_id: r.get(1),
-        start_pk: r.get(2),
-        end_pk: r.get(3),
-        rows_synced: r.get(4),
-        status: r.get(5),
-        hw_lsn: r.get(6),
-    }).collect())
+    Ok(rows.iter().map(|r| r.get::<_, i32>(0)).collect())
 }
 
 /// Insert a new chunk if it doesn't already exist (idempotent).

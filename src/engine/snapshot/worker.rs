@@ -17,11 +17,12 @@
 //! 6. Register (start_pk, end_pk, hw_lsn) in `SharedState.finished_chunks`
 //! 7. Update `SharedState` snapshot progress counters
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
@@ -89,28 +90,9 @@ pub async fn run_snapshot(
     let tables = config.tables.clone();
     let chunk_size = config.snapshot_chunk_size;
 
-    // Build all chunks for all tables and persist to state_store (idempotent)
-    let mut all_chunks: Vec<(String, Chunk)> = Vec::new();
-    for table in &tables {
-        let chunks = chunk_table(&client, table, chunk_size).await
-            .unwrap_or_else(|e| {
-                warn!("Failed to chunk table {}: {}", table, e);
-                vec![]
-            });
-
-        for chunk in &chunks {
-            state_store::upsert_chunk(
-                &client, &slot_name, table,
-                chunk.partition_id, chunk.start_pk, chunk.end_pk,
-            ).await.unwrap_or_else(|e| warn!("upsert_chunk failed: {}", e));
-        }
-        let n = chunks.len();
-        info!("Table {}: {} chunks queued", table, n);
-        all_chunks.extend(chunks.into_iter().map(|c| (table.clone(), c)));
-    }
-
-    // Pre-compute table metadata to avoid redundant catalog queries per chunk
-    let mut table_meta: std::collections::HashMap<String, TableMeta> = std::collections::HashMap::new();
+    // Pre-compute table metadata to avoid redundant catalog queries per chunk.
+    // Done before workers start — fast catalog queries only.
+    let mut table_meta: HashMap<String, TableMeta> = HashMap::new();
     for table in &tables {
         if let Some(pk_col) = find_integer_pk_column(&client, table).await? {
             let col_names = get_column_names(&client, table).await?;
@@ -119,35 +101,21 @@ pub async fn run_snapshot(
     }
     let table_meta = Arc::new(table_meta);
 
-    // Load pending chunks (skips already-complete ones from previous runs)
-    let pending = state_store::load_pending_chunks(&client, &slot_name).await?;
-    let pending_set: std::collections::HashSet<(String, i32)> =
-        pending.iter().map(|c| (c.table_name.clone(), c.partition_id)).collect();
+    // Initial progress from previous runs (for resumed snapshots)
+    let (initial_total, initial_done) = state_store::chunk_counts(&client, &slot_name)
+        .await.unwrap_or((0, 0));
+    let initial_rows = state_store::total_rows_synced(&client, &slot_name)
+        .await.unwrap_or(0);
+    shared_state.update_snapshot_progress(
+        initial_total as u64, initial_done as u64, initial_rows as u64,
+    );
 
-    let chunks_to_run: Vec<(String, Chunk)> = all_chunks.into_iter()
-        .filter(|(t, c)| pending_set.contains(&(t.clone(), c.partition_id)))
-        .collect();
-
-    let total = {
-        let (total, _) = state_store::chunk_counts(&client, &slot_name).await?;
-        total as u64
-    };
-    let done_at_start = {
-        let (_, done) = state_store::chunk_counts(&client, &slot_name).await?;
-        done as u64
-    };
-    let rows_at_start = state_store::total_rows_synced(&client, &slot_name).await? as u64;
-    shared_state.update_snapshot_progress(total, done_at_start, rows_at_start);
-
-    info!("Snapshot: {} total chunks, {} already done, {} to run",
-        total, done_at_start, chunks_to_run.len());
-
-    // Open N-1 additional PG connections for truly parallel SELECTs.
-    // Each worker gets a dedicated connection so queries execute concurrently on PG
-    // (vs pipelining on one connection, which PG still serializes internally).
+    // Open N worker PG connections for truly parallel SELECTs.
+    // Each worker gets a dedicated connection (vs pipelining on one, which PG serializes).
+    // The original `client` is reserved for the producer task (chunking + state_store).
     let n_workers = (config.snapshot_parallel_workers as usize).max(1);
-    let mut pool_conns: Vec<Arc<Client>> = vec![Arc::clone(&client)];
-    for i in 1..n_workers {
+    let mut pool_conns: Vec<Arc<Client>> = Vec::with_capacity(n_workers);
+    for i in 0..n_workers {
         let (c, conn) = tokio_postgres::connect(&plain_url, NoTls)
             .await
             .with_context(|| format!("snapshot worker: failed to open PG connection {}", i))?;
@@ -158,16 +126,64 @@ pub async fn run_snapshot(
         });
         pool_conns.push(Arc::new(c));
     }
-    if n_workers > 1 {
-        info!("Opened {} PG connections for parallel snapshot", n_workers);
-    }
+    info!("Opened {} PG connections for parallel snapshot", n_workers);
 
     // Connection pool: semaphore limits concurrency, pool assigns dedicated connections.
     let pool = Arc::new(tokio::sync::Mutex::new(pool_conns));
     let semaphore = Arc::new(Semaphore::new(n_workers));
-    let mut join_set = JoinSet::new();
 
-    for (table, chunk) in chunks_to_run {
+    // Channel for streaming chunks from producer to workers.
+    // Workers start processing as soon as the first table's chunks arrive,
+    // instead of waiting for all tables to be chunked (~3min on 113K chunks).
+    let (tx, mut rx) = mpsc::channel::<(String, Chunk)>(n_workers * 2);
+
+    // Spawn producer: compute chunks per table and stream to workers.
+    let producer_client = Arc::clone(&client);
+    let producer_slot = slot_name.clone();
+    let producer_tables = tables.clone();
+    let producer = tokio::spawn(async move {
+        for table in &producer_tables {
+            let chunks = chunk_table(&producer_client, table, chunk_size).await
+                .unwrap_or_else(|e| {
+                    warn!("Failed to chunk table {}: {}", table, e);
+                    vec![]
+                });
+
+            // Persist chunks to state_store (idempotent: ON CONFLICT DO NOTHING)
+            for chunk in &chunks {
+                state_store::upsert_chunk(
+                    &producer_client, &producer_slot, table,
+                    chunk.partition_id, chunk.start_pk, chunk.end_pk,
+                ).await.unwrap_or_else(|e| warn!("upsert_chunk failed: {}", e));
+            }
+
+            // Skip already-complete chunks (resumability)
+            let complete_ids = state_store::load_complete_partition_ids(
+                &producer_client, &producer_slot, table,
+            ).await.unwrap_or_default();
+
+            let total = chunks.len();
+            let skipped = complete_ids.len();
+            info!("Table {}: {} chunks ({} pending, {} already done)",
+                table, total, total - skipped, skipped);
+
+            // Stream pending chunks to workers
+            for chunk in chunks {
+                if complete_ids.contains(&chunk.partition_id) {
+                    continue;
+                }
+                if tx.send((table.clone(), chunk)).await.is_err() {
+                    warn!("Chunk channel closed — workers may have exited");
+                    return;
+                }
+            }
+        }
+        // tx is dropped here → channel closes → consumer loop exits
+    });
+
+    // Consumer: spawn worker tasks as chunks arrive from the producer.
+    let mut join_set = JoinSet::new();
+    while let Some((table, chunk)) = rx.recv().await {
         let pool = Arc::clone(&pool);
         let semaphore = Arc::clone(&semaphore);
         let sl_client = Arc::clone(&sl_client);
@@ -191,6 +207,12 @@ pub async fn run_snapshot(
         });
     }
 
+    // Wait for producer to finish (should already be done since channel is closed)
+    if let Err(e) = producer.await {
+        error!("Snapshot producer task panicked: {}", e);
+    }
+
+    // Wait for all worker tasks to complete
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(())) => {}
@@ -293,7 +315,7 @@ async fn process_chunk(
     let body = if rows.is_empty() {
         b"[]".to_vec()
     } else {
-        serialize_text_rows_to_json(&rows, &col_names, &synced_at, hw_lsn)?
+        serialize_text_rows_to_json(&rows, col_names, &synced_at, hw_lsn)?
     };
 
     // Step 5: Stream Load to StarRocks (only if there are rows)
