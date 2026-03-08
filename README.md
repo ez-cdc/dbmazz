@@ -95,7 +95,7 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ### Where's the bottleneck?
 
-On wide tables, the worker sits idle at 3-7% CPU. CloudWatch confirms why:
+On wide tables, the worker sits idle at 3-7% CPU. RDS metrics confirm why:
 
 | RDS Metric | Narrow tables | Wide tables |
 |:-----------|:-------------:|:-----------:|
