@@ -29,7 +29,7 @@
 use anyhow::{Result, anyhow};
 use curl::easy::{Easy, List};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Result of a successful Stream Load operation.
 #[derive(Debug, Clone)]
@@ -176,22 +176,12 @@ impl StreamLoadClient {
         let headers = Self::build_headers(&options)?;
         easy.http_headers(headers)?;
 
-        // Compress body with gzip for faster network transfer
-        let compressed = {
-            use flate2::write::GzEncoder;
-            use flate2::Compression;
-            use std::io::Write;
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-            encoder.write_all(&body).map_err(|e| anyhow!("gzip compress: {}", e))?;
-            Arc::new(encoder.finish().map_err(|e| anyhow!("gzip finish: {}", e))?)
-        };
-
         // Configure body upload
-        let body_len = compressed.len();
+        let body_len = body.len();
         easy.post_field_size(body_len as u64)?;
         easy.upload(true)?;
 
-        let body_for_read = compressed.clone();
+        let body_for_read = body.clone();
         let mut offset: usize = 0;
         easy.read_function(move |buf| {
             let remaining = &body_for_read[offset..];
@@ -245,7 +235,7 @@ impl StreamLoadClient {
                 };
 
                 // Follow redirect to BE
-                return Self::send_to_be(&corrected_location, user, password, options, compressed);
+                return Self::send_to_be(&corrected_location, user, password, options, body);
             }
         }
 
@@ -313,7 +303,6 @@ impl StreamLoadClient {
         headers.append("format: json")?;
         headers.append("strip_outer_array: true")?;
         headers.append("ignore_json_size: true")?;
-        headers.append("Content-Encoding: gzip")?;
 
         // Optional filter ratio
         if let Some(ratio) = options.max_filter_ratio {
