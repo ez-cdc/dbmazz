@@ -362,17 +362,9 @@ impl Config {
             .max(1);
 
         let snapshot_parallel_workers: u32 = env::var("SNAPSHOT_PARALLEL_WORKERS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| {
-                // Auto-scale: 3 workers per vCPU to maximize I/O overlap.
-                // Workers spend most time waiting on PG queries and StarRocks
-                // Stream Load, not CPU, so oversubscribing is beneficial.
-                let cpus = std::thread::available_parallelism()
-                    .map(|n| n.get() as u32)
-                    .unwrap_or(4);
-                (cpus * 3).max(2)
-            });
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .unwrap_or(2);
 
         let initial_snapshot_only = env::var("INITIAL_SNAPSHOT_ONLY")
             .unwrap_or_else(|_| "false".to_string())
