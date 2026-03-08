@@ -12,7 +12,7 @@ Sub-second latency · 5MB memory · Zero config · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [Performance](#snapshot-performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
@@ -63,6 +63,61 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 | 📸 **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
 | 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
 | 📊 **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
+
+---
+
+## Snapshot Performance
+
+<table>
+<tr><td>
+
+**Test environment**
+
+| | |
+|--|--|
+| **Source** | PostgreSQL 16 — AWS RDS `db.r6i.2xlarge` (8 vCPU, 64 GB) |
+| **Worker** | EC2 `c6i.4xlarge` (16 vCPU, 32 GB) — same region |
+| **Dataset** | TPC-DS 1TB — 25 tables, 6.35 billion rows |
+| **Storage** | gp3 (3,000 baseline IOPS, burst to 16,000) |
+
+</td></tr>
+</table>
+
+### Snapshot throughput
+
+| Workers | Chunk size | Narrow tables¹ | Wide tables² | Worker CPU | Worker RAM |
+|:-------:|:----------:|---------------:|-------------:|:----------:|:----------:|
+| 6 | 150K | **130K rows/s** | 11K rows/s | 25-35% / 3-7% | ~2 GB |
+| 12 | 200K | **107K rows/s** | 22K rows/s | 60% / 7-8% | ~2 GB |
+| 20 | 50K | 93K rows/s | 15K rows/s | 87-97% / 2-3% | ~2 GB |
+
+<sup>¹ `catalog_returns` — 27 columns, 144M rows. ² `catalog_sales` — 34 columns, 1.44B rows.</sup>
+
+### Where's the bottleneck?
+
+On wide tables, the worker sits idle at 3-7% CPU. CloudWatch confirms why:
+
+| RDS Metric | Narrow tables | Wide tables |
+|:-----------|:-------------:|:-----------:|
+| ReadIOPS | 400-600 | **12,000** |
+| DiskQueueDepth | 0.3 | **12** |
+| ReadLatency | 0.5 ms | **0.98 ms** |
+| CPU (RDS) | 9% | 6% |
+
+**The bottleneck is PostgreSQL disk I/O, not the CDC tool.** Wide tables exceed the RDS `shared_buffers` cache, forcing every chunk to read from EBS. This is a physical limitation of the source database hardware — not software overhead. Every CDC tool that reads from PostgreSQL hits this same ceiling.
+
+> Fewer workers = less disk contention = faster per-query I/O. The optimal worker count depends on the source database's IOPS capacity, not the worker instance size.
+
+### CDC latency (post-snapshot)
+
+| Metric | Value |
+|:-------|------:|
+| Replication lag | **< 1 second** |
+| Events/sec | **300K+** |
+| Memory | **~5 MB** |
+| Worker CPU | **< 2%** |
+
+CDC via WAL streaming is extremely lightweight — the heavy work is only during the initial snapshot.
 
 ---
 
