@@ -42,6 +42,14 @@ pub struct CdcConfig {
 /// Maps relation_id → {(start_pk, end_pk) → hw_lsn} for snapshot deduplication.
 type FinishedChunksMap = HashMap<u32, BTreeMap<(i64, i64), u64>>;
 
+/// Per-table snapshot progress counters.
+#[derive(Debug, Clone, Default)]
+pub struct TableProgress {
+    pub chunks_total: u64,
+    pub chunks_done: u64,
+    pub rows_synced: u64,
+}
+
 pub struct SharedState {
     pub state: AtomicU8,
     pub stage: RwLock<Stage>,
@@ -72,6 +80,8 @@ pub struct SharedState {
     pub snapshot_active: AtomicBool,
     // Snapshot error message (set on failure, cleared on new snapshot start)
     pub snapshot_error: RwLock<Option<String>>,
+    /// Per-table snapshot progress (written by snapshot worker, read by gRPC status service)
+    pub table_progress: RwLock<HashMap<String, TableProgress>>,
     /// Finished snapshot chunks: relation_id -> {(start_pk, end_pk) -> hw_lsn}
     /// Written by snapshot worker after each chunk, read by WAL handler for should_emit()
     pub finished_chunks: RwLock<FinishedChunksMap>,
@@ -111,6 +121,7 @@ impl SharedState {
             snapshot_trigger,
             snapshot_active: AtomicBool::new(false),
             snapshot_error: RwLock::new(None),
+            table_progress: RwLock::new(HashMap::new()),
             finished_chunks: RwLock::new(HashMap::new()),
             relation_pk_cols: RwLock::new(HashMap::new()),
         })
@@ -236,6 +247,31 @@ impl SharedState {
 
     pub fn snapshot_rows_synced(&self) -> u64 {
         self.snapshot_rows_synced.load(Ordering::Relaxed)
+    }
+
+    /// Set per-table chunk totals (called once per table after chunking).
+    pub async fn set_table_chunks_total(&self, table: &str, total: u64) {
+        let mut map = self.table_progress.write().await;
+        let entry = map.entry(table.to_string()).or_default();
+        entry.chunks_total = total;
+    }
+
+    /// Update per-table progress after a chunk completes.
+    pub async fn update_table_progress(&self, table: &str, chunks_done: u64, rows_synced: u64) {
+        let mut map = self.table_progress.write().await;
+        let entry = map.entry(table.to_string()).or_default();
+        entry.chunks_done = chunks_done;
+        entry.rows_synced = rows_synced;
+    }
+
+    /// Get a snapshot of per-table progress.
+    pub async fn get_table_progress(&self) -> HashMap<String, TableProgress> {
+        self.table_progress.read().await.clone()
+    }
+
+    /// Clear per-table progress (called when starting a new snapshot).
+    pub async fn clear_table_progress(&self) {
+        self.table_progress.write().await.clear();
     }
 
     /// Subscribe to the snapshot trigger channel (for on-demand snapshot signaling).

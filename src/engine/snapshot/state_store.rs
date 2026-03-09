@@ -133,6 +133,36 @@ pub async fn chunk_counts(client: &Client, slot_name: &str) -> Result<(i64, i64)
     Ok((row.get(0), row.get(1)))
 }
 
+/// Per-table chunk counts and rows synced for a single table.
+pub async fn table_chunk_progress(client: &Client, slot_name: &str, table_name: &str) -> Result<(i64, i64)> {
+    let row = client.query_one(
+        "SELECT
+            COUNT(*) FILTER (WHERE status = $3),
+            COALESCE(SUM(rows_synced) FILTER (WHERE status = $3), 0)::bigint
+         FROM dbmazz_snapshot_state
+         WHERE slot_name = $1 AND table_name = $2",
+        &[&slot_name, &table_name, &STATUS_COMPLETE],
+    ).await?;
+    Ok((row.get(0), row.get(1)))
+}
+
+/// Per-table chunk counts and rows synced (for per-table progress reporting).
+pub async fn per_table_progress(client: &Client, slot_name: &str) -> Result<Vec<(String, i64, i64, i64)>> {
+    let rows = client.query(
+        "SELECT
+            table_name,
+            COUNT(*),
+            COUNT(*) FILTER (WHERE status = $2),
+            COALESCE(SUM(rows_synced) FILTER (WHERE status = $2), 0)::bigint
+         FROM dbmazz_snapshot_state
+         WHERE slot_name = $1
+         GROUP BY table_name
+         ORDER BY table_name",
+        &[&slot_name, &STATUS_COMPLETE],
+    ).await?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
+}
+
 /// Total rows synced across all complete chunks.
 pub async fn total_rows_synced(client: &Client, slot_name: &str) -> Result<i64> {
     let row = client.query_one(

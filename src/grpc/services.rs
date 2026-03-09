@@ -24,7 +24,7 @@ use dbmazz::{
     PauseRequest, ResumeRequest, DrainRequest, StopRequest, ReloadConfigRequest,
     StartSnapshotRequest,
     ControlResponse,
-    StatusRequest, StatusResponse,
+    StatusRequest, StatusResponse, TableSnapshotProgress,
     status_response::CdcState as ProtoCdcState,
     MetricsRequest, MetricsResponse,
 };
@@ -307,6 +307,19 @@ impl CdcStatusService for CdcStatusServiceImpl {
 
         let snapshot_active = stage == Stage::Snapshot;
 
+        // Build per-table progress only when snapshot is active
+        let table_progress = if snapshot_active {
+            let progress_map = self.shared_state.get_table_progress().await;
+            progress_map.into_iter().map(|(table_name, p)| TableSnapshotProgress {
+                table_name,
+                chunks_total: p.chunks_total,
+                chunks_done: p.chunks_done,
+                rows_synced: p.rows_synced,
+            }).collect()
+        } else {
+            vec![]
+        };
+
         Ok(Response::new(StatusResponse {
             state: proto_state as i32,
             current_lsn: self.shared_state.current_lsn(),
@@ -318,6 +331,7 @@ impl CdcStatusService for CdcStatusServiceImpl {
             snapshot_chunks_total: self.shared_state.snapshot_chunks_total(),
             snapshot_chunks_done: self.shared_state.snapshot_chunks_done(),
             snapshot_rows_synced: self.shared_state.snapshot_rows_synced(),
+            table_progress,
         }))
     }
 }

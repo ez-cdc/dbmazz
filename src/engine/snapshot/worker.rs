@@ -101,6 +101,9 @@ pub async fn run_snapshot(
     }
     let table_meta = Arc::new(table_meta);
 
+    // Clear per-table progress from any previous snapshot run
+    shared_state.clear_table_progress().await;
+
     // Initial progress from previous runs (for resumed snapshots)
     let (initial_total, initial_done) = state_store::chunk_counts(&client, &slot_name)
         .await.unwrap_or((0, 0));
@@ -109,6 +112,14 @@ pub async fn run_snapshot(
     shared_state.update_snapshot_progress(
         initial_total as u64, initial_done as u64, initial_rows as u64,
     );
+
+    // Load per-table progress from previous runs (for resumed snapshots)
+    if let Ok(per_table) = state_store::per_table_progress(&client, &slot_name).await {
+        for (table, total, done, rows) in per_table {
+            shared_state.set_table_chunks_total(&table, total as u64).await;
+            shared_state.update_table_progress(&table, done as u64, rows as u64).await;
+        }
+    }
 
     // Open N worker PG connections for truly parallel SELECTs.
     // Each worker gets a dedicated connection (vs pipelining on one, which PG serializes).
@@ -141,6 +152,7 @@ pub async fn run_snapshot(
     let producer_client = Arc::clone(&client);
     let producer_slot = slot_name.clone();
     let producer_tables = tables.clone();
+    let producer_shared_state = Arc::clone(&shared_state);
     let producer = tokio::spawn(async move {
         for table in &producer_tables {
             let chunks = chunk_table(&producer_client, table, chunk_size).await
@@ -166,6 +178,9 @@ pub async fn run_snapshot(
             let skipped = complete_ids.len();
             info!("Table {}: {} chunks ({} pending, {} already done)",
                 table, total, total - skipped, skipped);
+
+            // Set per-table total chunks (producer knows the definitive count)
+            producer_shared_state.set_table_chunks_total(table, total as u64).await;
 
             // Stream pending chunks to workers
             for chunk in chunks {
@@ -341,10 +356,14 @@ async fn process_chunk(
     });
     shared_state.register_finished_chunk(relation_id, chunk.start_pk, chunk.end_pk, hw_lsn).await;
 
-    // Update progress counters
+    // Update global progress counters
     let (total, done) = state_store::chunk_counts(client, slot_name).await?;
     let rows_synced = state_store::total_rows_synced(client, slot_name).await?;
     shared_state.update_snapshot_progress(total as u64, done as u64, rows_synced as u64);
+
+    // Update per-table progress counters
+    let (table_done, table_rows) = state_store::table_chunk_progress(client, slot_name, table).await?;
+    shared_state.update_table_progress(table, table_done as u64, table_rows as u64).await;
 
     info!("Chunk {}/{} complete: {} rows, hw_lsn=0x{:X}",
         table, chunk.partition_id, row_count, hw_lsn);
