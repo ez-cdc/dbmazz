@@ -6,9 +6,9 @@
 
 <br><br>
 
-**Blazing fast CDC and real-time data replication**
+**The fastest CDC engine ever built**
 
-Sub-second latency · 5MB memory · Zero config · Written in Rust
+Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
@@ -55,10 +55,13 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ## Why dbmazz?
 
+Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestration. dbmazz is a single binary — download, run, replicate.
+
 |  |  |
 |--|--|
 | ⚡ **Fast** | 300K+ events/sec. Sub-second replication lag. |
-| 🪶 **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| 🪶 **Tiny** | ~5 MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| 🚀 **Simple** | One binary, zero dependencies. No Kafka, no JVM, no cluster. Up and running in minutes. |
 | 🔒 **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
 | 📸 **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
 | 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
