@@ -6,7 +6,7 @@
 
 <br><br>
 
-**The fastest CDC engine ever built**
+**Real-time data replication, radically simplified**
 
 Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rust
 
