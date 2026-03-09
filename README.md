@@ -6,13 +6,13 @@
 
 <br><br>
 
-**Blazing fast PostgreSQL to StarRocks replication**
+**Real-time data replication, radically simplified**
 
-Sub-second latency · 5MB memory · Zero config · Written in Rust
+Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
@@ -55,14 +55,76 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ## Why dbmazz?
 
+Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestration. dbmazz is a single binary — download, run, replicate.
+
 |  |  |
 |--|--|
 | ⚡ **Fast** | 300K+ events/sec. Sub-second replication lag. |
-| 🪶 **Tiny** | ~5MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| 🪶 **Tiny** | ~5 MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
+| 🚀 **Simple** | One binary, zero dependencies. No Kafka, no JVM, no cluster. Up and running in minutes. |
 | 🔒 **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
 | 📸 **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
 | 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
 | 📊 **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
+
+### Supported databases
+
+| Source | Sink |
+|:-------|:-----|
+| PostgreSQL | StarRocks |
+
+More connectors coming soon.
+
+---
+
+## Performance
+
+### CDC Replication
+
+dbmazz reads the PostgreSQL WAL directly and streams changes to StarRocks. Single binary, no JVM, no Kafka, no intermediate queues.
+
+```
+  Throughput   ████████████████████████████████████████  300,000+ events/sec
+  Latency      █                                        < 1 second
+  Memory       ▏                                        ~ 5 MB
+  CPU          ▏                                        < 2%
+```
+
+|  | dbmazz | Traditional CDC tools |
+|:--|:--:|:--|
+| **Runtime** | Single binary (5 MB RSS) | JVM + Kafka + ZooKeeper, or managed SaaS |
+| **Deployment** | One process, zero dependencies | Multi-container orchestration |
+| **Scaling model** | Vertical (one instance per job) | Horizontal (brokers, connectors, workers) |
+
+---
+
+### Snapshot (Initial Backfill)
+
+Snapshot loads all existing rows before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
+
+<table>
+<tr><td>
+
+**Test environment** — TPC-DS 1TB (25 tables, 6.35 billion rows)
+
+| | |
+|--|--|
+| **Source** | PostgreSQL 16 — AWS RDS `db.r6i.2xlarge` (8 vCPU, 64 GB) |
+| **Worker** | EC2 `c6i.4xlarge` (16 vCPU, 32 GB) — same AZ |
+| **Storage** | gp3 (3,000 baseline IOPS, burst to 16,000) |
+
+</td></tr>
+</table>
+
+| Workers | Chunk size | Narrow tables | Wide tables | Worker CPU | Worker RAM |
+|:-------:|:----------:|---------------:|-------------:|:----------:|:----------:|
+| 6 | 150K | **130K rows/s** | 11K rows/s | 25–35% | ~2 GB |
+| 12 | 200K | **107K rows/s** | 22K rows/s | 60% | ~2 GB |
+| 20 | 50K | 93K rows/s | 15K rows/s | 87–97% | ~2 GB |
+
+<sup>Narrow: `catalog_returns` (27 cols, 144M rows). Wide: `catalog_sales` (34 cols, 1.44B rows).</sup>
+
+> **Where's the bottleneck?** On wide tables the worker sits idle at 3–7% CPU while RDS DiskQueueDepth hits 12 and ReadIOPS maxes at 12,000. The bottleneck is PostgreSQL disk I/O, not the CDC tool. Every CDC tool that reads from PostgreSQL hits this same ceiling.
 
 ---
 
