@@ -6,7 +6,7 @@
 
 <br><br>
 
-**Blazing fast PostgreSQL to StarRocks replication**
+**Blazing fast CDC and real-time data replication**
 
 Sub-second latency · 5MB memory · Zero config · Written in Rust
 
