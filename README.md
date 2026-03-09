@@ -72,43 +72,18 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 dbmazz reads the PostgreSQL WAL directly and streams changes to StarRocks. Single binary, no JVM, no Kafka, no intermediate queues.
 
-#### Throughput (events/sec) — higher is better
-
 ```
-  dbmazz    ████████████████████████████████████████  300,000+
-  Flink CDC ███                                        19,500
-  Fivetran  ██                                         16,000
-  Debezium  █                                          10,000
-  Airbyte   ▏                                           3,300
+  Throughput   ████████████████████████████████████████  300,000+ events/sec
+  Latency      █                                        < 1 second
+  Memory       ▏                                        ~ 5 MB
+  CPU          ▏                                        < 2%
 ```
 
-#### Memory usage — lower is better
-
-```
-  dbmazz    ▏                                            5 MB
-  Debezium  ███                                        512 MB
-  Airbyte   ██████████                                   2 GB
-  Flink CDC ████████████████████████████████████████  8–10 GB
-```
-
-|  | **dbmazz** | Debezium | Flink CDC | Fivetran | Airbyte |
-|:--|:--:|:--:|:--:|:--:|:--:|
-| **Throughput** | **300K+ events/s** | ~10K events/s | ~19.5K events/s | ~16K rows/s | ~3.3K rows/s |
-| **Latency** | **< 1 second** | 1–10 seconds | seconds | 15+ minutes | minutes |
-| **Memory** | **5 MB** | 512 MB+ | 8–10 GB | managed | 2+ GB |
-| **Architecture** | Single binary | JVM + Kafka + ZK | JVM + Flink cluster | SaaS | Multi-container |
-
-<details>
-<summary>Benchmark sources</summary>
-
-- Debezium: [Lessons Learned Running Debezium with PostgreSQL on RDS](https://debezium.io/blog/2020/02/25/lessons-learned-running-debezium-with-postgresql-on-rds/) · [FAQ](https://debezium.io/documentation/faq/)
-- Flink CDC: [Building Real-Time Data Pipelines from PostgreSQL](https://dev.to/lakshminarayan_r_6f07f9c0/building-real-time-data-pipelines-from-postgresql-using-flink-cdc-1m56) · [Lessons Learned](https://sap1ens.com/blog/2022/07/10/flink-cdc-for-postgres-lessons-learned/)
-- Fivetran: [Benchmarked — A Data Pipeline Latency Analysis](https://www.fivetran.com/blog/benchmarked-a-data-pipeline-latency-analysis)
-- Airbyte: [Reading Very Large Postgres Tables](https://airbyte.com/blog/reading-very-large-postgres-tables-top-4-lessons-we-learned) · [Performance Benchmarks Revealed](https://airbyte-inc.medium.com/data-integration-software-head-to-head-performance-benchmarks-revealed-627129a840bc)
-
-Numbers are from published benchmarks under varying conditions. Direct comparisons are approximate.
-
-</details>
+|  | dbmazz | Traditional CDC tools |
+|:--|:--:|:--|
+| **Runtime** | Single binary (5 MB RSS) | JVM + Kafka + ZooKeeper, or managed SaaS |
+| **Deployment** | One process, zero dependencies | Multi-container orchestration |
+| **Scaling model** | Vertical (one instance per job) | Horizontal (brokers, connectors, workers) |
 
 ---
 
