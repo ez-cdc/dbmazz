@@ -86,6 +86,16 @@ message StatusResponse {
   uint64 snapshot_chunks_total   = 8;
   uint64 snapshot_chunks_done    = 9;
   uint64 snapshot_rows_synced    = 10;
+  // Per-table snapshot progress breakdown
+  repeated TableSnapshotProgress table_progress = 11;
+}
+
+// Per-table snapshot progress (reported within StatusResponse)
+message TableSnapshotProgress {
+  string table_name    = 1;
+  uint64 chunks_total  = 2;
+  uint64 chunks_done   = 3;
+  uint64 rows_synced   = 4;
 }
 
 // Streaming metrics
