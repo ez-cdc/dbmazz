@@ -72,9 +72,24 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 dbmazz reads the PostgreSQL WAL directly and streams changes to StarRocks. Single binary, no JVM, no Kafka, no intermediate queues.
 
-<img src="assets/benchmark-throughput.svg" alt="CDC throughput comparison" width="620">
+#### Throughput (events/sec) — higher is better
 
-<img src="assets/benchmark-memory.svg" alt="Memory usage comparison" width="620">
+```
+  dbmazz    ████████████████████████████████████████  300,000+
+  Flink CDC ███                                        19,500
+  Fivetran  ██                                         16,000
+  Debezium  █                                          10,000
+  Airbyte   ▏                                           3,300
+```
+
+#### Memory usage — lower is better
+
+```
+  dbmazz    ▏                                            5 MB
+  Debezium  ███                                        512 MB
+  Airbyte   ██████████                                   2 GB
+  Flink CDC ████████████████████████████████████████  8–10 GB
+```
 
 |  | **dbmazz** | Debezium | Flink CDC | Fivetran | Airbyte |
 |:--|:--:|:--:|:--:|:--:|:--:|
