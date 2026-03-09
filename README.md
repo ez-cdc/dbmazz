@@ -67,6 +67,14 @@ Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestr
 | 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
 | 📊 **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
 
+### Supported databases
+
+| Source | Sink |
+|:-------|:-----|
+| PostgreSQL | StarRocks |
+
+More connectors coming soon.
+
 ---
 
 ## Performance
