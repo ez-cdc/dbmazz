@@ -12,7 +12,7 @@ Sub-second latency · 5MB memory · Zero config · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [Performance](#snapshot-performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
@@ -66,58 +66,64 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ---
 
-## Snapshot Performance
+## Performance
+
+### CDC Replication
+
+dbmazz reads the PostgreSQL WAL directly and streams changes to StarRocks. Single binary, no JVM, no Kafka, no intermediate queues.
+
+<img src="assets/benchmark-throughput.svg" alt="CDC throughput comparison" width="620">
+
+<img src="assets/benchmark-memory.svg" alt="Memory usage comparison" width="620">
+
+|  | **dbmazz** | Debezium | Flink CDC | Fivetran | Airbyte |
+|:--|:--:|:--:|:--:|:--:|:--:|
+| **Throughput** | **300K+ events/s** | ~10K events/s | ~19.5K events/s | ~16K rows/s | ~3.3K rows/s |
+| **Latency** | **< 1 second** | 1–10 seconds | seconds | 15+ minutes | minutes |
+| **Memory** | **5 MB** | 512 MB+ | 8–10 GB | managed | 2+ GB |
+| **Architecture** | Single binary | JVM + Kafka + ZK | JVM + Flink cluster | SaaS | Multi-container |
+
+<details>
+<summary>Benchmark sources</summary>
+
+- Debezium: [Lessons Learned Running Debezium with PostgreSQL on RDS](https://debezium.io/blog/2020/02/25/lessons-learned-running-debezium-with-postgresql-on-rds/) · [FAQ](https://debezium.io/documentation/faq/)
+- Flink CDC: [Building Real-Time Data Pipelines from PostgreSQL](https://dev.to/lakshminarayan_r_6f07f9c0/building-real-time-data-pipelines-from-postgresql-using-flink-cdc-1m56) · [Lessons Learned](https://sap1ens.com/blog/2022/07/10/flink-cdc-for-postgres-lessons-learned/)
+- Fivetran: [Benchmarked — A Data Pipeline Latency Analysis](https://www.fivetran.com/blog/benchmarked-a-data-pipeline-latency-analysis)
+- Airbyte: [Reading Very Large Postgres Tables](https://airbyte.com/blog/reading-very-large-postgres-tables-top-4-lessons-we-learned) · [Performance Benchmarks Revealed](https://airbyte-inc.medium.com/data-integration-software-head-to-head-performance-benchmarks-revealed-627129a840bc)
+
+Numbers are from published benchmarks under varying conditions. Direct comparisons are approximate.
+
+</details>
+
+---
+
+### Snapshot (Initial Backfill)
+
+Snapshot loads all existing rows before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
 
 <table>
 <tr><td>
 
-**Test environment**
+**Test environment** — TPC-DS 1TB (25 tables, 6.35 billion rows)
 
 | | |
 |--|--|
 | **Source** | PostgreSQL 16 — AWS RDS `db.r6i.2xlarge` (8 vCPU, 64 GB) |
-| **Worker** | EC2 `c6i.4xlarge` (16 vCPU, 32 GB) — same region |
-| **Dataset** | TPC-DS 1TB — 25 tables, 6.35 billion rows |
+| **Worker** | EC2 `c6i.4xlarge` (16 vCPU, 32 GB) — same AZ |
 | **Storage** | gp3 (3,000 baseline IOPS, burst to 16,000) |
 
 </td></tr>
 </table>
 
-### Snapshot throughput
-
-| Workers | Chunk size | Narrow tables¹ | Wide tables² | Worker CPU | Worker RAM |
+| Workers | Chunk size | Narrow tables | Wide tables | Worker CPU | Worker RAM |
 |:-------:|:----------:|---------------:|-------------:|:----------:|:----------:|
-| 6 | 150K | **130K rows/s** | 11K rows/s | 25-35% / 3-7% | ~2 GB |
-| 12 | 200K | **107K rows/s** | 22K rows/s | 60% / 7-8% | ~2 GB |
-| 20 | 50K | 93K rows/s | 15K rows/s | 87-97% / 2-3% | ~2 GB |
+| 6 | 150K | **130K rows/s** | 11K rows/s | 25–35% | ~2 GB |
+| 12 | 200K | **107K rows/s** | 22K rows/s | 60% | ~2 GB |
+| 20 | 50K | 93K rows/s | 15K rows/s | 87–97% | ~2 GB |
 
-<sup>¹ `catalog_returns` — 27 columns, 144M rows. ² `catalog_sales` — 34 columns, 1.44B rows.</sup>
+<sup>Narrow: `catalog_returns` (27 cols, 144M rows). Wide: `catalog_sales` (34 cols, 1.44B rows).</sup>
 
-### Where's the bottleneck?
-
-On wide tables, the worker sits idle at 3-7% CPU. RDS metrics confirm why:
-
-| RDS Metric | Narrow tables | Wide tables |
-|:-----------|:-------------:|:-----------:|
-| ReadIOPS | 400-600 | **12,000** |
-| DiskQueueDepth | 0.3 | **12** |
-| ReadLatency | 0.5 ms | **0.98 ms** |
-| CPU (RDS) | 9% | 6% |
-
-**The bottleneck is PostgreSQL disk I/O, not the CDC tool.** Wide tables exceed the RDS `shared_buffers` cache, forcing every chunk to read from EBS. This is a physical limitation of the source database hardware — not software overhead. Every CDC tool that reads from PostgreSQL hits this same ceiling.
-
-> Fewer workers = less disk contention = faster per-query I/O. The optimal worker count depends on the source database's IOPS capacity, not the worker instance size.
-
-### CDC latency (post-snapshot)
-
-| Metric | Value |
-|:-------|------:|
-| Replication lag | **< 1 second** |
-| Events/sec | **300K+** |
-| Memory | **~5 MB** |
-| Worker CPU | **< 2%** |
-
-CDC via WAL streaming is extremely lightweight — the heavy work is only during the initial snapshot.
+> **Where's the bottleneck?** On wide tables the worker sits idle at 3–7% CPU while RDS DiskQueueDepth hits 12 and ReadIOPS maxes at 12,000. The bottleneck is PostgreSQL disk I/O, not the CDC tool. Every CDC tool that reads from PostgreSQL hits this same ceiling.
 
 ---
 
