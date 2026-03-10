@@ -144,3 +144,12 @@ These are patterns that have caused real bugs or are critical for data integrity
 - Use `tracing` (info!, warn!, error!) for all logging. NEVER use `println!` or `eprintln!` in production code.
 - Transient errors (network, timeout) should be retried with backoff. Permanent errors (schema mismatch, auth failure) should be reported and stop the pipeline.
 - `unwrap()` MUST NOT appear in production code paths. Use `?` or explicit error handling.
+
+### Rust Patterns
+- Prefer `?` over `match` for error propagation. Use `.context("msg")` or `.with_context(|| format!(...))` from anyhow for meaningful error chains.
+- Use `Arc<T>` for shared ownership across tasks. Use `Arc<RwLock<T>>` only when mutation is needed — prefer atomics (`AtomicU64`, `AtomicBool`) for counters and flags.
+- Async: always use `tokio::select!` with `biased;` when one branch is a cancellation signal. Put the cancellation arm first.
+- Never block the tokio runtime — use `spawn_blocking` for CPU-heavy or synchronous I/O work.
+- For hot-path serialization (Stream Load, WAL parsing), prefer byte-level operations over `serde_json` — allocate with `Vec::with_capacity()` and use `extend_from_slice`.
+- Use `#[cfg(test)]` modules for unit tests, keep them in the same file as the code they test.
+- Prefer `tracing::instrument` on async functions for automatic span creation. Use `skip(self)` to avoid logging large structs.
