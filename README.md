@@ -1,10 +1,10 @@
 <div align="center">
 
 <a href="https://ez-cdc.com" target="_blank">
-  <img src="assets/ez-cdc-logo.svg" alt="EZ-CDC" width="360">
+  <img src="assets/ez-cdc-banner.png" alt="EZ-CDC — Real-time Change Data Capture" width="100%">
 </a>
 
-<br><br>
+<br>
 
 **Real-time data replication, radically simplified**
 
