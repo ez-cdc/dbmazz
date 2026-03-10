@@ -108,6 +108,34 @@ Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
 | `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
 | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot (no CDC) |
 
+## Versioning & Release
+
+Format: `vMAJOR.MINOR.PATCH` (e.g., `v1.3.2`). Tags only on `main`.
+
+| Bump | When |
+|------|------|
+| **MAJOR** | Breaking changes in checkpoint/state_store format (requires re-snapshot), breaking gRPC service changes, incompatible config changes |
+| **MINOR** | New source/sink connector types, new PG type support, new features (e.g., snapshot improvements), new gRPC methods (additive), new config options with defaults |
+| **PATCH** | Bug fixes, type mapping fixes, performance improvements, Stream Load optimizations, dependency updates |
+
+### Branching
+
+- `main` is trunk — always deployable, all work via PR
+- Tags from `main`: `v1.3.0`
+- Hotfix: branch `release/v1.3.x` from tag → cherry-pick fix → tag `v1.3.1`
+
+### Compatibility
+
+- Checkpoint format changes must be backward-compatible (can read old checkpoints) or bump MAJOR
+- gRPC services consumed by worker-agent: changes must be additive
+- New PG types or Stream Load format changes are MINOR (additive capability)
+
+### Deploy
+
+- Binaries uploaded to S3/GCS: `releases/dbmazz/vX.Y.Z/dbmazz-linux-amd64`
+- Rollout via canary tiers (same as worker-agent): `canary` → `early_adopter` → `stable`
+- Worker-agent manages dbmazz lifecycle; version comes from `daemon_versions` table
+
 ## Build & Test
 
 ```bash
