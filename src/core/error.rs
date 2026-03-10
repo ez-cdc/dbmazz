@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Common error types for the CDC core module
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum CoreError {
     /// Source-related errors
     SourceError {
