@@ -288,7 +288,8 @@ impl PostgresSource {
             }
 
             CdcMessage::Insert { relation_id, tuple } => {
-                if let Some(info) = self.schema_cache.read().get(&relation_id).cloned() {
+                let info = self.schema_cache.read().get(&relation_id).cloned();
+                if let Some(info) = info {
                     let columns = types::tuple_to_column_values(&tuple, &info.columns);
                     let record = CdcRecord::Insert {
                         table: crate::core::TableRef::new(Some(info.schema), info.name),
@@ -304,7 +305,8 @@ impl PostgresSource {
                 old_tuple,
                 new_tuple,
             } => {
-                if let Some(info) = self.schema_cache.read().get(&relation_id).cloned() {
+                let info = self.schema_cache.read().get(&relation_id).cloned();
+                if let Some(info) = info {
                     let old_columns =
                         old_tuple.map(|t| types::tuple_to_column_values(&t, &info.columns));
                     let new_columns = types::tuple_to_column_values(&new_tuple, &info.columns);
@@ -323,7 +325,8 @@ impl PostgresSource {
                 relation_id,
                 old_tuple,
             } => {
-                if let Some(info) = self.schema_cache.read().get(&relation_id).cloned() {
+                let info = self.schema_cache.read().get(&relation_id).cloned();
+                if let Some(info) = info {
                     if let Some(tuple) = old_tuple {
                         let columns = types::tuple_to_column_values(&tuple, &info.columns);
                         let record = CdcRecord::Delete {

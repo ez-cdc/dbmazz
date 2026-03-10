@@ -73,6 +73,9 @@ pub use self::config::StarRocksSinkConfig;
 use self::stream_load::{StreamLoadClient, StreamLoadOptions};
 use self::types::TypeMapper;
 
+/// Batch of JSON rows with optional partial column list per table.
+type TableBatchMap = HashMap<String, (Vec<serde_json::Value>, Option<Vec<String>>)>;
+
 /// CDC audit columns added to all tables
 const AUDIT_COLUMNS: &[&str] = &[
     "dbmazz_op_type",
@@ -145,9 +148,8 @@ impl StarRocksSink {
         &self,
         records: &[CdcRecord],
         synced_at: &str,
-    ) -> Result<HashMap<String, (Vec<serde_json::Value>, Option<Vec<String>>)>> {
-        let mut batches: HashMap<String, (Vec<serde_json::Value>, Option<Vec<String>>)> =
-            HashMap::new();
+    ) -> Result<TableBatchMap> {
+        let mut batches: TableBatchMap = HashMap::new();
 
         for record in records {
             match record {

@@ -137,7 +137,7 @@ impl StarRocksSetup {
 
         for table in tables {
             // Extract table name without schema prefix
-            let table_name = table.split('.').last().unwrap_or(table);
+            let table_name = table.split('.').next_back().unwrap_or(table);
 
             let exists: Option<i32> = conn
                 .exec_first(
@@ -165,7 +165,7 @@ impl StarRocksSetup {
     /// Ensures all tables have the required CDC audit columns.
     pub async fn ensure_audit_columns(&self, tables: &[String]) -> Result<()> {
         for table in tables {
-            let table_name = table.split('.').last().unwrap_or(table);
+            let table_name = table.split('.').next_back().unwrap_or(table);
             self.ensure_audit_columns_for_table(table_name).await?;
         }
         Ok(())
