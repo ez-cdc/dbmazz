@@ -17,6 +17,7 @@
 
 use crate::connectors::sources::postgres::parser::{Column, Tuple, TupleData};
 use crate::core::{ColumnDef, ColumnValue, DataType, Value};
+use tracing::warn;
 
 /// PostgreSQL type OIDs for common types
 pub mod pg_oid {
