@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{watch, RwLock};
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,7 +54,7 @@ pub struct SharedState {
     pub state: AtomicU8,
     pub stage: RwLock<Stage>,
     pub stage_detail: RwLock<String>,
-    pub setup_error: RwLock<Option<String>>,  // Descriptive setup error
+    pub setup_error: RwLock<Option<String>>, // Descriptive setup error
     pub current_lsn: AtomicU64,
     pub confirmed_lsn: AtomicU64,
     pub pending_events: AtomicU64,
@@ -63,6 +63,7 @@ pub struct SharedState {
     pub shutdown_tx: watch::Sender<bool>,
     pub config: RwLock<CdcConfig>,
     // Timestamp of last processed event (to calculate events/sec)
+    #[allow(dead_code)]
     pub last_event_time: RwLock<std::time::Instant>,
     pub events_last_second: AtomicU64,
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
@@ -176,6 +177,7 @@ impl SharedState {
         self.batches_sent.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn events_last_second(&self) -> u64 {
         self.events_last_second.swap(0, Ordering::Relaxed)
     }
@@ -189,7 +191,7 @@ impl SharedState {
         *self.stage.write().await = stage;
         *self.stage_detail.write().await = detail.to_string();
     }
-    
+
     pub async fn stage(&self) -> (Stage, String) {
         let stage = *self.stage.read().await;
         let detail = self.stage_detail.read().await.clone();
@@ -214,12 +216,14 @@ impl SharedState {
     }
 
     pub fn compare_and_set_state(&self, expected: CdcState, new: CdcState) -> bool {
-        self.state.compare_exchange(
-            expected as u8,
-            new as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ).is_ok()
+        self.state
+            .compare_exchange(
+                expected as u8,
+                new as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     pub fn set_replication_lag_ms(&self, lag: u64) {
@@ -303,7 +307,13 @@ impl SharedState {
 
     /// Register a finished chunk so the WAL handler can suppress duplicate events.
     /// Called by the snapshot worker after each chunk completes.
-    pub async fn register_finished_chunk(&self, relation_id: u32, start_pk: i64, end_pk: i64, hw_lsn: u64) {
+    pub async fn register_finished_chunk(
+        &self,
+        relation_id: u32,
+        start_pk: i64,
+        end_pk: i64,
+        hw_lsn: u64,
+    ) {
         let mut map = self.finished_chunks.write().await;
         map.entry(relation_id)
             .or_insert_with(BTreeMap::new)
@@ -340,4 +350,3 @@ impl SharedState {
         true // PK not in any finished chunk → emit
     }
 }
-

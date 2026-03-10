@@ -1,15 +1,15 @@
-pub mod state;
-mod services;
 mod cpu_metrics;
+mod services;
+pub mod state;
 
+use services::{control_service, health_service, metrics_service, status_service};
+use state::SharedState;
+use std::sync::Arc;
 use tonic::transport::Server;
 use tonic_reflection::server::Builder as ReflectionBuilder;
-use std::sync::Arc;
 use tracing::info;
-use state::SharedState;
-use services::{health_service, control_service, status_service, metrics_service};
 
-pub use state::{CdcState, CdcConfig, Stage};
+pub use state::{CdcConfig, CdcState, Stage};
 
 /// Starts the gRPC server on the specified port
 pub async fn start_grpc_server(
@@ -36,4 +36,3 @@ pub async fn start_grpc_server(
 
     Ok(())
 }
-

@@ -2,10 +2,10 @@ pub mod adapter;
 pub mod curl_loader;
 pub mod starrocks;
 
-use async_trait::async_trait;
-use anyhow::Result;
-use crate::source::parser::CdcMessage;
 use crate::pipeline::schema_cache::{SchemaCache, SchemaDelta};
+use crate::source::parser::CdcMessage;
+use anyhow::Result;
+use async_trait::async_trait;
 
 /// Legacy Sink trait for backward compatibility
 ///
@@ -18,11 +18,10 @@ pub trait Sink: Send + Sync {
         &mut self,
         batch: &[CdcMessage],
         schema_cache: &SchemaCache,
-        lsn: u64
+        lsn: u64,
     ) -> Result<()>;
 
     async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()>;
 }
 
 pub use adapter::NewSinkAdapter;
-

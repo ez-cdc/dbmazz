@@ -29,7 +29,7 @@ impl CpuTracker {
         // SAFETY: sysconf(_SC_CLK_TCK) is always safe to call on POSIX systems
         // and returns the number of clock ticks per second.
         let clock_ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) as f64 };
-        
+
         Self {
             pid,
             last_utime: 0,
@@ -63,10 +63,10 @@ impl CpuTracker {
         if parts.len() < 13 {
             return None;
         }
-        
+
         let utime: u64 = parts[11].parse().ok()?;
         let stime: u64 = parts[12].parse().ok()?;
-        
+
         Some((utime, stime))
     }
 
@@ -82,7 +82,7 @@ impl CpuTracker {
         let Some((utime, stime)) = self.read_cpu_times() else {
             return 0;
         };
-        
+
         let now = Instant::now();
         let elapsed_secs = now.duration_since(self.last_time).as_secs_f64();
 
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use std::thread;
     use std::time::Duration;
-    
+
     #[test]
     fn test_cpu_tracker_initialization() {
         let tracker = CpuTracker::new();
@@ -141,7 +141,7 @@ mod tests {
         assert!(tracker.clock_ticks > 0.0);
         assert!(!tracker.initialized);
     }
-    
+
     #[test]
     fn test_cpu_tracker_first_read_returns_zero() {
         let mut tracker = CpuTracker::new();
@@ -150,7 +150,7 @@ mod tests {
         assert_eq!(millicores, 0);
         assert!(tracker.initialized);
     }
-    
+
     #[test]
     fn test_cpu_tracker_measures_cpu() {
         let mut tracker = CpuTracker::new();
@@ -166,7 +166,10 @@ mod tests {
 
         // The value should be in a reasonable range (0-1000 millicores typically)
         // In tests it may be low because the process is idle
-        assert!(millicores < 10000, "CPU millicores too high: {}", millicores);
+        assert!(
+            millicores < 10000,
+            "CPU millicores too high: {}",
+            millicores
+        );
     }
 }
-

@@ -9,9 +9,9 @@ mod core;
 #[cfg(feature = "demo")]
 mod demo;
 mod engine;
+mod grpc;
 #[cfg(feature = "http-api")]
 mod http_api;
-mod grpc;
 mod pipeline;
 mod replication;
 mod sink;

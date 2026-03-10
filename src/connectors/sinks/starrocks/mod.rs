@@ -56,13 +56,13 @@ mod setup;
 pub mod stream_load;
 pub(crate) mod types;
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::SinkConfig;
 use crate::core::{
@@ -151,7 +151,11 @@ impl StarRocksSink {
 
         for record in records {
             match record {
-                CdcRecord::Insert { table, columns, position } => {
+                CdcRecord::Insert {
+                    table,
+                    columns,
+                    position,
+                } => {
                     if is_internal_table(&table.name) {
                         continue;
                     }
@@ -167,7 +171,12 @@ impl StarRocksSink {
                         .push(row);
                 }
 
-                CdcRecord::Update { table, new_columns, position, .. } => {
+                CdcRecord::Update {
+                    table,
+                    new_columns,
+                    position,
+                    ..
+                } => {
                     if is_internal_table(&table.name) {
                         continue;
                     }
@@ -194,7 +203,11 @@ impl StarRocksSink {
                     entry.0.push(row);
                 }
 
-                CdcRecord::Delete { table, columns, position } => {
+                CdcRecord::Delete {
+                    table,
+                    columns,
+                    position,
+                } => {
                     if is_internal_table(&table.name) {
                         continue;
                     }
@@ -264,7 +277,10 @@ impl StarRocksSink {
     ) {
         if let serde_json::Value::Object(obj) = row {
             obj.insert("dbmazz_op_type".to_string(), serde_json::json!(op_type));
-            obj.insert("dbmazz_is_deleted".to_string(), serde_json::json!(is_deleted));
+            obj.insert(
+                "dbmazz_is_deleted".to_string(),
+                serde_json::json!(is_deleted),
+            );
             obj.insert("dbmazz_synced_at".to_string(), serde_json::json!(synced_at));
 
             let version = match position {
@@ -297,17 +313,10 @@ impl StarRocksSink {
                 Err(e) => {
                     attempt += 1;
                     if attempt >= max_retries {
-                        return Err(anyhow!(
-                            "Failed after {} attempts: {}",
-                            max_retries,
-                            e
-                        ));
+                        return Err(anyhow!("Failed after {} attempts: {}", max_retries, e));
                     }
 
-                    info!(
-                        "Retry {}/{} for {}: {}",
-                        attempt, max_retries, table, e
-                    );
+                    info!("Retry {}/{} for {}: {}", attempt, max_retries, table, e);
 
                     // Exponential backoff: 100ms, 200ms, 400ms...
                     tokio::time::sleep(Duration::from_millis(100 * 2_u64.pow(attempt))).await;
@@ -382,7 +391,9 @@ impl Sink for StarRocksSink {
             // Extract table name (remove schema prefix if present)
             let table_name = table.split('.').next_back().unwrap_or(&table);
 
-            let written = self.send_with_retry(table_name, body, partial_cols, 3).await?;
+            let written = self
+                .send_with_retry(table_name, body, partial_cols, 3)
+                .await?;
 
             total_written += written;
             total_bytes += body_len;
@@ -404,8 +415,8 @@ impl Sink for StarRocksSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SinkConfig, SinkType};
     use crate::config::StarRocksSinkConfig as ConfigStarRocksSinkConfig;
+    use crate::config::{SinkConfig, SinkType};
 
     fn test_config() -> SinkConfig {
         SinkConfig {

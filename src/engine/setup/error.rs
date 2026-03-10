@@ -4,19 +4,44 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub enum SetupError {
     // PostgreSQL
-    PgConnectionFailed { host: String, error: String },
-    PgTableNotFound { table: String },
-    PgReplicaIdentityFailed { table: String, error: String },
-    PgPublicationFailed { name: String, error: String },
-    PgSlotFailed { name: String, error: String },
-    
+    PgConnectionFailed {
+        host: String,
+        error: String,
+    },
+    PgTableNotFound {
+        table: String,
+    },
+    PgReplicaIdentityFailed {
+        table: String,
+        error: String,
+    },
+    PgPublicationFailed {
+        name: String,
+        error: String,
+    },
+    PgSlotFailed {
+        name: String,
+        error: String,
+    },
+
     // StarRocks
-    SrConnectionFailed { host: String, error: String },
-    SrTableNotFound { table: String },
-    SrAuditColumnsFailed { table: String, error: String },
-    
+    SrConnectionFailed {
+        host: String,
+        error: String,
+    },
+    SrTableNotFound {
+        table: String,
+    },
+    SrAuditColumnsFailed {
+        table: String,
+        error: String,
+    },
+
     // General
-    CheckpointFailed { error: String },
+    #[allow(dead_code)]
+    CheckpointFailed {
+        error: String,
+    },
 }
 
 impl SetupError {
@@ -30,7 +55,10 @@ impl SetupError {
                 format!("Table '{}' not found in PostgreSQL. Verify the table exists and is accessible.", table)
             }
             SetupError::PgReplicaIdentityFailed { table, error } => {
-                format!("Failed to set REPLICA IDENTITY FULL on '{}': {}", table, error)
+                format!(
+                    "Failed to set REPLICA IDENTITY FULL on '{}': {}",
+                    table, error
+                )
             }
             SetupError::PgPublicationFailed { name, error } => {
                 format!("Failed to setup publication '{}': {}", name, error)
@@ -42,10 +70,16 @@ impl SetupError {
                 format!("StarRocks connection failed to '{}': {}", host, error)
             }
             SetupError::SrTableNotFound { table } => {
-                format!("Table '{}' not found in StarRocks. Create the table before starting CDC.", table)
+                format!(
+                    "Table '{}' not found in StarRocks. Create the table before starting CDC.",
+                    table
+                )
             }
             SetupError::SrAuditColumnsFailed { table, error } => {
-                format!("Failed to add audit columns to StarRocks table '{}': {}", table, error)
+                format!(
+                    "Failed to add audit columns to StarRocks table '{}': {}",
+                    table, error
+                )
             }
             SetupError::CheckpointFailed { error } => {
                 format!("Checkpoint load failed: {}", error)
@@ -61,4 +95,3 @@ impl fmt::Display for SetupError {
 }
 
 impl std::error::Error for SetupError {}
-

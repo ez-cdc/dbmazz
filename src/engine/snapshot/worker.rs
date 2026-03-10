@@ -27,14 +27,14 @@ use tokio::task::JoinSet;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
-use crate::config::Config;
-use crate::grpc::state::{SharedState, Stage};
-use crate::connectors::sinks::starrocks::stream_load::{StreamLoadClient, StreamLoadOptions};
-use crate::connectors::sinks::starrocks::StarRocksSinkConfig;
-use super::chunker::{Chunk, chunk_table};
+use super::chunker::{chunk_table, Chunk};
 use super::quote_ident;
 use super::state_store;
 use super::utils::find_integer_pk_column;
+use crate::config::Config;
+use crate::connectors::sinks::starrocks::stream_load::{StreamLoadClient, StreamLoadOptions};
+use crate::connectors::sinks::starrocks::StarRocksSinkConfig;
+use crate::grpc::state::{SharedState, Stage};
 
 /// Pre-computed metadata for a snapshot table (avoids redundant catalog queries per chunk).
 struct TableMeta {
@@ -46,17 +46,16 @@ struct TableMeta {
 ///
 /// This function is spawned as a concurrent task alongside the WAL consumer.
 /// It exits when all chunks are complete or on a non-retriable error.
-pub async fn run_snapshot(
-    config: Arc<Config>,
-    shared_state: Arc<SharedState>,
-) -> Result<()> {
+pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -> Result<()> {
     info!(
         "Snapshot worker starting (chunk_size={}, workers={})",
         config.snapshot_chunk_size, config.snapshot_parallel_workers
     );
 
     shared_state.set_snapshot_active(true);
-    shared_state.set_stage(Stage::Snapshot, "Connecting to source").await;
+    shared_state
+        .set_stage(Stage::Snapshot, "Connecting to source")
+        .await;
     let snapshot_start = std::time::Instant::now();
 
     // Connect to PostgreSQL (regular connection, not replication).
@@ -106,18 +105,26 @@ pub async fn run_snapshot(
 
     // Initial progress from previous runs (for resumed snapshots)
     let (initial_total, initial_done) = state_store::chunk_counts(&client, &slot_name)
-        .await.unwrap_or((0, 0));
+        .await
+        .unwrap_or((0, 0));
     let initial_rows = state_store::total_rows_synced(&client, &slot_name)
-        .await.unwrap_or(0);
+        .await
+        .unwrap_or(0);
     shared_state.update_snapshot_progress(
-        initial_total as u64, initial_done as u64, initial_rows as u64,
+        initial_total as u64,
+        initial_done as u64,
+        initial_rows as u64,
     );
 
     // Load per-table progress from previous runs (for resumed snapshots)
     if let Ok(per_table) = state_store::per_table_progress(&client, &slot_name).await {
         for (table, total, done, rows) in per_table {
-            shared_state.set_table_chunks_total(&table, total as u64).await;
-            shared_state.update_table_progress(&table, done as u64, rows as u64).await;
+            shared_state
+                .set_table_chunks_total(&table, total as u64)
+                .await;
+            shared_state
+                .update_table_progress(&table, done as u64, rows as u64)
+                .await;
         }
     }
 
@@ -155,7 +162,8 @@ pub async fn run_snapshot(
     let producer_shared_state = Arc::clone(&shared_state);
     let producer = tokio::spawn(async move {
         for table in &producer_tables {
-            let chunks = chunk_table(&producer_client, table, chunk_size).await
+            let chunks = chunk_table(&producer_client, table, chunk_size)
+                .await
                 .unwrap_or_else(|e| {
                     warn!("Failed to chunk table {}: {}", table, e);
                     vec![]
@@ -164,23 +172,37 @@ pub async fn run_snapshot(
             // Persist chunks to state_store (idempotent: ON CONFLICT DO NOTHING)
             for chunk in &chunks {
                 state_store::upsert_chunk(
-                    &producer_client, &producer_slot, table,
-                    chunk.partition_id, chunk.start_pk, chunk.end_pk,
-                ).await.unwrap_or_else(|e| warn!("upsert_chunk failed: {}", e));
+                    &producer_client,
+                    &producer_slot,
+                    table,
+                    chunk.partition_id,
+                    chunk.start_pk,
+                    chunk.end_pk,
+                )
+                .await
+                .unwrap_or_else(|e| warn!("upsert_chunk failed: {}", e));
             }
 
             // Skip already-complete chunks (resumability)
-            let complete_ids = state_store::load_complete_partition_ids(
-                &producer_client, &producer_slot, table,
-            ).await.unwrap_or_default();
+            let complete_ids =
+                state_store::load_complete_partition_ids(&producer_client, &producer_slot, table)
+                    .await
+                    .unwrap_or_default();
 
             let total = chunks.len();
             let skipped = complete_ids.len();
-            info!("Table {}: {} chunks ({} pending, {} already done)",
-                table, total, total - skipped, skipped);
+            info!(
+                "Table {}: {} chunks ({} pending, {} already done)",
+                table,
+                total,
+                total - skipped,
+                skipped
+            );
 
             // Set per-table total chunks (producer knows the definitive count)
-            producer_shared_state.set_table_chunks_total(table, total as u64).await;
+            producer_shared_state
+                .set_table_chunks_total(table, total as u64)
+                .await;
 
             // Stream pending chunks to workers
             for chunk in chunks {
@@ -208,15 +230,23 @@ pub async fn run_snapshot(
 
         join_set.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
-            let meta = table_meta.get(&table)
+            let meta = table_meta
+                .get(&table)
                 .ok_or_else(|| anyhow::anyhow!("no metadata for table {}", table))?;
             let pg_client = match pool.lock().await.pop() {
                 Some(c) => c,
                 None => return Err(anyhow::anyhow!("snapshot pool exhausted")),
             };
             let result = process_chunk(
-                &pg_client, &sl_client, &slot_name, &table, &chunk, &shared_state, meta,
-            ).await;
+                &pg_client,
+                &sl_client,
+                &slot_name,
+                &table,
+                &chunk,
+                &shared_state,
+                meta,
+            )
+            .await;
             pool.lock().await.push(pg_client);
             result
         });
@@ -239,15 +269,15 @@ pub async fn run_snapshot(
     // Update final progress
     let (final_total, final_done) = state_store::chunk_counts(&client, &slot_name).await?;
     let final_rows = state_store::total_rows_synced(&client, &slot_name).await?;
-    shared_state.update_snapshot_progress(
-        final_total as u64, final_done as u64, final_rows as u64,
-    );
+    shared_state.update_snapshot_progress(final_total as u64, final_done as u64, final_rows as u64);
 
     let elapsed = snapshot_start.elapsed();
     if state_store::all_chunks_complete(&client, &slot_name).await? {
         info!(
             "Snapshot complete: {} chunks, {} rows synced in {:.1}s ({:.0} rows/sec)",
-            final_total, final_rows, elapsed.as_secs_f64(),
+            final_total,
+            final_rows,
+            elapsed.as_secs_f64(),
             final_rows as f64 / elapsed.as_secs_f64().max(0.001)
         );
         shared_state.set_snapshot_active(false);
@@ -258,7 +288,9 @@ pub async fn run_snapshot(
             elapsed.as_secs_f64()
         );
         shared_state.set_snapshot_active(false);
-        shared_state.set_stage(Stage::Cdc, "Replicating (snapshot incomplete)").await;
+        shared_state
+            .set_stage(Stage::Cdc, "Replicating (snapshot incomplete)")
+            .await;
     }
 
     Ok(())
@@ -274,17 +306,22 @@ async fn process_chunk(
     shared_state: &SharedState,
     meta: &TableMeta,
 ) -> Result<()> {
-    debug!("Processing chunk {}/{}: pk=[{}, {})",
-        table, chunk.partition_id, chunk.start_pk, chunk.end_pk);
+    debug!(
+        "Processing chunk {}/{}: pk=[{}, {})",
+        table, chunk.partition_id, chunk.start_pk, chunk.end_pk
+    );
 
     state_store::mark_chunk_in_progress(client, slot_name, table, chunk.partition_id).await?;
 
     // Step 1: Emit LW (low watermark) — non-transactional
     let lw_content = format!("LW:{}:{}:{}", table, chunk.start_pk, chunk.end_pk);
-    client.execute(
-        "SELECT pg_logical_emit_message(false, 'dbmazz', $1)",
-        &[&lw_content],
-    ).await.context("failed to emit LW watermark")?;
+    client
+        .execute(
+            "SELECT pg_logical_emit_message(false, 'dbmazz', $1)",
+            &[&lw_content],
+        )
+        .await
+        .context("failed to emit LW watermark")?;
 
     // Step 2: SELECT rows for this chunk
     // Extract table name for the destination (strip schema prefix)
@@ -294,7 +331,8 @@ async fn process_chunk(
     let col_names = &meta.col_names;
 
     // Build SELECT with all columns cast to ::text for universal type handling
-    let cols_sql: String = col_names.iter()
+    let cols_sql: String = col_names
+        .iter()
         .map(|c| format!("{}::text AS {}", quote_ident(c), quote_ident(c)))
         .collect::<Vec<_>>()
         .join(", ");
@@ -305,7 +343,8 @@ async fn process_chunk(
         table = quote_ident(table),
         pk = quoted_pk,
     );
-    let rows = client.query(&select_query, &[&chunk.start_pk, &chunk.end_pk])
+    let rows = client
+        .query(&select_query, &[&chunk.start_pk, &chunk.end_pk])
         .await
         .with_context(|| format!("SELECT failed for {} chunk {}", table, chunk.partition_id))?;
 
@@ -314,10 +353,13 @@ async fn process_chunk(
     // Step 3: Emit HW (high watermark) immediately after SELECT — captures LSN
     // before Stream Load so WAL events during load are correctly deduplicated.
     let hw_content = format!("HW:{}:{}:{}", table, chunk.start_pk, chunk.end_pk);
-    let hw_row = client.query_one(
-        "SELECT pg_logical_emit_message(false, 'dbmazz', $1)::text",
-        &[&hw_content],
-    ).await.context("failed to emit HW watermark")?;
+    let hw_row = client
+        .query_one(
+            "SELECT pg_logical_emit_message(false, 'dbmazz', $1)::text",
+            &[&hw_content],
+        )
+        .await
+        .context("failed to emit HW watermark")?;
 
     // pg_logical_emit_message returns pg_lsn (displayed as hex string like "0/1234AB")
     let hw_lsn_str: String = hw_row.get(0);
@@ -336,25 +378,45 @@ async fn process_chunk(
     // Step 5: Stream Load to StarRocks (only if there are rows)
     if !rows.is_empty() {
         let body_arc = Arc::new(body);
-        let result: crate::connectors::sinks::starrocks::stream_load::StreamLoadResult =
-            sl_client.send(dest_table, body_arc, StreamLoadOptions::default())
+        let result: crate::connectors::sinks::starrocks::stream_load::StreamLoadResult = sl_client
+            .send(dest_table, body_arc, StreamLoadOptions::default())
             .await
-            .with_context(|| format!("Stream Load failed for {} chunk {}", table, chunk.partition_id))?;
+            .with_context(|| {
+                format!(
+                    "Stream Load failed for {} chunk {}",
+                    table, chunk.partition_id
+                )
+            })?;
 
-        debug!("Stream Load chunk {}/{}: {} rows loaded", table, chunk.partition_id, result.loaded_rows);
+        debug!(
+            "Stream Load chunk {}/{}: {} rows loaded",
+            table, chunk.partition_id, result.loaded_rows
+        );
     }
 
     // Step 6: Mark chunk complete in state store
     state_store::mark_chunk_complete(
-        client, slot_name, table, chunk.partition_id, row_count, hw_lsn as i64,
-    ).await?;
+        client,
+        slot_name,
+        table,
+        chunk.partition_id,
+        row_count,
+        hw_lsn as i64,
+    )
+    .await?;
 
     // Step 7: Register in SharedState so WAL consumer can deduplicate
     let relation_id = get_relation_id(client, table).await.unwrap_or_else(|e| {
-        tracing::warn!("Could not resolve relation OID for table '{}': {}. WAL dedup may be incomplete.", table, e);
+        tracing::warn!(
+            "Could not resolve relation OID for table '{}': {}. WAL dedup may be incomplete.",
+            table,
+            e
+        );
         0
     });
-    shared_state.register_finished_chunk(relation_id, chunk.start_pk, chunk.end_pk, hw_lsn).await;
+    shared_state
+        .register_finished_chunk(relation_id, chunk.start_pk, chunk.end_pk, hw_lsn)
+        .await;
 
     // Update global progress counters
     let (total, done) = state_store::chunk_counts(client, slot_name).await?;
@@ -362,11 +424,16 @@ async fn process_chunk(
     shared_state.update_snapshot_progress(total as u64, done as u64, rows_synced as u64);
 
     // Update per-table progress counters
-    let (table_done, table_rows) = state_store::table_chunk_progress(client, slot_name, table).await?;
-    shared_state.update_table_progress(table, table_done as u64, table_rows as u64).await;
+    let (table_done, table_rows) =
+        state_store::table_chunk_progress(client, slot_name, table).await?;
+    shared_state
+        .update_table_progress(table, table_done as u64, table_rows as u64)
+        .await;
 
-    info!("Chunk {}/{} complete: {} rows, hw_lsn=0x{:X}",
-        table, chunk.partition_id, row_count, hw_lsn);
+    info!(
+        "Chunk {}/{} complete: {} rows, hw_lsn=0x{:X}",
+        table, chunk.partition_id, row_count, hw_lsn
+    );
 
     Ok(())
 }
@@ -439,7 +506,7 @@ fn write_json_escaped(out: &mut Vec<u8>, s: &str) {
     let mut start = 0;
     for (i, &b) in bytes.iter().enumerate() {
         let escape: &[u8] = match b {
-            b'"'  => b"\\\"",
+            b'"' => b"\\\"",
             b'\\' => b"\\\\",
             b'\n' => b"\\n",
             b'\r' => b"\\r",
@@ -462,16 +529,18 @@ async fn get_column_names(client: &Client, table_name: &str) -> Result<Vec<Strin
         ("public".to_string(), table_name.to_string())
     };
 
-    let rows = client.query(
-        "SELECT a.attname
+    let rows = client
+        .query(
+            "SELECT a.attname
          FROM pg_attribute a
          JOIN pg_class c ON c.oid = a.attrelid
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relname = $2
            AND a.attnum > 0 AND NOT a.attisdropped
          ORDER BY a.attnum",
-        &[&schema, &table],
-    ).await?;
+            &[&schema, &table],
+        )
+        .await?;
 
     Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
 }
@@ -480,14 +549,16 @@ async fn get_column_names(client: &Client, table_name: &str) -> Result<Vec<Strin
 fn strip_replication_param(url_str: &str) -> String {
     match url::Url::parse(url_str) {
         Ok(mut parsed) => {
-            let pairs: Vec<(String, String)> = parsed.query_pairs()
+            let pairs: Vec<(String, String)> = parsed
+                .query_pairs()
                 .filter(|(k, _)| k != "replication")
                 .map(|(k, v)| (k.into_owned(), v.into_owned()))
                 .collect();
             if pairs.is_empty() {
                 parsed.set_query(None);
             } else {
-                let qs = pairs.iter()
+                let qs = pairs
+                    .iter()
                     .map(|(k, v)| format!("{}={}", k, v))
                     .collect::<Vec<_>>()
                     .join("&");
@@ -514,13 +585,16 @@ async fn get_relation_id(client: &Client, table_name: &str) -> Result<u32> {
         ("public".to_string(), table_name.to_string())
     };
 
-    let row = client.query_one(
-        "SELECT c.oid::int4
+    let row = client
+        .query_one(
+            "SELECT c.oid::int4
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relname = $2",
-        &[&schema, &table],
-    ).await.context("failed to get relation OID")?;
+            &[&schema, &table],
+        )
+        .await
+        .context("failed to get relation OID")?;
 
     let oid: i32 = row.get(0);
     Ok(oid as u32)
@@ -536,4 +610,3 @@ fn parse_pg_lsn(s: &str) -> Option<u64> {
     let lo = u64::from_str_radix(parts[1], 16).ok()?;
     Some((hi << 32) | lo)
 }
-

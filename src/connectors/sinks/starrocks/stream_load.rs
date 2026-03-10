@@ -26,7 +26,7 @@
 //! - Proven reliability with StarRocks Stream Load
 //! - Better control over HTTP/1.1 chunked transfers
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use curl::easy::{Easy, List};
 use std::sync::Arc;
 use tracing::debug;
@@ -328,24 +328,22 @@ impl StreamLoadClient {
     ) -> Result<StreamLoadResult> {
         let response_str = String::from_utf8_lossy(response_body).to_string();
 
-        let resp_json: serde_json::Value = serde_json::from_str(&response_str)
-            .unwrap_or(serde_json::json!({
+        let resp_json: serde_json::Value =
+            serde_json::from_str(&response_str).unwrap_or(serde_json::json!({
                 "Status": "Unknown",
                 "Message": response_str.clone()
             }));
 
-        let status = resp_json["Status"].as_str().unwrap_or("Unknown").to_string();
+        let status = resp_json["Status"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string();
         let loaded_rows = resp_json["NumberLoadedRows"].as_u64().unwrap_or(0);
         let message = resp_json["Message"].as_str().unwrap_or("").to_string();
 
         // Validate HTTP response
         if response_code >= 400 {
-            return Err(anyhow!(
-                "HTTP {}: {} - {}",
-                response_code,
-                status,
-                message
-            ));
+            return Err(anyhow!("HTTP {}: {} - {}", response_code, status, message));
         }
 
         // Validate StarRocks response

@@ -1,12 +1,12 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes};
 use futures::SinkExt;
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::source::parser::{CdcMessage, CdcEvent, PgOutputParser};
-use crate::source::postgres::build_standby_status_update;
 use crate::grpc::state::SharedState;
+use crate::source::parser::{CdcEvent, CdcMessage, PgOutputParser};
+use crate::source::postgres::build_standby_status_update;
 
 /// PostgreSQL replication message types
 #[derive(Debug)]
@@ -51,7 +51,7 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
             let wal_end = bytes.get_u64();
             let _timestamp = bytes.get_u64();
             let reply_requested = bytes.get_u8() == 1;
-            
+
             Some(WalMessage::KeepAlive {
                 lsn: wal_end,
                 reply_requested,
@@ -85,7 +85,8 @@ pub async fn handle_xlog_data(
             match &cdc_msg {
                 // Update relation PK column index cache (for snapshot deduplication)
                 CdcMessage::Relation { id, columns, .. } => {
-                    let pk_indices: Vec<usize> = columns.iter()
+                    let pk_indices: Vec<usize> = columns
+                        .iter()
                         .enumerate()
                         .filter(|(_, col)| col.is_key())
                         .map(|(i, _)| i)
@@ -108,7 +109,11 @@ pub async fn handle_xlog_data(
                         }
                     }
                 }
-                CdcMessage::Update { relation_id, new_tuple, .. } => {
+                CdcMessage::Update {
+                    relation_id,
+                    new_tuple,
+                    ..
+                } => {
                     if shared_state.is_snapshot_active() {
                         let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
                         if !shared_state.should_emit(*relation_id, lsn, pk).await {
@@ -190,4 +195,3 @@ where
     }
     Ok(())
 }
-

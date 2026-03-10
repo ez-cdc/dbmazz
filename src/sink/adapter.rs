@@ -68,6 +68,7 @@ impl NewSinkAdapter {
     }
 
     /// Validate the connection to the underlying sink
+    #[allow(dead_code)]
     pub async fn validate_connection(&self) -> Result<()> {
         self.inner.validate_connection().await
     }
@@ -104,9 +105,7 @@ impl NewSinkAdapter {
         position: &SourcePosition,
     ) -> Option<CdcRecord> {
         match msg {
-            CdcMessage::Begin {
-                xid, ..
-            } => Some(CdcRecord::Begin { xid: *xid as u64 }),
+            CdcMessage::Begin { xid, .. } => Some(CdcRecord::Begin { xid: *xid as u64 }),
 
             CdcMessage::Commit { end_lsn, .. } => Some(CdcRecord::Commit {
                 xid: 0,
@@ -149,7 +148,9 @@ impl NewSinkAdapter {
             } => {
                 let schema = schema_cache.get(*relation_id)?;
                 let new_columns = self.tuple_to_column_values(new_tuple, schema);
-                let old_columns = old_tuple.as_ref().map(|t| self.tuple_to_column_values(t, schema));
+                let old_columns = old_tuple
+                    .as_ref()
+                    .map(|t| self.tuple_to_column_values(t, schema));
 
                 Some(CdcRecord::Update {
                     table: TableRef::new(Some("public".to_string()), schema.name.clone()),
@@ -220,9 +221,15 @@ impl NewSinkAdapter {
                 Value::Bool(is_true)
             }
             // Integer types (INT2, INT4, INT8)
-            21 | 23 | 20 => text.parse::<i64>().map(Value::Int64).unwrap_or_else(|_| Value::String(text.to_string())),
+            21 | 23 | 20 => text
+                .parse::<i64>()
+                .map(Value::Int64)
+                .unwrap_or_else(|_| Value::String(text.to_string())),
             // Float types (FLOAT4, FLOAT8)
-            700 | 701 => text.parse::<f64>().map(Value::Float64).unwrap_or_else(|_| Value::String(text.to_string())),
+            700 | 701 => text
+                .parse::<f64>()
+                .map(Value::Float64)
+                .unwrap_or_else(|_| Value::String(text.to_string())),
             // Money - strip currency symbol
             790 => Value::Decimal(strip_money_symbol(text)),
             // NUMERIC/DECIMAL - keep as string for precision
@@ -333,11 +340,26 @@ mod tests {
             inner: Box::new(MockSink),
         };
 
-        assert!(matches!(adapter.convert_pg_value("t", 16), Value::Bool(true)));
-        assert!(matches!(adapter.convert_pg_value("true", 16), Value::Bool(true)));
-        assert!(matches!(adapter.convert_pg_value("1", 16), Value::Bool(true)));
-        assert!(matches!(adapter.convert_pg_value("f", 16), Value::Bool(false)));
-        assert!(matches!(adapter.convert_pg_value("false", 16), Value::Bool(false)));
+        assert!(matches!(
+            adapter.convert_pg_value("t", 16),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            adapter.convert_pg_value("true", 16),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            adapter.convert_pg_value("1", 16),
+            Value::Bool(true)
+        ));
+        assert!(matches!(
+            adapter.convert_pg_value("f", 16),
+            Value::Bool(false)
+        ));
+        assert!(matches!(
+            adapter.convert_pg_value("false", 16),
+            Value::Bool(false)
+        ));
     }
 
     #[test]
@@ -346,10 +368,19 @@ mod tests {
             inner: Box::new(MockSink),
         };
 
-        assert!(matches!(adapter.convert_pg_value("42", 23), Value::Int64(42)));
-        assert!(matches!(adapter.convert_pg_value("-100", 20), Value::Int64(-100)));
+        assert!(matches!(
+            adapter.convert_pg_value("42", 23),
+            Value::Int64(42)
+        ));
+        assert!(matches!(
+            adapter.convert_pg_value("-100", 20),
+            Value::Int64(-100)
+        ));
         // Invalid int falls back to string
-        assert!(matches!(adapter.convert_pg_value("not_a_number", 23), Value::String(_)));
+        assert!(matches!(
+            adapter.convert_pg_value("not_a_number", 23),
+            Value::String(_)
+        ));
     }
 
     #[test]
@@ -391,7 +422,10 @@ mod tests {
             Ok(())
         }
 
-        async fn write_batch(&mut self, _records: Vec<CdcRecord>) -> Result<crate::core::SinkResult> {
+        async fn write_batch(
+            &mut self,
+            _records: Vec<CdcRecord>,
+        ) -> Result<crate::core::SinkResult> {
             Ok(crate::core::SinkResult {
                 records_written: 0,
                 bytes_written: 0,

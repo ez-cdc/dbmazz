@@ -25,7 +25,7 @@ const MAX_CHUNKS_PER_TABLE: u64 = 500_000;
 pub struct Chunk {
     pub partition_id: i32,
     pub start_pk: i64,
-    pub end_pk: i64,  // exclusive upper bound
+    pub end_pk: i64, // exclusive upper bound
 }
 
 /// Divide a table into chunks of approximately `chunk_size` rows.
@@ -36,11 +36,7 @@ pub struct Chunk {
 ///
 /// Returns an empty Vec if the table is empty or has no suitable integer PK.
 /// The caller should treat an empty result as "no snapshot needed" for that table.
-pub async fn chunk_table(
-    client: &Client,
-    table_name: &str,
-    chunk_size: u64,
-) -> Result<Vec<Chunk>> {
+pub async fn chunk_table(client: &Client, table_name: &str, chunk_size: u64) -> Result<Vec<Chunk>> {
     // Identify the primary key column — we need an integer type
     let pk_col = match find_integer_pk_column(client, table_name).await? {
         Some(col) => col,
@@ -59,7 +55,8 @@ pub async fn chunk_table(
         pk = quote_ident(&pk_col),
         table = quote_ident(table_name),
     );
-    let row = client.query_one(&query, &[])
+    let row = client
+        .query_one(&query, &[])
         .await
         .with_context(|| format!("failed to query MIN/MAX for {}", table_name))?;
 
@@ -93,9 +90,13 @@ pub async fn chunk_table(
     //
     // Fallback: reltuples = 0 means the table has never been ANALYZEd.
     // In that case, fall back to PK range division (original behavior).
-    let estimated_rows = get_estimated_row_count(client, table_name).await
+    let estimated_rows = get_estimated_row_count(client, table_name)
+        .await
         .unwrap_or_else(|e| {
-            warn!("Failed to get reltuples for {}: {} — falling back to PK range", table_name, e);
+            warn!(
+                "Failed to get reltuples for {}: {} — falling back to PK range",
+                table_name, e
+            );
             0
         });
 
@@ -130,7 +131,7 @@ pub async fn chunk_table(
     for i in 0..num_chunks {
         let start = min_pk + (i as f64 * step_f64) as i64;
         let end = if i == num_chunks - 1 {
-            max_pk + 1  // last chunk is inclusive of max
+            max_pk + 1 // last chunk is inclusive of max
         } else {
             min_pk + ((i + 1) as f64 * step_f64) as i64
         };
@@ -148,7 +149,9 @@ pub async fn chunk_table(
 
     debug!(
         "Table {}: generated {} actual chunks (requested {})",
-        table_name, chunks.len(), num_chunks
+        table_name,
+        chunks.len(),
+        num_chunks
     );
 
     Ok(chunks)
@@ -166,13 +169,16 @@ async fn get_estimated_row_count(client: &Client, table_name: &str) -> Result<u6
         ("public".to_string(), table_name.to_string())
     };
 
-    let row = client.query_one(
-        "SELECT GREATEST(c.reltuples, 0)::bigint
+    let row = client
+        .query_one(
+            "SELECT GREATEST(c.reltuples, 0)::bigint
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE c.relname = $1 AND n.nspname = $2",
-        &[&table, &schema],
-    ).await.with_context(|| format!("failed to get reltuples for {}", table_name))?;
+            &[&table, &schema],
+        )
+        .await
+        .with_context(|| format!("failed to get reltuples for {}", table_name))?;
 
     let estimated: i64 = row.get(0);
     Ok(estimated.max(0) as u64)

@@ -61,7 +61,8 @@ impl<'a> PostgresSetup<'a> {
             let schema = if parts.len() > 1 { parts[0] } else { "public" };
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
 
-            let exists: bool = self.client
+            let exists: bool = self
+                .client
                 .query_one(
                     "SELECT EXISTS (
                         SELECT FROM information_schema.tables 
@@ -101,7 +102,8 @@ impl<'a> PostgresSetup<'a> {
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
 
             // Consultar estado actual
-            let row = self.client
+            let row = self
+                .client
                 .query_one(
                     "SELECT c.relreplident
                      FROM pg_class c
@@ -122,10 +124,7 @@ impl<'a> PostgresSetup<'a> {
             if identity_char != 'f' {
                 info!("  Setting REPLICA IDENTITY FULL on {}", table);
                 self.client
-                    .execute(
-                        &format!("ALTER TABLE {} REPLICA IDENTITY FULL", table),
-                        &[],
-                    )
+                    .execute(&format!("ALTER TABLE {} REPLICA IDENTITY FULL", table), &[])
                     .await
                     .map_err(|e| SetupError::PgReplicaIdentityFailed {
                         table: table.clone(),
@@ -150,7 +149,8 @@ impl<'a> PostgresSetup<'a> {
         })?;
 
         // Check if it exists
-        let exists: bool = self.client
+        let exists: bool = self
+            .client
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)",
                 &[&pub_name],
@@ -221,7 +221,8 @@ impl<'a> PostgresSetup<'a> {
         &self,
         pub_name: &str,
     ) -> Result<Vec<String>, SetupError> {
-        let rows = self.client
+        let rows = self
+            .client
             .query(
                 "SELECT schemaname || '.' || tablename as full_name
                  FROM pg_publication_tables 
@@ -235,8 +236,10 @@ impl<'a> PostgresSetup<'a> {
             })?;
 
         let existing: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
-        
-        let missing: Vec<String> = self.config.tables
+
+        let missing: Vec<String> = self
+            .config
+            .tables
             .iter()
             .filter(|table| {
                 // Normalize names for comparison
@@ -258,7 +261,8 @@ impl<'a> PostgresSetup<'a> {
         let slot_name = &self.config.slot_name;
 
         // Check if it exists and if it's active
-        let slot_info = self.client
+        let slot_info = self
+            .client
             .query_opt(
                 "SELECT active FROM pg_replication_slots WHERE slot_name = $1",
                 &[&slot_name],
@@ -275,20 +279,26 @@ impl<'a> PostgresSetup<'a> {
                 if is_active {
                     // Slot exists and is active - another process is using it
                     // This is recovery mode (same daemon restarting)
-                    info!("  [OK] Replication slot {} exists and is active (recovery mode)", slot_name);
+                    info!(
+                        "  [OK] Replication slot {} exists and is active (recovery mode)",
+                        slot_name
+                    );
                 } else {
                     // Slot exists but is NOT active - orphaned from a previous run
                     // Drop it and recreate to ensure clean state
-                    warn!("  Replication slot {} exists but is inactive (orphaned), dropping...", slot_name);
+                    warn!(
+                        "  Replication slot {} exists but is inactive (orphaned), dropping...",
+                        slot_name
+                    );
                     self.client
-                        .execute(
-                            "SELECT pg_drop_replication_slot($1)",
-                            &[&slot_name],
-                        )
+                        .execute("SELECT pg_drop_replication_slot($1)", &[&slot_name])
                         .await
                         .map_err(|e| SetupError::PgSlotFailed {
                             name: slot_name.clone(),
-                            error: format!("failed to drop orphaned slot: {}", pg_error_message(&e)),
+                            error: format!(
+                                "failed to drop orphaned slot: {}",
+                                pg_error_message(&e)
+                            ),
                         })?;
                     info!("  Creating replication slot {}", slot_name);
                     self.client
@@ -334,7 +344,8 @@ impl<'a> PostgresSetup<'a> {
     /// A new replication slot means the snapshot must run from scratch;
     /// stale COMPLETE records would cause the snapshot worker to skip all chunks.
     async fn clear_snapshot_state(&self, slot_name: &str) {
-        match self.client
+        match self
+            .client
             .execute(
                 "DELETE FROM dbmazz_snapshot_state WHERE slot_name = $1",
                 &[&slot_name],
@@ -342,9 +353,12 @@ impl<'a> PostgresSetup<'a> {
             .await
         {
             Ok(n) if n > 0 => {
-                info!("  [OK] Cleared {} stale snapshot state rows for slot {}", n, slot_name);
+                info!(
+                    "  [OK] Cleared {} stale snapshot state rows for slot {}",
+                    n, slot_name
+                );
             }
-            Ok(_) => {} // No rows to clear
+            Ok(_) => {}  // No rows to clear
             Err(_) => {} // Table may not exist yet, that's fine
         }
     }
@@ -377,7 +391,10 @@ pub async fn create_postgres_client(database_url: &str) -> Result<Client, SetupE
 
 /// Cleanup PostgreSQL resources on daemon shutdown
 /// Drops the replication slot to free the resource
-pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> Result<(), SetupError> {
+pub async fn cleanup_postgres_resources(
+    database_url: &str,
+    slot_name: &str,
+) -> Result<(), SetupError> {
     info!("Cleaning up PostgreSQL resources...");
 
     let client = create_postgres_client(database_url).await?;
@@ -406,10 +423,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                 if let Some(pid) = active_pid {
                     warn!("  Slot is active (pid={}), terminating backend...", pid);
                     let terminated: bool = client
-                        .query_one(
-                            "SELECT pg_terminate_backend($1)",
-                            &[&pid],
-                        )
+                        .query_one("SELECT pg_terminate_backend($1)", &[&pid])
                         .await
                         .map(|row| row.get(0))
                         .unwrap_or(false);
@@ -430,10 +444,7 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
 
             while retries > 0 {
                 match client
-                    .execute(
-                        "SELECT pg_drop_replication_slot($1)",
-                        &[&slot_name],
-                    )
+                    .execute("SELECT pg_drop_replication_slot($1)", &[&slot_name])
                     .await
                 {
                     Ok(_) => {
@@ -444,7 +455,10 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
                         last_error = Some(pg_error_message(&e));
                         retries -= 1;
                         if retries > 0 {
-                            warn!("  Drop failed, retrying in 1s... ({} retries left)", retries);
+                            warn!(
+                                "  Drop failed, retrying in 1s... ({} retries left)",
+                                retries
+                            );
                             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                         }
                     }
@@ -454,11 +468,17 @@ pub async fn cleanup_postgres_resources(database_url: &str, slot_name: &str) -> 
             // If all retries failed
             Err(SetupError::PgSlotFailed {
                 name: slot_name.to_string(),
-                error: format!("failed to drop slot after retries: {}", last_error.unwrap_or_default()),
+                error: format!(
+                    "failed to drop slot after retries: {}",
+                    last_error.unwrap_or_default()
+                ),
             })
         }
         None => {
-            info!("  [INFO] Replication slot {} not found (already dropped?)", slot_name);
+            info!(
+                "  [INFO] Replication slot {} not found (already dropped?)",
+                slot_name
+            );
             Ok(())
         }
     }

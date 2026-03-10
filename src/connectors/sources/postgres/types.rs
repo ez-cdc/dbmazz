@@ -17,7 +17,6 @@
 
 use crate::connectors::sources::postgres::parser::{Column, Tuple, TupleData};
 use crate::core::{ColumnDef, ColumnValue, DataType, Value};
-use tracing::warn;
 
 /// PostgreSQL type OIDs for common types
 pub mod pg_oid {
@@ -39,7 +38,7 @@ pub mod pg_oid {
     pub const INET: u32 = 869;
     pub const CIDR: u32 = 650;
     pub const MACADDR8: u32 = 774;
-    pub const BPCHAR: u32 = 1042;  // char(n)
+    pub const BPCHAR: u32 = 1042; // char(n)
     pub const VARCHAR: u32 = 1043;
     pub const DATE: u32 = 1082;
     pub const TIME: u32 = 1083;
@@ -208,12 +207,14 @@ pub fn tuple_data_to_value(data: &TupleData, type_id: u32) -> Value {
                     let v = text == "t" || text == "true" || text == "1";
                     Value::Bool(v)
                 }
-                pg_oid::INT2 | pg_oid::INT4 | pg_oid::INT8 => {
-                    text.parse::<i64>().map(Value::Int64).unwrap_or_else(|_| Value::String(text.to_string()))
-                }
-                pg_oid::FLOAT4 | pg_oid::FLOAT8 => {
-                    text.parse::<f64>().map(Value::Float64).unwrap_or_else(|_| Value::String(text.to_string()))
-                }
+                pg_oid::INT2 | pg_oid::INT4 | pg_oid::INT8 => text
+                    .parse::<i64>()
+                    .map(Value::Int64)
+                    .unwrap_or_else(|_| Value::String(text.to_string())),
+                pg_oid::FLOAT4 | pg_oid::FLOAT8 => text
+                    .parse::<f64>()
+                    .map(Value::Float64)
+                    .unwrap_or_else(|_| Value::String(text.to_string())),
                 pg_oid::NUMERIC => Value::Decimal(text.to_string()),
                 pg_oid::MONEY => Value::Decimal(strip_money_symbol(text)),
                 pg_oid::JSON | pg_oid::JSONB => Value::Json(text.to_string()),
@@ -525,31 +526,26 @@ mod tests {
         assert!(matches!(toast_val, Value::Unchanged));
 
         // Integer
-        let int_val =
-            tuple_data_to_value(&TupleData::Text(Bytes::from("42")), pg_oid::INT4);
+        let int_val = tuple_data_to_value(&TupleData::Text(Bytes::from("42")), pg_oid::INT4);
         assert!(matches!(int_val, Value::Int64(42)));
 
         // Float
-        let float_val =
-            tuple_data_to_value(&TupleData::Text(Bytes::from("3.5")), pg_oid::FLOAT8);
+        let float_val = tuple_data_to_value(&TupleData::Text(Bytes::from("3.5")), pg_oid::FLOAT8);
         match float_val {
             Value::Float64(f) => assert!((f - 3.5).abs() < 0.001),
             _ => panic!("Expected Float64"),
         }
 
         // Boolean true
-        let bool_val =
-            tuple_data_to_value(&TupleData::Text(Bytes::from("t")), pg_oid::BOOL);
+        let bool_val = tuple_data_to_value(&TupleData::Text(Bytes::from("t")), pg_oid::BOOL);
         assert!(matches!(bool_val, Value::Bool(true)));
 
         // Boolean false
-        let bool_val =
-            tuple_data_to_value(&TupleData::Text(Bytes::from("f")), pg_oid::BOOL);
+        let bool_val = tuple_data_to_value(&TupleData::Text(Bytes::from("f")), pg_oid::BOOL);
         assert!(matches!(bool_val, Value::Bool(false)));
 
         // String
-        let str_val =
-            tuple_data_to_value(&TupleData::Text(Bytes::from("hello")), pg_oid::TEXT);
+        let str_val = tuple_data_to_value(&TupleData::Text(Bytes::from("hello")), pg_oid::TEXT);
         match str_val {
             Value::String(s) => assert_eq!(s, "hello"),
             _ => panic!("Expected String"),
@@ -620,7 +616,10 @@ mod tests {
     fn test_parse_pg_array_float() {
         assert_eq!(parse_pg_array("{1.5,2.3,3.0}", "float"), "[1.5,2.3,3.0]");
         assert_eq!(parse_pg_array("{NaN}", "float"), "[\"NaN\"]");
-        assert_eq!(parse_pg_array("{Infinity,-Infinity}", "float"), "[\"Infinity\",\"-Infinity\"]");
+        assert_eq!(
+            parse_pg_array("{Infinity,-Infinity}", "float"),
+            "[\"Infinity\",\"-Infinity\"]"
+        );
         assert_eq!(parse_pg_array("{NULL,1.0}", "float"), "[null,1.0]");
     }
 
@@ -670,10 +669,7 @@ mod tests {
             "2024-06-15 12:00:00.123456"
         );
         // Fallback: invalid input returned as-is
-        assert_eq!(
-            normalize_timestamptz("not a timestamp"),
-            "not a timestamp"
-        );
+        assert_eq!(normalize_timestamptz("not a timestamp"), "not a timestamp");
     }
 
     #[test]
@@ -690,10 +686,7 @@ mod tests {
 
     #[test]
     fn test_tuple_data_money() {
-        let val = tuple_data_to_value(
-            &TupleData::Text(Bytes::from("$99.95")),
-            pg_oid::MONEY,
-        );
+        let val = tuple_data_to_value(&TupleData::Text(Bytes::from("$99.95")), pg_oid::MONEY);
         match val {
             Value::Decimal(s) => assert_eq!(s, "99.95"),
             _ => panic!("Expected Decimal, got {:?}", val),

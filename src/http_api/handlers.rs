@@ -156,7 +156,10 @@ pub async fn prometheus(State(state): State<Arc<HttpAppState>>) -> impl IntoResp
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -181,7 +184,11 @@ pub async fn resume(State(state): State<Arc<HttpAppState>>) -> impl IntoResponse
     match engine.as_ref() {
         Some(shared) => {
             shared.set_state(CdcState::Running);
-            (StatusCode::OK, Json(json!({"ok": true, "state": "running"}))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "state": "running"})),
+            )
+                .into_response()
         }
         None => (
             StatusCode::BAD_REQUEST,
@@ -196,7 +203,11 @@ pub async fn drain_stop(State(state): State<Arc<HttpAppState>>) -> impl IntoResp
     match engine.as_ref() {
         Some(shared) => {
             shared.set_state(CdcState::Draining);
-            (StatusCode::OK, Json(json!({"ok": true, "state": "draining"}))).into_response()
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "state": "draining"})),
+            )
+                .into_response()
         }
         None => (
             StatusCode::BAD_REQUEST,
@@ -236,21 +247,24 @@ async fn test_postgres(
     );
 
     let connect_fut = tokio_postgres::connect(&url, tokio_postgres::NoTls);
-    let (client, connection) =
-        match tokio::time::timeout(Duration::from_secs(5), connect_fut).await {
-            Ok(Ok(conn)) => conn,
-            Ok(Err(e)) => {
-                return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
-                    .into_response()
-            }
-            Err(_) => {
-                return (
-                    StatusCode::OK,
-                    Json(json!({"ok": false, "error": "Connection timed out (5s)"})),
-                )
-                    .into_response()
-            }
-        };
+    let (client, connection) = match tokio::time::timeout(Duration::from_secs(5), connect_fut).await
+    {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": "Connection timed out (5s)"})),
+            )
+                .into_response()
+        }
+    };
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -261,7 +275,10 @@ async fn test_postgres(
     let version = match client.query_one("SELECT version()", &[]).await {
         Ok(row) => row.get::<_, String>(0),
         Err(e) => {
-            return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
                 .into_response()
         }
     };
@@ -313,7 +330,10 @@ async fn test_starrocks(
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             let _ = pool.disconnect().await;
-            return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
                 .into_response();
         }
         Err(_) => {
@@ -332,7 +352,10 @@ async fn test_starrocks(
         Err(e) => {
             drop(conn);
             let _ = pool.disconnect().await;
-            return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
                 .into_response();
         }
     };
@@ -361,13 +384,13 @@ pub async fn discover_tables(State(state): State<Arc<HttpAppState>>) -> impl Int
         let guard = state.source_config.read().await;
         match guard.as_ref() {
             Some(s) => s.clone(),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": "Source not configured. Test connection first."})),
-                )
-                    .into_response()
-            }
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"ok": false, "error": "Source not configured. Test connection first."}),
+                ),
+            )
+                .into_response(),
         }
     };
 
@@ -377,21 +400,24 @@ pub async fn discover_tables(State(state): State<Arc<HttpAppState>>) -> impl Int
     );
 
     let connect_fut = tokio_postgres::connect(&url, tokio_postgres::NoTls);
-    let (client, connection) =
-        match tokio::time::timeout(Duration::from_secs(5), connect_fut).await {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
-                    .into_response()
-            }
-            Err(_) => {
-                return (
-                    StatusCode::OK,
-                    Json(json!({"ok": false, "error": "Connection timed out (5s)"})),
-                )
-                    .into_response()
-            }
-        };
+    let (client, connection) = match tokio::time::timeout(Duration::from_secs(5), connect_fut).await
+    {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
+                .into_response()
+        }
+        Err(_) => {
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": "Connection timed out (5s)"})),
+            )
+                .into_response()
+        }
+    };
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
@@ -420,7 +446,10 @@ pub async fn discover_tables(State(state): State<Arc<HttpAppState>>) -> impl Int
     let rows = match client.query(query, &[]).await {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::OK, Json(json!({"ok": false, "error": e.to_string()})))
+            return (
+                StatusCode::OK,
+                Json(json!({"ok": false, "error": e.to_string()})),
+            )
                 .into_response()
         }
     };
@@ -469,7 +498,9 @@ pub async fn start_replication(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": "Source not configured. Test connection first."})),
+                    Json(
+                        json!({"ok": false, "error": "Source not configured. Test connection first."}),
+                    ),
                 )
             }
         }
@@ -482,7 +513,9 @@ pub async fn start_replication(
             None => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(json!({"ok": false, "error": "Sink not configured. Test connection first."})),
+                    Json(
+                        json!({"ok": false, "error": "Sink not configured. Test connection first."}),
+                    ),
                 )
             }
         }
@@ -492,7 +525,9 @@ pub async fn start_replication(
     if let Err(e) = ensure_starrocks_tables(&src, &sink, &req.tables).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": format!("Failed to prepare StarRocks tables: {}", e)})),
+            Json(
+                json!({"ok": false, "error": format!("Failed to prepare StarRocks tables: {}", e)}),
+            ),
         );
     }
 
@@ -507,7 +542,11 @@ pub async fn start_replication(
     let flush_size = req
         .flush_size
         .filter(|v| *v > 0)
-        .or_else(|| std::env::var("FLUSH_SIZE").ok().and_then(|v| v.parse::<usize>().ok()))
+        .or_else(|| {
+            std::env::var("FLUSH_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        })
         .unwrap_or(2000);
     let flush_interval_ms = req
         .flush_interval_ms
@@ -586,7 +625,10 @@ pub async fn stop_replication(State(state): State<Arc<HttpAppState>>) -> impl In
     drop(engine);
     *state.engine_state.write().await = None;
 
-    (StatusCode::OK, Json(json!({"ok": true, "state": "stopped"})))
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "state": "stopped"})),
+    )
 }
 
 // =============================================================================

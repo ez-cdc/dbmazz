@@ -11,8 +11,8 @@
 //!
 //! All DDL operations use the MySQL protocol (port 9030).
 
-use anyhow::{Result, anyhow};
-use mysql_async::{Pool, Conn, OptsBuilder, prelude::Queryable};
+use anyhow::{anyhow, Result};
+use mysql_async::{prelude::Queryable, Conn, OptsBuilder, Pool};
 use tracing::info;
 
 use super::config::StarRocksSinkConfig;
@@ -23,10 +23,19 @@ use crate::utils::validate_sql_identifier;
 /// CDC audit columns that must exist in all replicated StarRocks tables.
 #[allow(dead_code)]
 const AUDIT_COLUMNS: &[(&str, &str)] = &[
-    ("dbmazz_op_type", "TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE'"),
+    (
+        "dbmazz_op_type",
+        "TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE'",
+    ),
     ("dbmazz_is_deleted", "BOOLEAN COMMENT 'Soft delete flag'"),
-    ("dbmazz_synced_at", "DATETIME COMMENT 'Timestamp when record was synced'"),
-    ("dbmazz_cdc_version", "BIGINT COMMENT 'Source LSN/position for ordering'"),
+    (
+        "dbmazz_synced_at",
+        "DATETIME COMMENT 'Timestamp when record was synced'",
+    ),
+    (
+        "dbmazz_cdc_version",
+        "BIGINT COMMENT 'Source LSN/position for ordering'",
+    ),
 ];
 
 /// StarRocks schema setup and management.
@@ -190,9 +199,9 @@ impl StarRocksSetup {
                     self.config.database, table, col_name, col_def
                 );
 
-                conn.query_drop(sql)
-                    .await
-                    .map_err(|e| anyhow!("Failed to add column {} to {}: {}", col_name, table, e))?;
+                conn.query_drop(sql).await.map_err(|e| {
+                    anyhow!("Failed to add column {} to {}: {}", col_name, table, e)
+                })?;
 
                 info!("  [OK] Column {} added to {}", col_name, table);
             } else {
@@ -249,12 +258,17 @@ impl StarRocksSetup {
                 let err_msg = e.to_string();
                 // Ignore if column already exists
                 if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
-                    info!("Column {} already exists in {}, skipping", column_name, table);
+                    info!(
+                        "Column {} already exists in {}, skipping",
+                        column_name, table
+                    );
                     Ok(())
                 } else {
                     Err(anyhow!(
                         "Failed to add column {} to {}: {}",
-                        column_name, table, err_msg
+                        column_name,
+                        table,
+                        err_msg
                     ))
                 }
             }

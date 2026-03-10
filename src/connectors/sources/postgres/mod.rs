@@ -274,16 +274,12 @@ impl PostgresSource {
                 self.emit_record(record).await?;
             }
 
-            CdcMessage::Begin {
-                xid, ..
-            } => {
+            CdcMessage::Begin { xid, .. } => {
                 let record = CdcRecord::Begin { xid: xid as u64 };
                 self.emit_record(record).await?;
             }
 
-            CdcMessage::Commit {
-                end_lsn, ..
-            } => {
+            CdcMessage::Commit { end_lsn, .. } => {
                 let record = CdcRecord::Commit {
                     xid: 0, // XID not available in Commit message
                     position: SourcePosition::Lsn(end_lsn),
@@ -309,7 +305,8 @@ impl PostgresSource {
                 new_tuple,
             } => {
                 if let Some(info) = self.schema_cache.read().get(&relation_id).cloned() {
-                    let old_columns = old_tuple.map(|t| types::tuple_to_column_values(&t, &info.columns));
+                    let old_columns =
+                        old_tuple.map(|t| types::tuple_to_column_values(&t, &info.columns));
                     let new_columns = types::tuple_to_column_values(&new_tuple, &info.columns);
 
                     let record = CdcRecord::Update {
@@ -380,11 +377,7 @@ impl PostgresSource {
         for table in &self.tables {
             let parts: Vec<&str> = table.split('.').collect();
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
-            let schema_name = if parts.len() > 1 {
-                parts[0]
-            } else {
-                "public"
-            };
+            let schema_name = if parts.len() > 1 { parts[0] } else { "public" };
 
             let row = client
                 .query_one(
@@ -518,10 +511,7 @@ mod tests {
     #[test]
     fn test_clean_url() {
         let url1 = "postgres://localhost/db?replication=database";
-        assert_eq!(
-            PostgresSource::clean_url(url1),
-            "postgres://localhost/db"
-        );
+        assert_eq!(PostgresSource::clean_url(url1), "postgres://localhost/db");
 
         let url2 = "postgres://localhost/db?param=1&replication=database";
         assert_eq!(

@@ -5,4 +5,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(&["src/proto/dbmazz.proto"], &["src/proto"])?;
     Ok(())
 }
-

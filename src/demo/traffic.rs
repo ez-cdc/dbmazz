@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tracing::{info, warn};
 
 const PRODUCT_NAMES: &[&str] = &[
@@ -102,8 +102,7 @@ async fn insert_order(client: &tokio_postgres::Client) -> Result<(), tokio_postg
             "INSERT INTO order_items (order_id, product_name, quantity, price) VALUES ({}, '{}', {}, {:.2})",
             order_id, product, quantity, price
         );
-        client.execute(&item_sql, &[])
-            .await?;
+        client.execute(&item_sql, &[]).await?;
     }
 
     Ok(())

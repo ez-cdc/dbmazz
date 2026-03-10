@@ -3,30 +3,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{interval, Duration};
 use tonic::{Request, Response, Status};
 
-use crate::grpc::state::{CdcState, SharedState, Stage};
 use crate::grpc::cpu_metrics::CpuTracker;
+use crate::grpc::state::{CdcState, SharedState, Stage};
 
 // Include the generated protobuf code
 pub mod dbmazz {
     tonic::include_proto!("dbmazz");
-    
+
     // File descriptor set for reflection
     pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("descriptor");
 }
 
 use dbmazz::{
-    health_service_server::{HealthService, HealthServiceServer},
     cdc_control_service_server::{CdcControlService, CdcControlServiceServer},
-    cdc_status_service_server::{CdcStatusService, CdcStatusServiceServer},
     cdc_metrics_service_server::{CdcMetricsService, CdcMetricsServiceServer},
-    HealthCheckRequest, HealthCheckResponse,
+    cdc_status_service_server::{CdcStatusService, CdcStatusServiceServer},
     health_check_response::ServingStatus,
-    PauseRequest, ResumeRequest, DrainRequest, StopRequest, ReloadConfigRequest,
-    StartSnapshotRequest,
-    ControlResponse,
-    StatusRequest, StatusResponse, TableSnapshotProgress,
+    health_service_server::{HealthService, HealthServiceServer},
     status_response::CdcState as ProtoCdcState,
-    MetricsRequest, MetricsResponse,
+    ControlResponse, DrainRequest, HealthCheckRequest, HealthCheckResponse, MetricsRequest,
+    MetricsResponse, PauseRequest, ReloadConfigRequest, ResumeRequest, StartSnapshotRequest,
+    StatusRequest, StatusResponse, StopRequest, TableSnapshotProgress,
 };
 
 // ============================================================================
@@ -64,10 +61,10 @@ impl HealthService for HealthServiceImpl {
         };
 
         let proto_stage = match stage {
-            Stage::Init => 1,      // STAGE_INIT
-            Stage::Setup => 2,     // STAGE_SETUP
-            Stage::Cdc => 3,       // STAGE_CDC
-            Stage::Snapshot => 4,  // STAGE_SNAPSHOT
+            Stage::Init => 1,     // STAGE_INIT
+            Stage::Setup => 2,    // STAGE_SETUP
+            Stage::Cdc => 3,      // STAGE_CDC
+            Stage::Snapshot => 4, // STAGE_SNAPSHOT
         };
 
         Ok(Response::new(HealthCheckResponse {
@@ -103,7 +100,10 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<PauseRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        if self.shared_state.compare_and_set_state(CdcState::Running, CdcState::Paused) {
+        if self
+            .shared_state
+            .compare_and_set_state(CdcState::Running, CdcState::Paused)
+        {
             Ok(Response::new(ControlResponse {
                 success: true,
                 message: "CDC paused successfully".to_string(),
@@ -111,18 +111,14 @@ impl CdcControlService for CdcControlServiceImpl {
         } else {
             let current = self.shared_state.state();
             match current {
-                CdcState::Paused => {
-                    Ok(Response::new(ControlResponse {
-                        success: false,
-                        message: "CDC is already paused".to_string(),
-                    }))
-                }
-                _ => {
-                    Ok(Response::new(ControlResponse {
-                        success: false,
-                        message: format!("Cannot pause CDC in state: {:?}", current),
-                    }))
-                }
+                CdcState::Paused => Ok(Response::new(ControlResponse {
+                    success: false,
+                    message: "CDC is already paused".to_string(),
+                })),
+                _ => Ok(Response::new(ControlResponse {
+                    success: false,
+                    message: format!("Cannot pause CDC in state: {:?}", current),
+                })),
             }
         }
     }
@@ -131,7 +127,10 @@ impl CdcControlService for CdcControlServiceImpl {
         &self,
         _request: Request<ResumeRequest>,
     ) -> Result<Response<ControlResponse>, Status> {
-        if self.shared_state.compare_and_set_state(CdcState::Paused, CdcState::Running) {
+        if self
+            .shared_state
+            .compare_and_set_state(CdcState::Paused, CdcState::Running)
+        {
             Ok(Response::new(ControlResponse {
                 success: true,
                 message: "CDC resumed successfully".to_string(),
@@ -139,18 +138,14 @@ impl CdcControlService for CdcControlServiceImpl {
         } else {
             let current = self.shared_state.state();
             match current {
-                CdcState::Running => {
-                    Ok(Response::new(ControlResponse {
-                        success: false,
-                        message: "CDC is already running".to_string(),
-                    }))
-                }
-                _ => {
-                    Ok(Response::new(ControlResponse {
-                        success: false,
-                        message: format!("Cannot resume CDC in state: {:?}", current),
-                    }))
-                }
+                CdcState::Running => Ok(Response::new(ControlResponse {
+                    success: false,
+                    message: "CDC is already running".to_string(),
+                })),
+                _ => Ok(Response::new(ControlResponse {
+                    success: false,
+                    message: format!("Cannot resume CDC in state: {:?}", current),
+                })),
             }
         }
     }
@@ -170,18 +165,14 @@ impl CdcControlService for CdcControlServiceImpl {
                     message: "CDC is draining and will stop".to_string(),
                 }))
             }
-            CdcState::Draining => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: "CDC is already draining".to_string(),
-                }))
-            }
-            CdcState::Stopped => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: "CDC is already stopped".to_string(),
-                }))
-            }
+            CdcState::Draining => Ok(Response::new(ControlResponse {
+                success: false,
+                message: "CDC is already draining".to_string(),
+            })),
+            CdcState::Stopped => Ok(Response::new(ControlResponse {
+                success: false,
+                message: "CDC is already stopped".to_string(),
+            })),
         }
     }
 
@@ -192,15 +183,14 @@ impl CdcControlService for CdcControlServiceImpl {
         let req = request.into_inner();
         let current = self.shared_state.state();
         match current {
-            CdcState::Stopped => {
-                Ok(Response::new(ControlResponse {
-                    success: false,
-                    message: "CDC is already stopped".to_string(),
-                }))
-            }
+            CdcState::Stopped => Ok(Response::new(ControlResponse {
+                success: false,
+                message: "CDC is already stopped".to_string(),
+            })),
             _ => {
                 // Set cleanup flag before triggering shutdown
-                self.shared_state.set_skip_slot_cleanup(req.skip_slot_cleanup);
+                self.shared_state
+                    .set_skip_slot_cleanup(req.skip_slot_cleanup);
                 self.shared_state.set_state(CdcState::Stopped);
                 // Send immediate shutdown signal
                 let _ = self.shared_state.shutdown_tx.send(true);
@@ -246,7 +236,8 @@ impl CdcControlService for CdcControlServiceImpl {
         if changes.is_empty() {
             Ok(Response::new(ControlResponse {
                 success: false,
-                message: "No configuration changes provided (use 0 to keep current values)".to_string(),
+                message: "No configuration changes provided (use 0 to keep current values)"
+                    .to_string(),
             }))
         } else {
             Ok(Response::new(ControlResponse {
@@ -310,12 +301,15 @@ impl CdcStatusService for CdcStatusServiceImpl {
         // Build per-table progress only when snapshot is active
         let table_progress = if snapshot_active {
             let progress_map = self.shared_state.get_table_progress().await;
-            progress_map.into_iter().map(|(table_name, p)| TableSnapshotProgress {
-                table_name,
-                chunks_total: p.chunks_total,
-                chunks_done: p.chunks_done,
-                rows_synced: p.rows_synced,
-            }).collect()
+            progress_map
+                .into_iter()
+                .map(|(table_name, p)| TableSnapshotProgress {
+                    table_name,
+                    chunks_total: p.chunks_total,
+                    chunks_done: p.chunks_done,
+                    rows_synced: p.rows_synced,
+                })
+                .collect()
         } else {
             vec![]
         };
@@ -358,7 +352,8 @@ impl CdcMetricsServiceImpl {
 
 #[tonic::async_trait]
 impl CdcMetricsService for CdcMetricsServiceImpl {
-    type StreamMetricsStream = tokio_stream::wrappers::ReceiverStream<Result<MetricsResponse, Status>>;
+    type StreamMetricsStream =
+        tokio_stream::wrappers::ReceiverStream<Result<MetricsResponse, Status>>;
 
     async fn stream_metrics(
         &self,
@@ -387,7 +382,7 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
                 let current_events = shared_state.events_processed();
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(last_time).as_secs_f64();
-                
+
                 let events_per_second = if elapsed > 0.0 {
                     (current_events.saturating_sub(last_events)) as f64 / elapsed
                 } else {
@@ -429,7 +424,9 @@ impl CdcMetricsService for CdcMetricsServiceImpl {
             }
         });
 
-        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 }
 
@@ -438,4 +435,3 @@ pub fn metrics_service(
 ) -> CdcMetricsServiceServer<CdcMetricsServiceImpl> {
     CdcMetricsServiceServer::new(CdcMetricsServiceImpl::new(shared_state))
 }
-

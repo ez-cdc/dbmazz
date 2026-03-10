@@ -12,15 +12,17 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::grpc::{self, CdcConfig, CdcState, Stage};
-use crate::grpc::state::SharedState;
-use crate::pipeline::Pipeline;
-use crate::replication::{parse_replication_message, handle_xlog_data, handle_keepalive, WalMessage};
-use setup::SetupManager;
-use crate::sink::NewSinkAdapter;
-use crate::source::postgres::{PostgresSource, build_standby_status_update};
-use crate::state_store::StateStore;
 use crate::connectors::sinks::create_sink;
+use crate::grpc::state::SharedState;
+use crate::grpc::{self, CdcConfig, CdcState, Stage};
+use crate::pipeline::Pipeline;
+use crate::replication::{
+    handle_keepalive, handle_xlog_data, parse_replication_message, WalMessage,
+};
+use crate::sink::NewSinkAdapter;
+use crate::source::postgres::{build_standby_status_update, PostgresSource};
+use crate::state_store::StateStore;
+use setup::SetupManager;
 
 /// Main CDC engine that orchestrates all components
 pub struct CdcEngine {
@@ -52,6 +54,7 @@ impl CdcEngine {
 
     /// Returns a clone of the SharedState Arc.
     /// Used by the demo mode to read metrics while the engine runs.
+    #[allow(dead_code)]
     pub fn shared_state(&self) -> Arc<SharedState> {
         Arc::clone(&self.shared_state)
     }
@@ -59,20 +62,28 @@ impl CdcEngine {
     /// Execute CDC engine
     pub async fn run(mut self) -> Result<()> {
         // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)
-        self.shared_state.set_stage(Stage::Setup, "Starting gRPC server").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Starting gRPC server")
+            .await;
         self.start_grpc_server();
 
         // Stage: SETUP - Initialize StateStore (connects to PostgreSQL for checkpoints)
-        self.shared_state.set_stage(Stage::Setup, "Connecting to checkpoint store").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Connecting to checkpoint store")
+            .await;
         let state_store = StateStore::new(&self.config.database_url).await?;
         self.state_store = Some(state_store);
 
         // Stage: SETUP - Execute automatic setup
-        self.shared_state.set_stage(Stage::Setup, "Running automatic setup").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Running automatic setup")
+            .await;
         if let Err(e) = self.run_setup().await {
             // Save error in SharedState for Health Check
             self.shared_state.set_setup_error(Some(e.to_string())).await;
-            self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
+            self.shared_state
+                .set_stage(Stage::Setup, "Setup failed")
+                .await;
             error!("Setup failed: {}", e);
             // Keep gRPC server running so control plane can query the error
             loop {
@@ -81,27 +92,39 @@ impl CdcEngine {
         }
 
         // Stage: SETUP - Checkpoint
-        self.shared_state.set_stage(Stage::Setup, "Loading checkpoint").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Loading checkpoint")
+            .await;
         let start_lsn = self.load_checkpoint().await?;
 
         // Stage: SETUP - Source Connection
-        self.shared_state.set_stage(Stage::Setup, "Connecting to PostgreSQL").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Connecting to PostgreSQL")
+            .await;
         let source = self.init_source().await?;
-        
+
         // Stage: SETUP - Replication Stream
-        self.shared_state.set_stage(Stage::Setup, "Starting replication stream").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Starting replication stream")
+            .await;
         let replication_stream = source.start_replication_from(start_lsn).await?;
         tokio::pin!(replication_stream);
 
         // Stage: SETUP - Sink Connection
-        self.shared_state.set_stage(Stage::Setup, "Connecting to sink").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Connecting to sink")
+            .await;
         let sink_adapter = self.init_sink()?;
 
         // Verify HTTP connectivity BEFORE declaring CDC ready
         if let Err(e) = sink_adapter.verify_http_connection().await {
             let error_msg = format!("Sink HTTP connection failed: {}", e);
-            self.shared_state.set_setup_error(Some(error_msg.clone())).await;
-            self.shared_state.set_stage(Stage::Setup, "Setup failed").await;
+            self.shared_state
+                .set_setup_error(Some(error_msg.clone()))
+                .await;
+            self.shared_state
+                .set_stage(Stage::Setup, "Setup failed")
+                .await;
             error!("{}", error_msg);
             loop {
                 tokio::time::sleep(Duration::from_secs(60)).await;
@@ -112,15 +135,22 @@ impl CdcEngine {
         // Log sink capabilities
         let caps = sink_adapter.capabilities();
         info!("  Sink capabilities:");
-        info!("    - upsert: {}, delete: {}, schema_evolution: {}",
-            caps.supports_upsert, caps.supports_delete, caps.supports_schema_evolution);
-        info!("    - optimal_flush_interval: {}ms", caps.optimal_flush_interval_ms);
+        info!(
+            "    - upsert: {}, delete: {}, schema_evolution: {}",
+            caps.supports_upsert, caps.supports_delete, caps.supports_schema_evolution
+        );
+        info!(
+            "    - optimal_flush_interval: {}ms",
+            caps.optimal_flush_interval_ms
+        );
         if let Some(max) = caps.max_batch_size {
             info!("    - max_batch_size: {}", max);
         }
 
         // Stage: SETUP - Pipeline
-        self.shared_state.set_stage(Stage::Setup, "Initializing pipeline").await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Initializing pipeline")
+            .await;
         let (tx, feedback_rx) = self.init_pipeline(sink_adapter, &caps);
 
         // Stage: CDC - Ready to replicate
@@ -155,12 +185,8 @@ impl CdcEngine {
         }
 
         // 6. Execute main loop
-        self.run_main_loop(
-            replication_stream,
-            tx,
-            feedback_rx,
-            start_lsn,
-        ).await
+        self.run_main_loop(replication_stream, tx, feedback_rx, start_lsn)
+            .await
     }
 
     /// Execute automatic setup (PostgreSQL + StarRocks)
@@ -171,7 +197,9 @@ impl CdcEngine {
 
     /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
-        let state_store = self.state_store.as_ref()
+        let state_store = self
+            .state_store
+            .as_ref()
             .expect("state_store must be initialized before load_checkpoint");
         let last_lsn = state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
@@ -206,7 +234,8 @@ impl CdcEngine {
             &self.config.database_url,
             self.config.slot_name.clone(),
             self.config.publication_name.clone(),
-        ).await?;
+        )
+        .await?;
 
         Ok(source)
     }
@@ -222,7 +251,10 @@ impl CdcEngine {
         &self,
         sink: NewSinkAdapter,
         caps: &crate::core::SinkCapabilities,
-    ) -> (mpsc::Sender<crate::source::parser::CdcEvent>, mpsc::Receiver<u64>) {
+    ) -> (
+        mpsc::Sender<crate::source::parser::CdcEvent>,
+        mpsc::Receiver<u64>,
+    ) {
         // Job/config values always win. Sink capabilities are only fallback/advisory.
         let batch_size = if self.config.flush_size > 0 {
             self.config.flush_size
@@ -240,15 +272,11 @@ impl CdcEngine {
         info!("  Pipeline config (effective):");
         info!(
             "    - batch_size: {} (job/config: {}, sink_max: {:?})",
-            batch_size,
-            self.config.flush_size,
-            caps.max_batch_size
+            batch_size, self.config.flush_size, caps.max_batch_size
         );
         info!(
             "    - flush_interval: {}ms (job/config: {}ms, sink_optimal: {}ms)",
-            flush_interval_ms,
-            self.config.flush_interval_ms,
-            caps.optimal_flush_interval_ms
+            flush_interval_ms, self.config.flush_interval_ms, caps.optimal_flush_interval_ms
         );
 
         let (tx, rx) = mpsc::channel(batch_size * 2);
@@ -289,7 +317,7 @@ impl CdcEngine {
 
         loop {
             iteration = iteration.wrapping_add(1);
-            
+
             // 1. Check state changes every 256 iterations to reduce overhead
             // With ~287 events/s, this checks state ~1x/second instead of 287x/second
             if iteration & 0xFF == 0 {
@@ -375,10 +403,10 @@ impl CdcEngine {
         // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
         if self.shared_state.should_skip_slot_cleanup() {
             info!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
-        } else if let Err(e) = setup::cleanup_postgres_resources(
-            &self.config.database_url,
-            &self.config.slot_name,
-        ).await {
+        } else if let Err(e) =
+            setup::cleanup_postgres_resources(&self.config.database_url, &self.config.slot_name)
+                .await
+        {
             warn!("Cleanup warning: {}", e);
             // Non-fatal - continue shutdown
         }
@@ -393,7 +421,7 @@ impl CdcEngine {
         tx: &mpsc::Sender<crate::source::parser::CdcEvent>,
     ) -> Option<ControlFlow> {
         let current_state = self.shared_state.state();
-        
+
         match current_state {
             CdcState::Stopped => {
                 info!("CDC stopped by control plane. Exiting immediately.");
@@ -430,16 +458,13 @@ impl CdcEngine {
     {
         match msg {
             WalMessage::XLogData { lsn, data } => {
-                handle_xlog_data(
-                    data,
-                    lsn,
-                    tx,
-                    &self.shared_state,
-                    self.config.flush_size,
-                ).await?;
+                handle_xlog_data(data, lsn, tx, &self.shared_state, self.config.flush_size).await?;
                 Ok(lsn)
             }
-            WalMessage::KeepAlive { lsn, reply_requested } => {
+            WalMessage::KeepAlive {
+                lsn,
+                reply_requested,
+            } => {
                 handle_keepalive(lsn, reply_requested, replication_stream).await?;
                 Ok(lsn)
             }
@@ -467,13 +492,18 @@ impl CdcEngine {
         // 3. WAL data is gone → permanent data loss
 
         // 1. Save checkpoint to persistent storage
-        let state_store = self.state_store.as_ref()
+        let state_store = self
+            .state_store
+            .as_ref()
             .expect("state_store must be initialized before checkpoint feedback");
         if let Err(e) = state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await
         {
-            error!("Failed to save checkpoint at LSN 0x{:X}: {}", confirmed_lsn, e);
+            error!(
+                "Failed to save checkpoint at LSN 0x{:X}: {}",
+                confirmed_lsn, e
+            );
             error!("NOT confirming to PostgreSQL to prevent data loss");
             // Return error to halt replication loop
             return Err(e);

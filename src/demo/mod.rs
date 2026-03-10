@@ -4,7 +4,10 @@ pub mod traffic;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
@@ -62,7 +65,10 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/api/replication/start", post(handlers::start_replication))
         .route("/api/replication/stop", post(handlers::stop_replication))
         .route("/api/replication/pause", post(handlers::pause_replication))
-        .route("/api/replication/resume", post(handlers::resume_replication))
+        .route(
+            "/api/replication/resume",
+            post(handlers::resume_replication),
+        )
         .route("/api/traffic/start", post(handlers::start_traffic))
         .route("/api/traffic/stop", post(handlers::stop_traffic))
         .route("/api/status", get(handlers::status))

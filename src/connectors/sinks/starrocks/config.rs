@@ -7,7 +7,7 @@
 //! sink connector. It supports configuration from both the new generic
 //! `SinkConfig` and legacy environment variables.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use crate::config::SinkConfig;
 
@@ -113,7 +113,11 @@ impl StarRocksSinkConfig {
             .split(':')
             .collect();
 
-        let scheme = if url.starts_with("https://") { "https" } else { "http" };
+        let scheme = if url.starts_with("https://") {
+            "https"
+        } else {
+            "http"
+        };
 
         match parts.len() {
             1 => {
@@ -182,8 +186,8 @@ impl Default for StarRocksSinkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SinkConfig, SinkType};
     use crate::config::StarRocksSinkConfig as ConfigStarRocksSinkConfig;
+    use crate::config::{SinkConfig, SinkType};
 
     #[test]
     fn test_from_sink_config() {

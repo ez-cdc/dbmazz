@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use tokio_postgres::{Client, NoTls, Config, CopyBothDuplex};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio_postgres::{Client, Config, CopyBothDuplex, NoTls};
 use tracing::{error, info, warn};
 
 /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
@@ -28,12 +28,12 @@ pub fn pg_timestamp() -> i64 {
 /// - reply: u8 - 0 = reply not requested
 pub fn build_standby_status_update(lsn: u64) -> Bytes {
     let mut buf = BytesMut::with_capacity(34);
-    buf.put_u8(b'r');           // StandbyStatusUpdate tag
-    buf.put_u64(lsn);           // walWritePos
-    buf.put_u64(lsn);           // walFlushPos (same as write)
-    buf.put_u64(lsn);           // walApplyPos (confirmed to sink)
+    buf.put_u8(b'r'); // StandbyStatusUpdate tag
+    buf.put_u64(lsn); // walWritePos
+    buf.put_u64(lsn); // walFlushPos (same as write)
+    buf.put_u64(lsn); // walApplyPos (confirmed to sink)
     buf.put_i64(pg_timestamp()); // timestamp
-    buf.put_u8(0);              // reply not requested
+    buf.put_u8(0); // reply not requested
     buf.freeze()
 }
 
@@ -44,11 +44,7 @@ pub struct PostgresSource {
 }
 
 impl PostgresSource {
-    pub async fn new(
-        pg_config: &str,
-        slot_name: String,
-        publication_name: String,
-    ) -> Result<Self> {
+    pub async fn new(pg_config: &str, slot_name: String, publication_name: String) -> Result<Self> {
         // Clean URL of replication parameters if they exist
         let clean_url = pg_config
             .replace("?replication=database", "")
@@ -71,7 +67,7 @@ impl PostgresSource {
                     slot_name
                 ))
                 .await; // Ignore errors (slot may already exist)
-            
+
             drop(slot_client);
             let _ = slot_handle.await;
         }
@@ -81,7 +77,7 @@ impl PostgresSource {
 
         // The Materialize fork has this method
         config.replication_mode(tokio_postgres::config::ReplicationMode::Logical);
-        
+
         let (client, connection) = config.connect(NoTls).await?;
 
         tokio::spawn(async move {
@@ -97,6 +93,7 @@ impl PostgresSource {
         })
     }
 
+    #[allow(dead_code)]
     pub async fn start_replication(&self) -> Result<CopyBothDuplex<Bytes>> {
         self.start_replication_from(0).await
     }
@@ -108,7 +105,7 @@ impl PostgresSource {
         } else {
             format!("{:X}/{:X}", start_lsn >> 32, start_lsn & 0xFFFFFFFF)
         };
-        
+
         let query = format!(
             "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names '{}')",
             self.slot_name, lsn_str, self.publication_name
@@ -132,11 +129,12 @@ impl PostgresSource {
     ///
     /// With REPLICA IDENTITY DEFAULT, only the PK is received in DELETEs, which
     /// is insufficient for partitioned tables.
+    #[allow(dead_code)]
     pub async fn validate_replica_identity(&self, tables: &[String]) -> Result<()> {
         // Create a normal connection (not replication) for queries
         let clean_url = self.clean_url();
         let (client, connection) = tokio_postgres::connect(&clean_url, NoTls).await?;
-        
+
         tokio::spawn(async move {
             if let Err(e) = connection.await {
                 error!("Validation connection error: {}", e);
@@ -147,17 +145,22 @@ impl PostgresSource {
             // Parse schema.table if qualified
             let parts: Vec<&str> = table.split('.').collect();
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
-            
+
             let row = client
                 .query_one(
                     "SELECT c.relreplident, c.relname 
                      FROM pg_class c 
                      JOIN pg_namespace n ON c.relnamespace = n.oid 
                      WHERE c.relname = $1 AND n.nspname = COALESCE($2, 'public')",
-                    &[&table_name, &if parts.len() > 1 { parts[0] } else { "public" }],
+                    &[
+                        &table_name,
+                        &if parts.len() > 1 { parts[0] } else { "public" },
+                    ],
                 )
                 .await
-                .with_context(|| format!("Failed to query replica identity for table '{}'", table))?;
+                .with_context(|| {
+                    format!("Failed to query replica identity for table '{}'", table)
+                })?;
 
             let replica_identity: i8 = row.get(0);
             let relname: String = row.get(1);
@@ -178,7 +181,8 @@ impl PostgresSource {
                         "Table '{}' has REPLICA IDENTITY NOTHING. \
                         This is not supported for CDC. \
                         Run: ALTER TABLE {} REPLICA IDENTITY FULL;",
-                        relname, table
+                        relname,
+                        table
                     ));
                 }
                 'i' => {
@@ -186,7 +190,10 @@ impl PostgresSource {
                     info!("    Note: For full soft delete support, consider REPLICA IDENTITY FULL");
                 }
                 _ => {
-                    warn!("Unknown REPLICA IDENTITY '{}' for table '{}'", replica_char, relname);
+                    warn!(
+                        "Unknown REPLICA IDENTITY '{}' for table '{}'",
+                        replica_char, relname
+                    );
                 }
             }
         }
@@ -195,6 +202,7 @@ impl PostgresSource {
     }
 
     /// Gets the clean URL without replication parameters
+    #[allow(dead_code)]
     fn clean_url(&self) -> String {
         // This function assumes PostgresSource was created with a valid URL
         // In a real scenario, you should store the original URL

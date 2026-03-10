@@ -26,9 +26,9 @@ pub mod starrocks;
 
 use anyhow::Result;
 
+use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::Sink;
-use self::starrocks::StarRocksSink;
 
 /// Creates a sink connector based on the provided configuration.
 ///
@@ -70,10 +70,9 @@ pub fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>> {
         SinkType::StarRocks => {
             let sink = StarRocksSink::new(config)?;
             Ok(Box::new(sink))
-        }
-        // Future sinks can be added here:
-        // SinkType::ClickHouse => Ok(Box::new(ClickHouseSink::new(config)?)),
-        // SinkType::Snowflake => Ok(Box::new(SnowflakeSink::new(config)?)),
+        } // Future sinks can be added here:
+          // SinkType::ClickHouse => Ok(Box::new(ClickHouseSink::new(config)?)),
+          // SinkType::Snowflake => Ok(Box::new(SnowflakeSink::new(config)?)),
     }
 }
 

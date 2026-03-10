@@ -5,9 +5,9 @@ pub mod starrocks;
 use anyhow::Result;
 use tracing::info;
 
+use crate::config::Config;
 pub use error::SetupError;
 pub use postgres::cleanup_postgres_resources;
-use crate::config::Config;
 
 /// Main manager for the SETUP process
 pub struct SetupManager {
