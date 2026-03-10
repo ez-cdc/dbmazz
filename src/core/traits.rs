@@ -1,5 +1,5 @@
-use crate::core::record::CdcRecord;
 use crate::core::position::SourcePosition;
+use crate::core::record::CdcRecord;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,7 @@ pub trait Source: Send + Sync {
 }
 
 #[async_trait]
+#[allow(dead_code)]
 pub trait Sink: Send + Sync {
     /// Returns the name of the sink implementation
     fn name(&self) -> &'static str;

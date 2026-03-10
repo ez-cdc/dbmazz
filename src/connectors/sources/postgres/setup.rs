@@ -17,7 +17,7 @@
 
 use anyhow::{Context, Result};
 use tokio_postgres::{Client, NoTls};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::utils::validate_sql_identifier;
 
@@ -119,14 +119,9 @@ impl<'a> PostgresSetup<'a> {
             if identity_char != 'f' {
                 info!("  Setting REPLICA IDENTITY FULL on {}", table);
                 self.client
-                    .execute(
-                        &format!("ALTER TABLE {} REPLICA IDENTITY FULL", table),
-                        &[],
-                    )
+                    .execute(&format!("ALTER TABLE {} REPLICA IDENTITY FULL", table), &[])
                     .await
-                    .with_context(|| {
-                        format!("Failed to set REPLICA IDENTITY FULL on {}", table)
-                    })?;
+                    .with_context(|| format!("Failed to set REPLICA IDENTITY FULL on {}", table))?;
                 info!("  [OK] REPLICA IDENTITY FULL set on {}", table);
             } else {
                 info!("  [OK] {} already has REPLICA IDENTITY FULL", table);

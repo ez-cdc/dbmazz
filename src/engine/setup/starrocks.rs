@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use mysql_async::{Pool, Conn, prelude::Queryable};
+use mysql_async::{prelude::Queryable, Conn, Pool};
 use tracing::info;
 
 use super::error::SetupError;
@@ -10,7 +10,10 @@ use crate::utils::validate_sql_identifier;
 
 /// CDC audit columns that must exist in StarRocks
 const AUDIT_COLUMNS: &[(&str, &str)] = &[
-    ("dbmazz_op_type", "TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE'"),
+    (
+        "dbmazz_op_type",
+        "TINYINT COMMENT '0=INSERT, 1=UPDATE, 2=DELETE'",
+    ),
     ("dbmazz_is_deleted", "BOOLEAN COMMENT 'Soft delete flag'"),
     ("dbmazz_synced_at", "DATETIME COMMENT 'Timestamp CDC'"),
     ("dbmazz_cdc_version", "BIGINT COMMENT 'LSN PostgreSQL'"),
@@ -33,7 +36,9 @@ impl<'a> StarRocksSetup<'a> {
         let mut conn = self.get_conn().await?;
 
         // 1. Verify connectivity
-        let _: Option<i32> = conn.query_first("SELECT 1").await
+        let _: Option<i32> = conn
+            .query_first("SELECT 1")
+            .await
             .map_err(|e| self.sr_error(e.to_string()))?;
         info!("  [OK] StarRocks connection OK");
 
@@ -41,7 +46,10 @@ impl<'a> StarRocksSetup<'a> {
         self.verify_tables_exist(&mut conn).await?;
 
         // 3. Batch ensure audit columns
-        let tables: Vec<&str> = self.config.tables.iter()
+        let tables: Vec<&str> = self
+            .config
+            .tables
+            .iter()
             .map(|t| t.split('.').next_back().unwrap_or(t))
             .collect();
 
@@ -79,7 +87,10 @@ impl<'a> StarRocksSetup<'a> {
 
     /// Get a connection from the pool.
     async fn get_conn(&self) -> Result<Conn, SetupError> {
-        self.pool.get_conn().await.map_err(|e| self.sr_error(e.to_string()))
+        self.pool
+            .get_conn()
+            .await
+            .map_err(|e| self.sr_error(e.to_string()))
     }
 
     /// Shorthand for SrConnectionFailed error.
@@ -113,7 +124,10 @@ impl<'a> StarRocksSetup<'a> {
         // Build lookup: table_name -> set of column names
         let mut table_columns: HashMap<&str, HashSet<String>> = HashMap::new();
         for (tbl, col) in &rows {
-            table_columns.entry(tbl.as_str()).or_default().insert(col.clone());
+            table_columns
+                .entry(tbl.as_str())
+                .or_default()
+                .insert(col.clone());
         }
 
         // Only ALTER what's actually missing
@@ -132,10 +146,12 @@ impl<'a> StarRocksSetup<'a> {
                         "ALTER TABLE `{}`.`{}` ADD COLUMN `{}` {}",
                         self.config.starrocks_db, table, col_name, col_def
                     );
-                    conn.query_drop(sql).await.map_err(|e| SetupError::SrAuditColumnsFailed {
-                        table: table.to_string(),
-                        error: e.to_string(),
-                    })?;
+                    conn.query_drop(sql)
+                        .await
+                        .map_err(|e| SetupError::SrAuditColumnsFailed {
+                            table: table.to_string(),
+                            error: e.to_string(),
+                        })?;
                     info!("  [OK] Column {} added to {}", col_name, table);
                 }
             }
@@ -143,13 +159,13 @@ impl<'a> StarRocksSetup<'a> {
 
         Ok(())
     }
-
 }
 
 /// Helper to create StarRocks connection pool
 pub fn create_starrocks_pool(config: &Config) -> Result<Pool, SetupError> {
     // Extract host from URL
-    let host = config.starrocks_url
+    let host = config
+        .starrocks_url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .split(':')

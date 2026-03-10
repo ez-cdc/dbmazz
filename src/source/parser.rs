@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes};
 use memchr::memchr;
 use simdutf8::basic::from_utf8;
@@ -6,10 +6,14 @@ use simdutf8::basic::from_utf8;
 /// Wrapper que incluye LSN del WAL para checkpointing
 #[derive(Debug, Clone)]
 pub struct CdcEvent {
-    pub lsn: u64,  // LSN del WAL donde ocurrió este evento
+    pub lsn: u64, // LSN del WAL donde ocurrió este evento
     pub message: CdcMessage,
 }
 
+/// pgoutput WAL protocol messages. Fields are parsed from the wire format and
+/// stored even if not all are currently consumed — they are part of the spec
+/// and will be used as the feature set expands.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum CdcMessage {
     Begin {
@@ -77,7 +81,9 @@ impl Column {
 #[derive(Debug, Clone)]
 pub struct Tuple {
     pub cols: Vec<TupleData>,
-    pub toast_bitmap: u64,  // Bitmap SIMD-friendly (hasta 64 columnas)
+    /// SIMD-friendly bitmap tracking which columns are TOAST (up to 64 columns).
+    /// Parsed from the pgoutput wire format; used for partial-update optimisation.
+    pub toast_bitmap: u64,
 }
 
 impl Tuple {
@@ -86,34 +92,41 @@ impl Tuple {
     pub fn has_toast(&self) -> bool {
         self.toast_bitmap != 0
     }
-    
-    /// POPCNT instruction - cuenta bits en 1 ciclo
+
+    /// POPCNT instruction - counts set bits in one cycle
+    #[allow(dead_code)]
     #[inline]
     pub fn toast_count(&self) -> u32 {
         self.toast_bitmap.count_ones()
     }
-    
-    /// Verifica si columna especifica es TOAST - O(1)
+
+    /// Returns true if the column at `idx` is a TOAST column - O(1)
     #[inline]
     pub fn is_toast_column(&self, idx: usize) -> bool {
-        if idx >= 64 { return false; }
+        if idx >= 64 {
+            return false;
+        }
         self.toast_bitmap & (1u64 << idx) != 0
     }
-    
-    /// Itera solo columnas TOAST usando trailing_zeros (CTZ) - O(k) donde k = columnas TOAST
+
+    /// Iterates over TOAST column indices using CTZ - O(k) where k = number of TOAST columns
+    #[allow(dead_code)]
     pub fn toast_indices(&self) -> ToastIterator {
-        ToastIterator { bitmap: self.toast_bitmap }
+        ToastIterator {
+            bitmap: self.toast_bitmap,
+        }
     }
 }
 
-/// Iterator que usa CTZ (Count Trailing Zeros) para encontrar bits eficientemente
+/// Iterator that uses CTZ (Count Trailing Zeros) to find set bits efficiently
+#[allow(dead_code)]
 pub struct ToastIterator {
     bitmap: u64,
 }
 
 impl Iterator for ToastIterator {
     type Item = usize;
-    
+
     fn next(&mut self) -> Option<usize> {
         if self.bitmap == 0 {
             return None;
@@ -161,46 +174,74 @@ impl PgOutputParser {
     }
 
     fn parse_begin(data: &mut Bytes) -> Result<Option<CdcMessage>> {
-        if data.len() < 20 { return Ok(None); }
+        if data.len() < 20 {
+            return Ok(None);
+        }
         let final_lsn = data.get_u64();
         let timestamp = data.get_u64();
         let xid = data.get_u32();
-        Ok(Some(CdcMessage::Begin { final_lsn, timestamp, xid }))
+        Ok(Some(CdcMessage::Begin {
+            final_lsn,
+            timestamp,
+            xid,
+        }))
     }
 
     fn parse_commit(data: &mut Bytes) -> Result<Option<CdcMessage>> {
-        if data.len() < 25 { return Ok(None); }
+        if data.len() < 25 {
+            return Ok(None);
+        }
         let flags = data.get_u8();
         let commit_lsn = data.get_u64();
         let end_lsn = data.get_u64();
         let timestamp = data.get_u64();
-        Ok(Some(CdcMessage::Commit { flags, commit_lsn, end_lsn, timestamp }))
+        Ok(Some(CdcMessage::Commit {
+            flags,
+            commit_lsn,
+            end_lsn,
+            timestamp,
+        }))
     }
 
     fn parse_relation(data: &mut Bytes) -> Result<Option<CdcMessage>> {
-        if data.remaining() < 4 { return Err(anyhow!("EOF in relation")); }
+        if data.remaining() < 4 {
+            return Err(anyhow!("EOF in relation"));
+        }
         let id = data.get_u32();
         let namespace = Self::read_string(data)?;
         let name = Self::read_string(data)?;
         let replica_identity = data.get_u8();
         let num_columns = data.get_u16();
-        
+
         let mut columns = Vec::with_capacity(num_columns as usize);
         for _ in 0..num_columns {
             let flags = data.get_u8();
             let name = Self::read_string(data)?;
             let type_id = data.get_u32();
             let type_mod = data.get_i32();
-            columns.push(Column { flags, name, type_id, type_mod });
+            columns.push(Column {
+                flags,
+                name,
+                type_id,
+                type_mod,
+            });
         }
-        
-        Ok(Some(CdcMessage::Relation { id, namespace, name, replica_identity, columns }))
+
+        Ok(Some(CdcMessage::Relation {
+            id,
+            namespace,
+            name,
+            replica_identity,
+            columns,
+        }))
     }
 
     fn parse_insert(data: &mut Bytes) -> Result<Option<CdcMessage>> {
         let relation_id = data.get_u32();
         let char_n = data.get_u8(); // 'N'
-        if char_n != b'N' { return Err(anyhow!("Expected 'N'")); }
+        if char_n != b'N' {
+            return Err(anyhow!("Expected 'N'"));
+        }
         let tuple = Self::read_tuple(data)?;
         Ok(Some(CdcMessage::Insert { relation_id, tuple }))
     }
@@ -213,39 +254,63 @@ impl PgOutputParser {
             old_tuple = Some(Self::read_tuple(data)?);
             tag = data.get_u8();
         }
-        if tag != b'N' { return Err(anyhow!("Expected 'N'")); }
+        if tag != b'N' {
+            return Err(anyhow!("Expected 'N'"));
+        }
         let new_tuple = Self::read_tuple(data)?;
-        Ok(Some(CdcMessage::Update { relation_id, old_tuple, new_tuple }))
+        Ok(Some(CdcMessage::Update {
+            relation_id,
+            old_tuple,
+            new_tuple,
+        }))
     }
 
     fn parse_delete(data: &mut Bytes) -> Result<Option<CdcMessage>> {
         let relation_id = data.get_u32();
         let tag = data.get_u8();
         let old_tuple = if tag == b'K' || tag == b'O' {
-             Some(Self::read_tuple(data)?)
+            Some(Self::read_tuple(data)?)
         } else {
             None
         };
-        Ok(Some(CdcMessage::Delete { relation_id, old_tuple }))
+        Ok(Some(CdcMessage::Delete {
+            relation_id,
+            old_tuple,
+        }))
     }
 
     fn parse_logical_message(data: &mut Bytes) -> Result<Option<CdcMessage>> {
-        if data.remaining() < 9 { return Ok(None); }
+        if data.remaining() < 9 {
+            return Ok(None);
+        }
         let transactional = data.get_u8() != 0;
         let lsn = data.get_u64();
         let prefix = Self::read_string(data)?;
-        if data.remaining() < 4 { return Ok(None); }
+        if data.remaining() < 4 {
+            return Ok(None);
+        }
         let content_len = data.get_u32() as usize;
-        if data.remaining() < content_len { return Ok(None); }
+        if data.remaining() < content_len {
+            return Ok(None);
+        }
         let content = data.split_to(content_len);
-        Ok(Some(CdcMessage::LogicalMessage { transactional, lsn, prefix, content }))
+        Ok(Some(CdcMessage::LogicalMessage {
+            transactional,
+            lsn,
+            prefix,
+            content,
+        }))
     }
 
     fn parse_keepalive(data: &mut Bytes) -> Result<Option<CdcMessage>> {
         let wal_end = data.get_u64();
         let timestamp = data.get_u64();
         let reply_requested = data.get_u8() != 0;
-        Ok(Some(CdcMessage::KeepAlive { wal_end, timestamp, reply_requested }))
+        Ok(Some(CdcMessage::KeepAlive {
+            wal_end,
+            timestamp,
+            reply_requested,
+        }))
     }
 
     fn read_string(data: &mut Bytes) -> Result<String> {
@@ -254,10 +319,10 @@ impl PgOutputParser {
             Some(i) => i,
             None => return Err(anyhow!("String missing null terminator")),
         };
-        
+
         let bytes = data.split_to(len);
         data.advance(1); // skip null
-        
+
         // Use simdutf8 for validation (faster than std)
         let s = from_utf8(&bytes)?;
         Ok(s.to_string())
@@ -267,7 +332,7 @@ impl PgOutputParser {
         let num_cols = data.get_u16();
         let mut cols = Vec::with_capacity(num_cols as usize);
         let mut toast_bitmap: u64 = 0;
-        
+
         for idx in 0..num_cols {
             let tag = data.get_u8();
             match tag {
@@ -278,7 +343,7 @@ impl PgOutputParser {
                     if idx < 64 {
                         toast_bitmap |= 1u64 << idx;
                     }
-                },
+                }
                 b't' => {
                     let len = data.get_u32() as usize;
                     let val = data.split_to(len); // Zero-copy slice
@@ -287,8 +352,7 @@ impl PgOutputParser {
                 _ => return Err(anyhow!("Unknown column tag {}", tag)),
             }
         }
-        
+
         Ok(Tuple { cols, toast_bitmap })
     }
 }
-

@@ -3,6 +3,4 @@
 
 mod wal_handler;
 
-pub use wal_handler::{WalMessage, parse_replication_message, handle_xlog_data, handle_keepalive};
-
-
+pub use wal_handler::{handle_keepalive, handle_xlog_data, parse_replication_message, WalMessage};

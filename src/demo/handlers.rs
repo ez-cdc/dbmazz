@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use axum::{
     extract::State,
+    http::StatusCode,
     response::{
         sse::{Event, Sse},
         Html, IntoResponse,
     },
-    http::StatusCode,
     Json,
 };
 use futures::stream::Stream;
@@ -16,8 +16,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use super::{DemoPhase, DemoState, SinkDemoConfig, SourceDemoConfig};
 use super::traffic::TrafficGenerator;
+use super::{DemoPhase, DemoState, SinkDemoConfig, SourceDemoConfig};
 use crate::config::{
     Config, PostgresSourceConfig, SinkConfig, SinkType, SourceConfig, SourceType,
     StarRocksSinkConfig,
@@ -92,7 +92,10 @@ pub async fn test_connection(
     }
 }
 
-async fn test_postgres(state: Arc<DemoState>, req: TestConnectionRequest) -> axum::response::Response {
+async fn test_postgres(
+    state: Arc<DemoState>,
+    req: TestConnectionRequest,
+) -> axum::response::Response {
     let port = req.port.unwrap_or(5432);
     let url = format!(
         "postgres://{}:{}@{}:{}/{}",
@@ -245,15 +248,13 @@ pub async fn discover_tables(State(state): State<Arc<DemoState>>) -> impl IntoRe
         let guard = state.source_config.read().await;
         match guard.as_ref() {
             Some(s) => s.clone(),
-            None => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(
-                        json!({"ok": false, "error": "Source not configured. Test connection first."}),
-                    ),
-                )
-                    .into_response()
-            }
+            None => return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    json!({"ok": false, "error": "Source not configured. Test connection first."}),
+                ),
+            )
+                .into_response(),
         }
     };
 
@@ -563,7 +564,9 @@ pub async fn start_replication(
                 None => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"ok": false, "error": "Source not configured. Test connection first."})),
+                        Json(
+                            json!({"ok": false, "error": "Source not configured. Test connection first."}),
+                        ),
                     )
                 }
             },
@@ -591,7 +594,9 @@ pub async fn start_replication(
                 None => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(json!({"ok": false, "error": "Sink not configured. Test connection first."})),
+                        Json(
+                            json!({"ok": false, "error": "Sink not configured. Test connection first."}),
+                        ),
                     )
                 }
             },
@@ -602,7 +607,9 @@ pub async fn start_replication(
     if let Err(e) = ensure_starrocks_tables(&src, &sink, &req.tables).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"ok": false, "error": format!("Failed to prepare StarRocks tables: {}", e)})),
+            Json(
+                json!({"ok": false, "error": format!("Failed to prepare StarRocks tables: {}", e)}),
+            ),
         );
     }
 
@@ -692,7 +699,10 @@ pub async fn stop_replication(State(state): State<Arc<DemoState>>) -> impl IntoR
     *state.engine_state.write().await = None;
     *state.phase.write().await = DemoPhase::Stopped;
 
-    (StatusCode::OK, Json(json!({"ok": true, "state": "stopped"})))
+    (
+        StatusCode::OK,
+        Json(json!({"ok": true, "state": "stopped"})),
+    )
 }
 
 pub async fn pause_replication(State(state): State<Arc<DemoState>>) -> impl IntoResponse {
@@ -714,7 +724,10 @@ pub async fn resume_replication(State(state): State<Arc<DemoState>>) -> impl Int
     match engine.as_ref() {
         Some(shared) => {
             shared.set_state(CdcState::Running);
-            (StatusCode::OK, Json(json!({"ok": true, "state": "running"})))
+            (
+                StatusCode::OK,
+                Json(json!({"ok": true, "state": "running"})),
+            )
         }
         None => (
             StatusCode::BAD_REQUEST,

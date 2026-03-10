@@ -1,7 +1,7 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use curl::easy::{Easy, List};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 
 // TODO: This module handles FE->BE redirects from StarRocks with 127.0.0.1 rewriting.
 // It has not been validated whether this implementation is optimal in terms of:
@@ -12,6 +12,7 @@ use tracing::{debug, info};
 
 /// Result of a Stream Load
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LoadResult {
     pub status: String,
     pub loaded_rows: u64,
@@ -19,6 +20,7 @@ pub struct LoadResult {
 }
 
 /// Stream Load client using libcurl (supports Expect: 100-continue correctly)
+#[allow(dead_code)]
 pub struct CurlStreamLoader {
     base_url: String,
     database: String,
@@ -26,6 +28,7 @@ pub struct CurlStreamLoader {
     pass: String,
 }
 
+#[allow(dead_code)]
 impl CurlStreamLoader {
     pub fn new(base_url: String, database: String, user: String, pass: String) -> Self {
         Self {
@@ -139,8 +142,8 @@ impl CurlStreamLoader {
         // Configure body - libcurl will handle 100-continue protocol correctly
         let body_len = body.len();
         easy.post_field_size(body_len as u64)?;
-        easy.upload(true)?;  // Enable upload mode for PUT
-        
+        easy.upload(true)?; // Enable upload mode for PUT
+
         let body_for_read = body.clone();
         let mut offset: usize = 0;
         easy.read_function(move |buf| {
@@ -153,7 +156,7 @@ impl CurlStreamLoader {
             offset += to_copy;
             Ok(to_copy)
         })?;
-        
+
         // Timeout
         easy.timeout(std::time::Duration::from_secs(30))?;
 
@@ -168,18 +171,16 @@ impl CurlStreamLoader {
             transfer.header_function(|header| {
                 let header_str = String::from_utf8_lossy(header);
                 if header_str.to_lowercase().starts_with("location:") {
-                    redirect_location = Some(
-                        header_str[9..].trim().to_string()
-                    );
+                    redirect_location = Some(header_str[9..].trim().to_string());
                 }
                 true
             })?;
-            
+
             transfer.write_function(|data| {
                 response_body.extend_from_slice(data);
                 Ok(data.len())
             })?;
-            
+
             transfer.perform()?;
         }
 
@@ -198,7 +199,13 @@ impl CurlStreamLoader {
                 };
 
                 // Make second request to BE (redirect)
-                return Self::send_to_be(&corrected_location, user, pass, partial_cols_clone, body.clone());
+                return Self::send_to_be(
+                    &corrected_location,
+                    user,
+                    pass,
+                    partial_cols_clone,
+                    body.clone(),
+                );
             }
         }
 
@@ -207,34 +214,34 @@ impl CurlStreamLoader {
         // Parse JSON response
         let resp_json: serde_json::Value = serde_json::from_str(&response_body)
             .unwrap_or(serde_json::json!({"Status": "Unknown", "Message": response_body.clone()}));
-        
-        let status = resp_json["Status"].as_str().unwrap_or("Unknown").to_string();
+
+        let status = resp_json["Status"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string();
         let loaded_rows = resp_json["NumberLoadedRows"].as_u64().unwrap_or(0);
         let message = resp_json["Message"].as_str().unwrap_or("").to_string();
-        
+
         // Validate HTTP response
         if response_code >= 400 {
-            return Err(anyhow!(
-                "HTTP {}: {} - {}", 
-                response_code, status, message
-            ));
+            return Err(anyhow!("HTTP {}: {} - {}", response_code, status, message));
         }
-        
+
         // Validate StarRocks response
         if status != "Success" && status != "Publish Timeout" {
             // "Publish Timeout" is OK - the data was written
-            return Err(anyhow!(
-                "Stream Load failed: {} - {}", 
-                status, message
-            ));
+            return Err(anyhow!("Stream Load failed: {} - {}", status, message));
         }
-
 
         debug!(
             "Sent {} rows to StarRocks ({}.{})",
             loaded_rows,
             table_name.split('.').next_back().unwrap_or(table_name),
-            if partial_columns.is_some() { "partial" } else { "full" }
+            if partial_columns.is_some() {
+                "partial"
+            } else {
+                "full"
+            }
         );
 
         Ok(LoadResult {
@@ -244,20 +251,18 @@ impl CurlStreamLoader {
         })
     }
 
-
     /// Extracts the hostname from a URL (e.g., "http://starrocks:8030" -> "starrocks")
     fn extract_hostname(url: &str) -> Result<String> {
         let url_parts: Vec<&str> = url.split('/').collect();
         if url_parts.len() < 3 {
             return Err(anyhow!("Invalid URL format"));
         }
-        
+
         let host_port = url_parts[2];
         let hostname = host_port.split(':').next().unwrap_or(host_port);
-        
+
         Ok(hostname.to_string())
     }
-
 
     /// Sends data to BE after following a redirect (second request)
     fn send_to_be(
@@ -284,13 +289,12 @@ impl CurlStreamLoader {
         headers.append("strip_outer_array: true")?;
         headers.append("ignore_json_size: true")?;
         headers.append("max_filter_ratio: 0.2")?;
-        
+
         if let Some(ref cols) = partial_columns {
             headers.append("partial_update: true")?;
             headers.append("partial_update_mode: row")?;
             headers.append(&format!("columns: {}", cols.join(",")))?;
         }
-
 
         easy.http_headers(headers)?;
 
@@ -298,7 +302,7 @@ impl CurlStreamLoader {
         let body_len = body.len();
         easy.post_field_size(body_len as u64)?;
         easy.upload(true)?;
-        
+
         let body_for_read = body.clone();
         let mut offset: usize = 0;
         easy.read_function(move |buf| {
@@ -311,7 +315,6 @@ impl CurlStreamLoader {
             offset += to_copy;
             Ok(to_copy)
         })?;
-
 
         // Timeout
         easy.timeout(std::time::Duration::from_secs(30))?;
@@ -326,34 +329,31 @@ impl CurlStreamLoader {
             })?;
             transfer.perform()?;
         }
-        
+
         let response_code = easy.response_code()?;
         let response_body = String::from_utf8_lossy(&response_body).to_string();
 
         // Parse JSON response
         let resp_json: serde_json::Value = serde_json::from_str(&response_body)
             .unwrap_or(serde_json::json!({"Status": "Unknown", "Message": response_body.clone()}));
-        
-        let status = resp_json["Status"].as_str().unwrap_or("Unknown").to_string();
+
+        let status = resp_json["Status"]
+            .as_str()
+            .unwrap_or("Unknown")
+            .to_string();
         let loaded_rows = resp_json["NumberLoadedRows"].as_u64().unwrap_or(0);
         let message = resp_json["Message"].as_str().unwrap_or("").to_string();
-        
+
         // Validate HTTP response
         if response_code >= 400 {
-            return Err(anyhow!(
-                "HTTP {}: {} - {}", 
-                response_code, status, message
-            ));
+            return Err(anyhow!("HTTP {}: {} - {}", response_code, status, message));
         }
-        
+
         // Validar respuesta de StarRocks
         if status != "Success" && status != "Publish Timeout" {
-            return Err(anyhow!(
-                "Stream Load failed: {} - {}", 
-                status, message
-            ));
+            return Err(anyhow!("Stream Load failed: {} - {}", status, message));
         }
-        
+
         Ok(LoadResult {
             status,
             loaded_rows,

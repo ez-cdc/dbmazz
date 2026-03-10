@@ -22,9 +22,7 @@ pub enum CoreError {
     },
 
     /// Configuration errors
-    ConfigError {
-        message: String,
-    },
+    ConfigError { message: String },
 
     /// Serialization/deserialization errors
     #[allow(dead_code)]
@@ -34,24 +32,16 @@ pub enum CoreError {
     },
 
     /// Validation errors
-    ValidationError {
-        message: String,
-    },
+    ValidationError { message: String },
 
     /// Position tracking errors
-    PositionError {
-        message: String,
-    },
+    PositionError { message: String },
 
     /// Transaction errors
-    TransactionError {
-        message: String,
-    },
+    TransactionError { message: String },
 
     /// Schema-related errors
-    SchemaError {
-        message: String,
-    },
+    SchemaError { message: String },
 
     /// Generic internal errors
     InternalError {
@@ -215,9 +205,9 @@ impl std::error::Error for CoreError {
             | CoreError::SinkError { source, .. }
             | CoreError::ConnectionError { source, .. }
             | CoreError::SerializationError { source, .. }
-            | CoreError::InternalError { source, .. } => {
-                source.as_ref().map(|e| e.as_ref() as &dyn std::error::Error)
-            }
+            | CoreError::InternalError { source, .. } => source
+                .as_ref()
+                .map(|e| e.as_ref() as &dyn std::error::Error),
             _ => None,
         }
     }

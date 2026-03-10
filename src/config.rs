@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use std::env;
-use tracing::{info, warn};
+use tracing::info;
 
 // =============================================================================
 // Source Configuration
@@ -305,9 +305,7 @@ impl Config {
 
         let sink_url = required_env("SINK_URL")?;
 
-        let sink_port: u16 = optional_env("SINK_PORT", "9030")
-            .parse()
-            .unwrap_or(9030);
+        let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
 
         let sink_database = required_env("SINK_DATABASE")?;
 
@@ -350,7 +348,8 @@ impl Config {
         // Snapshot / backfill configuration
         let do_snapshot = env::var("DO_SNAPSHOT")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         // Default 50K rows per chunk. Each chunk is fully loaded in RAM (rows + JSON),
         // so for wide tables (~5-10 KB/row) this uses ~500 MB-1 GB peak memory.
@@ -368,7 +367,8 @@ impl Config {
 
         let initial_snapshot_only = env::var("INITIAL_SNAPSHOT_ONLY")
             .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
+            .to_lowercase()
+            == "true";
 
         Ok(Self {
             // New nested config
@@ -459,7 +459,6 @@ mod tests {
         env::remove_var("FLUSH_INTERVAL_MS");
         env::remove_var("GRPC_PORT");
         env::remove_var("INITIAL_SNAPSHOT_ONLY");
-
     }
 
     #[test]

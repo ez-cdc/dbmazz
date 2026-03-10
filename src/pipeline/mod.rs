@@ -1,12 +1,12 @@
 pub mod schema_cache;
 
-use crate::source::parser::{CdcMessage, CdcEvent};
 use crate::grpc::state::SharedState;
-use tokio::sync::mpsc;
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::sink::Sink;
+use crate::source::parser::{CdcEvent, CdcMessage};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 pub struct Pipeline {
@@ -22,10 +22,10 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(
-        rx: mpsc::Receiver<CdcEvent>, 
+        rx: mpsc::Receiver<CdcEvent>,
         sink: Box<dyn Sink + Send>,
         batch_size: usize,
-        batch_timeout: Duration
+        batch_timeout: Duration,
     ) -> Self {
         Self {
             rx,
@@ -130,7 +130,10 @@ impl Pipeline {
 
         // Graceful shutdown: flush any remaining batch
         if !batch.is_empty() {
-            warn!("Pipeline stopped with {} pending events in batch", batch.len());
+            warn!(
+                "Pipeline stopped with {} pending events in batch",
+                batch.len()
+            );
             self.flush_batch(&batch, last_lsn).await;
         }
         info!("Pipeline shutdown complete");
@@ -147,17 +150,23 @@ impl Pipeline {
                         for msg in batch {
                             let summary = match msg {
                                 CdcMessage::Insert { relation_id, .. } => {
-                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                    let table = self
+                                        .schema_cache
+                                        .get_table_name(*relation_id)
                                         .unwrap_or_else(|| format!("rel_{}", relation_id));
                                     Some(format!("INSERT:{}", table))
                                 }
                                 CdcMessage::Update { relation_id, .. } => {
-                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                    let table = self
+                                        .schema_cache
+                                        .get_table_name(*relation_id)
                                         .unwrap_or_else(|| format!("rel_{}", relation_id));
                                     Some(format!("UPDATE:{}", table))
                                 }
                                 CdcMessage::Delete { relation_id, .. } => {
-                                    let table = self.schema_cache.get_table_name(*relation_id)
+                                    let table = self
+                                        .schema_cache
+                                        .get_table_name(*relation_id)
                                         .unwrap_or_else(|| format!("rel_{}", relation_id));
                                     Some(format!("DELETE:{}", table))
                                 }
@@ -203,7 +212,11 @@ impl Pipeline {
                 // but not persisted. On crash, these events are LOST because we never
                 // checkpointed them.
                 error!("CRITICAL: Sink push_batch failed: {}", e);
-                error!("CRITICAL: Batch details: {} events, LSN 0x{:X}", batch.len(), lsn);
+                error!(
+                    "CRITICAL: Batch details: {} events, LSN 0x{:X}",
+                    batch.len(),
+                    lsn
+                );
 
                 // Set CDC state to Stopped to signal error
                 if let Some(ref state) = self.shared_state {
@@ -217,5 +230,3 @@ impl Pipeline {
         }
     }
 }
-
-

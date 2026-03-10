@@ -7,7 +7,7 @@
 //! - SQL identifier validation to prevent SQL injection
 //! - Security helpers for sanitizing user input
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 /// Validates that a SQL identifier (table name, schema name, column name, etc.)
 /// contains only safe characters.
@@ -80,12 +80,8 @@ pub fn validate_sql_identifier(name: &str) -> Result<&str> {
     // Allow only safe characters: alphanumeric, underscore, dot, hyphen, double quote, space (for quoted identifiers)
     // This prevents SQL injection through table/column names
     let is_valid = name.chars().all(|c| {
-        c.is_alphanumeric()
-        || c == '_'
-        || c == '.'
-        || c == '-'
-        || c == '"'
-        || c == ' '  // Allow spaces only within quoted identifiers
+        c.is_alphanumeric() || c == '_' || c == '.' || c == '-' || c == '"' || c == ' '
+        // Allow spaces only within quoted identifiers
     });
 
     if !is_valid {

@@ -7,8 +7,8 @@
 //! for PostgreSQL CDC sources.
 
 use anyhow::{bail, Result};
-use url::Url;
 use tracing::warn;
+use url::Url;
 
 /// PostgreSQL-specific source configuration
 ///
@@ -103,7 +103,10 @@ pub fn validate_postgres_url(url: &str) -> Result<()> {
 
     match parsed.scheme() {
         "postgres" | "postgresql" => {}
-        other => bail!("Invalid scheme '{}', expected 'postgres' or 'postgresql'", other),
+        other => bail!(
+            "Invalid scheme '{}', expected 'postgres' or 'postgresql'",
+            other
+        ),
     }
 
     if parsed.host_str().is_none() {
@@ -125,8 +128,8 @@ pub fn parse_lsn(lsn_str: &str) -> Result<u64> {
         bail!("Invalid LSN format: expected X/Y, got '{}'", lsn_str);
     }
 
-    let high =
-        u64::from_str_radix(parts[0], 16).map_err(|e| anyhow::anyhow!("Invalid LSN high: {}", e))?;
+    let high = u64::from_str_radix(parts[0], 16)
+        .map_err(|e| anyhow::anyhow!("Invalid LSN high: {}", e))?;
     let low =
         u64::from_str_radix(parts[1], 16).map_err(|e| anyhow::anyhow!("Invalid LSN low: {}", e))?;
 

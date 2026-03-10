@@ -97,26 +97,26 @@ impl TypeMapper {
     /// StarRocks SQL type string
     pub fn pg_type_to_starrocks(&self, pg_type_id: u32) -> &'static str {
         match pg_type_id {
-            16 => "BOOLEAN",           // bool
-            21 => "SMALLINT",          // int2
-            23 => "INT",               // int4
-            20 => "BIGINT",            // int8
-            700 => "FLOAT",            // float4
-            701 => "DOUBLE",           // float8
-            1700 => "DECIMAL(38,9)",   // numeric
-            1114 => "DATETIME",        // timestamp
-            1184 => "DATETIME",        // timestamptz
-            25 => "STRING",            // text
-            1043 => "STRING",          // varchar
-            1042 => "STRING",          // char/bpchar
-            3802 => "JSON",            // jsonb
-            114 => "JSON",             // json
-            2950 => "STRING",          // uuid
-            17 => "VARBINARY",         // bytea
-            1082 => "DATE",            // date
-            1083 => "STRING",          // time
-            1266 => "STRING",          // timetz
-            _ => "STRING",             // default fallback
+            16 => "BOOLEAN",         // bool
+            21 => "SMALLINT",        // int2
+            23 => "INT",             // int4
+            20 => "BIGINT",          // int8
+            700 => "FLOAT",          // float4
+            701 => "DOUBLE",         // float8
+            1700 => "DECIMAL(38,9)", // numeric
+            1114 => "DATETIME",      // timestamp
+            1184 => "DATETIME",      // timestamptz
+            25 => "STRING",          // text
+            1043 => "STRING",        // varchar
+            1042 => "STRING",        // char/bpchar
+            3802 => "JSON",          // jsonb
+            114 => "JSON",           // json
+            2950 => "STRING",        // uuid
+            17 => "VARBINARY",       // bytea
+            1082 => "DATE",          // date
+            1083 => "STRING",        // time
+            1266 => "STRING",        // timetz
+            _ => "STRING",           // default fallback
         }
     }
 
@@ -187,24 +187,20 @@ impl TypeMapper {
 
         match pg_type_id {
             // Boolean
-            16 => {
-                match text.to_lowercase().as_str() {
-                    "t" | "true" | "1" => serde_json::json!(true),
-                    _ => serde_json::json!(false),
-                }
-            }
+            16 => match text.to_lowercase().as_str() {
+                "t" | "true" | "1" => serde_json::json!(true),
+                _ => serde_json::json!(false),
+            },
             // Integer types (INT2, INT4, INT8)
-            21 | 23 | 20 => {
-                text.parse::<i64>()
-                    .map(|n| serde_json::json!(n))
-                    .unwrap_or_else(|_| serde_json::json!(text))
-            }
+            21 | 23 | 20 => text
+                .parse::<i64>()
+                .map(|n| serde_json::json!(n))
+                .unwrap_or_else(|_| serde_json::json!(text)),
             // Float types (FLOAT4, FLOAT8)
-            700 | 701 => {
-                text.parse::<f64>()
-                    .map(|f| serde_json::json!(f))
-                    .unwrap_or_else(|_| serde_json::json!(text))
-            }
+            700 | 701 => text
+                .parse::<f64>()
+                .map(|f| serde_json::json!(f))
+                .unwrap_or_else(|_| serde_json::json!(text)),
             // Money - strip currency symbol
             790 => {
                 let cleaned = strip_money_symbol(text);
@@ -220,9 +216,7 @@ impl TypeMapper {
                 serde_json::json!(normalized)
             }
             // JSON/JSONB
-            114 | 3802 => {
-                serde_json::from_str(text).unwrap_or(serde_json::json!(text))
-            }
+            114 | 3802 => serde_json::from_str(text).unwrap_or(serde_json::json!(text)),
             // Integer arrays
             1005 | 1007 | 1016 => {
                 let json_str = parse_pg_array(text, "int");
@@ -281,13 +275,19 @@ mod tests {
         let mapper = TypeMapper::new();
 
         assert_eq!(
-            mapper.to_starrocks_type(&DataType::Decimal { precision: 10, scale: 2 }),
+            mapper.to_starrocks_type(&DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }),
             "DECIMAL(10,2)"
         );
 
         // Test precision capping at 38
         assert_eq!(
-            mapper.to_starrocks_type(&DataType::Decimal { precision: 50, scale: 10 }),
+            mapper.to_starrocks_type(&DataType::Decimal {
+                precision: 50,
+                scale: 10
+            }),
             "DECIMAL(38,10)"
         );
     }
@@ -297,9 +297,18 @@ mod tests {
         let mapper = TypeMapper::new();
 
         assert_eq!(mapper.value_to_json(&Value::Null), serde_json::Value::Null);
-        assert_eq!(mapper.value_to_json(&Value::Bool(true)), serde_json::json!(true));
-        assert_eq!(mapper.value_to_json(&Value::Int64(42)), serde_json::json!(42));
-        assert_eq!(mapper.value_to_json(&Value::Float64(3.5)), serde_json::json!(3.5));
+        assert_eq!(
+            mapper.value_to_json(&Value::Bool(true)),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            mapper.value_to_json(&Value::Int64(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            mapper.value_to_json(&Value::Float64(3.5)),
+            serde_json::json!(3.5)
+        );
         assert_eq!(
             mapper.value_to_json(&Value::String("hello".to_string())),
             serde_json::json!("hello")
@@ -309,7 +318,9 @@ mod tests {
             serde_json::json!("123.45")
         );
         assert_eq!(
-            mapper.value_to_json(&Value::Uuid("550e8400-e29b-41d4-a716-446655440000".to_string())),
+            mapper.value_to_json(&Value::Uuid(
+                "550e8400-e29b-41d4-a716-446655440000".to_string()
+            )),
             serde_json::json!("550e8400-e29b-41d4-a716-446655440000")
         );
     }
@@ -393,9 +404,18 @@ mod tests {
     #[test]
     fn test_pg_text_to_json_money() {
         let mapper = TypeMapper::new();
-        assert_eq!(mapper.pg_text_to_json("$99.95", 790), serde_json::json!("99.95"));
-        assert_eq!(mapper.pg_text_to_json("$1,234.56", 790), serde_json::json!("1234.56"));
-        assert_eq!(mapper.pg_text_to_json("-$100.00", 790), serde_json::json!("-100.00"));
+        assert_eq!(
+            mapper.pg_text_to_json("$99.95", 790),
+            serde_json::json!("99.95")
+        );
+        assert_eq!(
+            mapper.pg_text_to_json("$1,234.56", 790),
+            serde_json::json!("1234.56")
+        );
+        assert_eq!(
+            mapper.pg_text_to_json("-$100.00", 790),
+            serde_json::json!("-100.00")
+        );
     }
 
     #[test]

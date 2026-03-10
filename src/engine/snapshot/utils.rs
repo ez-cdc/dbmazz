@@ -16,8 +16,9 @@ pub async fn find_integer_pk_column(client: &Client, table_name: &str) -> Result
         ("public".to_string(), table_name.to_string())
     };
 
-    let rows = client.query(
-        "SELECT a.attname
+    let rows = client
+        .query(
+            "SELECT a.attname
          FROM pg_index i
          JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
          JOIN pg_class c ON c.oid = i.indrelid
@@ -29,8 +30,10 @@ pub async fn find_integer_pk_column(client: &Client, table_name: &str) -> Result
            AND t.typname IN ('int2', 'int4', 'int8')
          ORDER BY a.attnum
          LIMIT 1",
-        &[&schema, &table],
-    ).await.with_context(|| format!("failed to find integer PK for {}", table_name))?;
+            &[&schema, &table],
+        )
+        .await
+        .with_context(|| format!("failed to find integer PK for {}", table_name))?;
 
     Ok(rows.first().map(|r| r.get::<_, String>(0)))
 }
