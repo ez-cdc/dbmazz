@@ -1,0 +1,40 @@
+#!/bin/bash
+# pre-push hook — blocks direct pushes to main
+#
+# Activate with: git config core.hooksPath .githooks
+#
+# Allows: pushing feature branches, pushing tags
+# Blocks: pushing to refs/heads/main
+#
+# To bypass in an emergency: git push --no-verify (requires explicit justification)
+
+REMOTE="$1"
+
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    # Allow tag pushes
+    if echo "$REMOTE_REF" | grep -qE '^refs/tags/'; then
+        continue
+    fi
+
+    # Block pushes to main
+    if [ "$REMOTE_REF" = "refs/heads/main" ]; then
+        echo ""
+        echo "========================================="
+        echo "  BLOCKED: Direct push to main"
+        echo "========================================="
+        echo ""
+        echo "  Use a feature branch and create a PR:"
+        echo ""
+        echo "    git checkout -b my-feature"
+        echo "    git commit -m 'feat: my change'"
+        echo "    git push origin my-feature"
+        echo "    gh pr create"
+        echo ""
+        echo "  Emergency bypass: git push --no-verify"
+        echo "========================================="
+        echo ""
+        exit 1
+    fi
+done
+
+exit 0
