@@ -34,7 +34,8 @@ use super::utils::find_integer_pk_column;
 use crate::config::Config;
 use crate::connectors::sinks::starrocks::stream_load::{StreamLoadClient, StreamLoadOptions};
 use crate::connectors::sinks::starrocks::StarRocksSinkConfig;
-use crate::grpc::state::{SharedState, Stage};
+use crate::grpc::state::{CdcState, SharedState, Stage};
+use tokio::time::Duration;
 
 /// Pre-computed metadata for a snapshot table (avoids redundant catalog queries per chunk).
 struct TableMeta {
@@ -221,6 +222,21 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
     // Consumer: spawn worker tasks as chunks arrive from the producer.
     let mut join_set = JoinSet::new();
     while let Some((table, chunk)) = rx.recv().await {
+        // Respect pause flag: wait until resumed before processing next chunk.
+        // In-flight chunks (already spawned) continue to completion.
+        while shared_state.is_snapshot_paused() {
+            shared_state
+                .set_stage(Stage::Snapshot, "Paused (outside execution window)")
+                .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if shared_state.state() == CdcState::Stopped {
+                return Ok(());
+            }
+        }
+        shared_state
+            .set_stage(Stage::Snapshot, "Running snapshot")
+            .await;
+
         let pool = Arc::clone(&pool);
         let semaphore = Arc::clone(&semaphore);
         let sl_client = Arc::clone(&sl_client);

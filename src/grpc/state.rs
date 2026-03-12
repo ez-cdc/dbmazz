@@ -81,6 +81,8 @@ pub struct SharedState {
     pub snapshot_active: AtomicBool,
     // Snapshot error message (set on failure, cleared on new snapshot start)
     pub snapshot_error: RwLock<Option<String>>,
+    // True when snapshot is paused by execution window schedule
+    pub snapshot_paused: AtomicBool,
     /// Per-table snapshot progress (written by snapshot worker, read by gRPC status service)
     pub table_progress: RwLock<HashMap<String, TableProgress>>,
     /// Finished snapshot chunks: relation_id -> {(start_pk, end_pk) -> hw_lsn}
@@ -122,6 +124,7 @@ impl SharedState {
             snapshot_trigger,
             snapshot_active: AtomicBool::new(false),
             snapshot_error: RwLock::new(None),
+            snapshot_paused: AtomicBool::new(false),
             table_progress: RwLock::new(HashMap::new()),
             finished_chunks: RwLock::new(HashMap::new()),
             relation_pk_cols: RwLock::new(HashMap::new()),
@@ -303,6 +306,14 @@ impl SharedState {
     #[allow(dead_code)]
     pub async fn snapshot_error(&self) -> Option<String> {
         self.snapshot_error.read().await.clone()
+    }
+
+    pub fn set_snapshot_paused(&self, paused: bool) {
+        self.snapshot_paused.store(paused, Ordering::Release);
+    }
+
+    pub fn is_snapshot_paused(&self) -> bool {
+        self.snapshot_paused.load(Ordering::Acquire)
     }
 
     /// Register a finished chunk so the WAL handler can suppress duplicate events.
