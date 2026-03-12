@@ -39,6 +39,8 @@ service CdcControlService {
   rpc Stop(StopRequest) returns (ControlResponse);
   rpc ReloadConfig(ReloadConfigRequest) returns (ControlResponse);
   rpc StartSnapshot(StartSnapshotRequest) returns (ControlResponse);
+  rpc PauseSnapshot(PauseSnapshotRequest) returns (ControlResponse);
+  rpc ResumeSnapshot(ResumeSnapshotRequest) returns (ControlResponse);
 }
 
 message PauseRequest {}
@@ -56,6 +58,8 @@ message ReloadConfigRequest {
   repeated string tables = 3;      // empty = no change
 }
 message StartSnapshotRequest {}
+message PauseSnapshotRequest {}
+message ResumeSnapshotRequest {}
 
 message ControlResponse {
   bool success = 1;
@@ -88,6 +92,8 @@ message StatusResponse {
   uint64 snapshot_rows_synced    = 10;
   // Per-table snapshot progress breakdown
   repeated TableSnapshotProgress table_progress = 11;
+  // True when snapshot is paused by execution window schedule
+  bool snapshot_paused = 12;
 }
 
 // Per-table snapshot progress (reported within StatusResponse)
