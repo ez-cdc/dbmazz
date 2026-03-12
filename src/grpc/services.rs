@@ -105,6 +105,8 @@ impl CdcControlService for CdcControlServiceImpl {
             .shared_state
             .compare_and_set_state(CdcState::Running, CdcState::Paused)
         {
+            // Also pause snapshot workers so "pause daemon" = "pause everything"
+            self.shared_state.set_snapshot_paused(true);
             Ok(Response::new(ControlResponse {
                 success: true,
                 message: "CDC paused successfully".to_string(),
@@ -132,6 +134,8 @@ impl CdcControlService for CdcControlServiceImpl {
             .shared_state
             .compare_and_set_state(CdcState::Paused, CdcState::Running)
         {
+            // Also resume snapshot workers so "resume daemon" = "resume everything"
+            self.shared_state.set_snapshot_paused(false);
             Ok(Response::new(ControlResponse {
                 success: true,
                 message: "CDC resumed successfully".to_string(),
