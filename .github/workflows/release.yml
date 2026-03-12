@@ -10,7 +10,7 @@ env:
   GCS_BUCKET: ez-cdc-releases-gcp
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -19,110 +19,179 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Calculate version from conventional commits
+        id: version
+        run: |
+          # Get latest semver tag
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+
+          # Parse current version
+          VERSION=${LATEST_TAG#v}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          # Get commit subjects since last tag
+          COMMITS=$(git log "$LATEST_TAG"..HEAD --pretty=format:"%s" 2>/dev/null)
+
+          if [ -z "$COMMITS" ]; then
+            echo "No new commits since $LATEST_TAG"
+            echo "SKIP=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Commits since $LATEST_TAG:"
+          echo "$COMMITS"
+          echo ""
+
+          # Determine bump type from conventional commits
+          # Priority: major > minor > patch
+          BUMP="none"
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:'; then
+              BUMP="major"
+            fi
+            if echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
+              if [ "$BUMP" != "major" ]; then
+                BUMP="minor"
+              fi
+            fi
+            if echo "$msg" | grep -qE '^(fix|refactor|perf|security)(\(.+\))?:'; then
+              if [ "$BUMP" = "none" ]; then
+                BUMP="patch"
+              fi
+            fi
+            if echo "$msg" | grep -qE '^(docs|test|chore|style|ci|build)(\(.+\))?:'; then
+              if [ "$BUMP" = "none" ]; then
+                BUMP="patch"
+              fi
+            fi
+          done <<< "$COMMITS"
+
+          if [ "$BUMP" = "none" ]; then
+            echo "No conventional commits found, skipping release"
+            echo "SKIP=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Calculate new version
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          NEW_TAG="v${NEW_VERSION}"
+          echo "Bump type: $BUMP"
+          echo "New version: $NEW_VERSION (tag: $NEW_TAG)"
+          echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "BUMP=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "SKIP=false" >> "$GITHUB_OUTPUT"
+
+          # Build changelog
+          {
+            echo "CHANGELOG<<CHANGELOG_EOF"
+            git log "$LATEST_TAG"..HEAD --pretty=format:"- %s" 2>/dev/null
+            echo ""
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install Rust
+        if: steps.version.outputs.SKIP != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
       - name: Install protoc and musl tools
+        if: steps.version.outputs.SKIP != 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler musl-tools pkg-config libssl-dev perl make jq
 
       - name: Cache cargo registry
+        if: steps.version.outputs.SKIP != 'true'
         uses: actions/cache@v5
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
+        if: steps.version.outputs.SKIP != 'true'
         uses: actions/cache@v5
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
+        if: steps.version.outputs.SKIP != 'true'
         uses: actions/cache@v5
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build dbmazz for musl
+        if: steps.version.outputs.SKIP != 'true'
         env:
           CARGO_TERM_COLOR: always
         run: cargo build --release --target x86_64-unknown-linux-musl --verbose
 
       - name: Configure AWS credentials
+        if: steps.version.outputs.SKIP != 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-west-2
 
-      - name: Calculate next version from S3
-        id: version
-        run: |
-          # List all version directories in S3 for this component
-          VERSIONS=$(aws s3 ls "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/" 2>/dev/null | grep -E '^\s*PRE\s+[0-9]+\.[0-9]+\.[0-9]+/' | awk '{print $2}' | tr -d '/' | sort -t. -k1,1n -k2,2n -k3,3n)
-
-          if [ -z "$VERSIONS" ]; then
-            # No versions exist, start at 0.1.0
-            NEXT_VERSION="0.1.0"
-          else
-            # Get the latest version
-            LATEST=$(echo "$VERSIONS" | tail -1)
-            echo "Latest version in S3: $LATEST"
-
-            # Parse and increment patch version
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
-            NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          fi
-
-          echo "Next version: $NEXT_VERSION"
-          echo "VERSION=$NEXT_VERSION" >> $GITHUB_OUTPUT
-
       - name: Calculate checksum
+        if: steps.version.outputs.SKIP != 'true'
         id: checksum
         run: |
           CHECKSUM=$(sha256sum target/x86_64-unknown-linux-musl/release/dbmazz | cut -d' ' -f1)
           echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
 
       - name: Upload versioned binary to S3
+        if: steps.version.outputs.SKIP != 'true'
         run: |
-          # Upload to versioned path: s3://ez-cdc-releases/dbmazz/0.1.0/dbmazz-linux-amd64
           aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
             "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
 
-          # Also upload checksum file
           echo "${{ steps.checksum.outputs.CHECKSUM }}  dbmazz-linux-amd64" > checksum.txt
           aws s3 cp checksum.txt \
             "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
 
       - name: Update latest binary in S3
+        if: steps.version.outputs.SKIP != 'true'
         run: |
-          # Update the latest path for quick access
           aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
             "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
 
-          # Write version marker
           echo "${{ steps.version.outputs.VERSION }}" > version.txt
           aws s3 cp version.txt \
             "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
 
-      # =====================================================================
       # Upload to GCS (GCP)
-      # =====================================================================
       - name: Authenticate to GCP
+        if: steps.version.outputs.SKIP != 'true'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/657615647135/locations/global/workloadIdentityPools/github-ci/providers/github
           service_account: github-ci@ez-cdc-platform.iam.gserviceaccount.com
 
       - name: Set up Cloud SDK
+        if: steps.version.outputs.SKIP != 'true'
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Upload versioned binary to GCS
+        if: steps.version.outputs.SKIP != 'true'
         run: |
           gcloud storage cp target/x86_64-unknown-linux-musl/release/dbmazz \
             "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
@@ -132,6 +201,7 @@ jobs:
             "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
 
       - name: Update latest binary in GCS
+        if: steps.version.outputs.SKIP != 'true'
         run: |
           gcloud storage cp target/x86_64-unknown-linux-musl/release/dbmazz \
             "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
@@ -140,10 +210,34 @@ jobs:
           gcloud storage cp version.txt \
             "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
 
-      - name: Print deployment info
+      # Create git tag after successful upload
+      - name: Create and push git tag
+        if: steps.version.outputs.SKIP != 'true'
+        env:
+          NEW_TAG: ${{ steps.version.outputs.TAG }}
+          BUMP: ${{ steps.version.outputs.BUMP }}
+          CHANGELOG: ${{ steps.version.outputs.CHANGELOG }}
         run: |
-          echo "Deployed dbmazz version: ${{ steps.version.outputs.VERSION }}"
-          echo "Checksum (SHA256): ${{ steps.checksum.outputs.CHECKSUM }}"
-          echo "Binaries available at:"
-          echo "   AWS: s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
-          echo "   GCP: gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "$NEW_TAG ($BUMP)
+
+          $CHANGELOG"
+          git push origin "$NEW_TAG"
+          echo "Created and pushed tag: $NEW_TAG"
+
+      - name: Summary
+        if: steps.version.outputs.SKIP != 'true'
+        run: |
+          echo "## Release: ${{ env.COMPONENT }} ${{ steps.version.outputs.TAG }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Bump:** ${{ steps.version.outputs.BUMP }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Checksum:** ${{ steps.checksum.outputs.CHECKSUM }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Binaries" >> "$GITHUB_STEP_SUMMARY"
+          echo "- AWS: \`s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GCP: \`gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Changelog" >> "$GITHUB_STEP_SUMMARY"
+          echo "${{ steps.version.outputs.CHANGELOG }}" >> "$GITHUB_STEP_SUMMARY"
