@@ -22,8 +22,9 @@ use dbmazz::{
     health_service_server::{HealthService, HealthServiceServer},
     status_response::CdcState as ProtoCdcState,
     ControlResponse, DrainRequest, HealthCheckRequest, HealthCheckResponse, MetricsRequest,
-    MetricsResponse, PauseRequest, ReloadConfigRequest, ResumeRequest, StartSnapshotRequest,
-    StatusRequest, StatusResponse, StopRequest, TableSnapshotProgress,
+    MetricsResponse, PauseRequest, PauseSnapshotRequest, ReloadConfigRequest, ResumeRequest,
+    ResumeSnapshotRequest, StartSnapshotRequest, StatusRequest, StatusResponse, StopRequest,
+    TableSnapshotProgress,
 };
 
 // ============================================================================
@@ -257,6 +258,34 @@ impl CdcControlService for CdcControlServiceImpl {
             message: "Snapshot triggered".to_string(),
         }))
     }
+
+    async fn pause_snapshot(
+        &self,
+        _request: Request<PauseSnapshotRequest>,
+    ) -> Result<Response<ControlResponse>, Status> {
+        if !self.shared_state.is_snapshot_active() {
+            return Ok(Response::new(ControlResponse {
+                success: true,
+                message: "No snapshot running".to_string(),
+            }));
+        }
+        self.shared_state.set_snapshot_paused(true);
+        Ok(Response::new(ControlResponse {
+            success: true,
+            message: "Snapshot paused".to_string(),
+        }))
+    }
+
+    async fn resume_snapshot(
+        &self,
+        _request: Request<ResumeSnapshotRequest>,
+    ) -> Result<Response<ControlResponse>, Status> {
+        self.shared_state.set_snapshot_paused(false);
+        Ok(Response::new(ControlResponse {
+            success: true,
+            message: "Snapshot resumed".to_string(),
+        }))
+    }
 }
 
 pub fn control_service(
@@ -326,6 +355,7 @@ impl CdcStatusService for CdcStatusServiceImpl {
             snapshot_chunks_done: self.shared_state.snapshot_chunks_done(),
             snapshot_rows_synced: self.shared_state.snapshot_rows_synced(),
             table_progress,
+            snapshot_paused: self.shared_state.is_snapshot_paused(),
         }))
     }
 }
