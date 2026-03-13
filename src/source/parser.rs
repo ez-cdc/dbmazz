@@ -88,6 +88,7 @@ pub struct Tuple {
 
 impl Tuple {
     /// O(1) - single CPU instruction (test bitmap != 0)
+    #[allow(dead_code)]
     #[inline]
     pub fn has_toast(&self) -> bool {
         self.toast_bitmap != 0
@@ -101,6 +102,7 @@ impl Tuple {
     }
 
     /// Returns true if the column at `idx` is a TOAST column - O(1)
+    #[allow(dead_code)]
     #[inline]
     pub fn is_toast_column(&self, idx: usize) -> bool {
         if idx >= 64 {

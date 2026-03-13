@@ -103,6 +103,175 @@ pub fn validate_sql_identifier(name: &str) -> Result<&str> {
     Ok(name)
 }
 
+// --- PostgreSQL value conversion utilities ---
+
+/// Parse PostgreSQL array text format into a JSON array string.
+///
+/// PostgreSQL arrays use `{elem1,elem2,...}` format. This converts
+/// to JSON array format `[elem1,elem2,...]`.
+pub fn parse_pg_array(text: &str, element_type: &str) -> String {
+    let trimmed = text.trim();
+
+    if trimmed == "{}" {
+        return "[]".to_string();
+    }
+
+    let inner = match trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) {
+        Some(s) => s,
+        None => {
+            return format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+        }
+    };
+
+    let elements = parse_pg_array_elements(inner);
+
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('[');
+
+    for (i, elem) in elements.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+
+        if elem.eq_ignore_ascii_case("NULL") {
+            out.push_str("null");
+        } else {
+            match element_type {
+                "int" => {
+                    if elem.parse::<i64>().is_ok() {
+                        out.push_str(elem);
+                    } else {
+                        json_quote_into(&mut out, elem);
+                    }
+                }
+                "float" => match elem.parse::<f64>() {
+                    Ok(f) if f.is_finite() => out.push_str(elem),
+                    _ => json_quote_into(&mut out, elem),
+                },
+                _ => {
+                    json_quote_into(&mut out, elem);
+                }
+            }
+        }
+    }
+
+    out.push(']');
+    out
+}
+
+fn parse_pg_array_elements(inner: &str) -> Vec<String> {
+    let mut elements = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = inner.chars();
+
+    while let Some(ch) = chars.next() {
+        if in_quotes {
+            if ch == '\\' {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            } else if ch == '"' {
+                in_quotes = false;
+            } else {
+                current.push(ch);
+            }
+        } else {
+            match ch {
+                '"' => in_quotes = true,
+                ',' => {
+                    elements.push(std::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            }
+        }
+    }
+
+    if !current.is_empty() || !elements.is_empty() {
+        elements.push(current);
+    }
+
+    elements
+}
+
+fn json_quote_into(out: &mut String, s: &str) {
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Normalize a PostgreSQL `timestamptz` text value to UTC without offset.
+pub fn normalize_timestamptz(text: &str) -> String {
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    let parse_result = DateTime::<FixedOffset>::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .or_else(|_| {
+            let expanded = expand_short_tz_offset(text);
+            DateTime::<FixedOffset>::parse_from_str(&expanded, "%Y-%m-%d %H:%M:%S%.f%:z")
+        });
+
+    match parse_result {
+        Ok(dt) => {
+            let utc = dt.with_timezone(&Utc);
+            if text.contains('.') {
+                utc.format("%Y-%m-%d %H:%M:%S%.6f").to_string()
+            } else {
+                utc.format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
+fn expand_short_tz_offset(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+
+    if len >= 3 {
+        let sign_pos = len - 3;
+        let sign = bytes[sign_pos];
+        if (sign == b'+' || sign == b'-')
+            && bytes[sign_pos + 1].is_ascii_digit()
+            && bytes[sign_pos + 2].is_ascii_digit()
+        {
+            return format!("{}:00", text);
+        }
+    }
+
+    text.to_string()
+}
+
+/// Strip currency symbols from a PostgreSQL `money` text value.
+pub fn strip_money_symbol(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == '.' || *c == ',')
+        .collect();
+
+    let has_dot = cleaned.contains('.');
+    let has_comma = cleaned.contains(',');
+
+    if has_dot && has_comma {
+        cleaned.replace(',', "")
+    } else if has_comma && !has_dot {
+        cleaned.replacen(',', ".", 1)
+    } else {
+        cleaned
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +347,64 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("SQL comment patterns"));
+    }
+
+    #[test]
+    fn test_parse_pg_array_int() {
+        assert_eq!(parse_pg_array("{1,2,3}", "int"), "[1,2,3]");
+        assert_eq!(parse_pg_array("{-10,0,42}", "int"), "[-10,0,42]");
+        assert_eq!(parse_pg_array("{}", "int"), "[]");
+        assert_eq!(parse_pg_array("{NULL,1,2}", "int"), "[null,1,2]");
+    }
+
+    #[test]
+    fn test_parse_pg_array_float() {
+        assert_eq!(parse_pg_array("{1.5,2.3,3.0}", "float"), "[1.5,2.3,3.0]");
+        assert_eq!(parse_pg_array("{NaN}", "float"), "[\"NaN\"]");
+        assert_eq!(parse_pg_array("{NULL,1.0}", "float"), "[null,1.0]");
+    }
+
+    #[test]
+    fn test_parse_pg_array_text() {
+        assert_eq!(
+            parse_pg_array("{hello,world}", "text"),
+            "[\"hello\",\"world\"]"
+        );
+        assert_eq!(parse_pg_array("{}", "text"), "[]");
+        assert_eq!(parse_pg_array("{NULL}", "text"), "[null]");
+    }
+
+    #[test]
+    fn test_normalize_timestamptz() {
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+05:30"),
+            "2024-06-15 12:00:00"
+        );
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+00:00"),
+            "2024-06-15 17:30:00"
+        );
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00+00"),
+            "2024-06-15 17:30:00"
+        );
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00-03:00"),
+            "2024-06-15 20:30:00"
+        );
+        assert_eq!(
+            normalize_timestamptz("2024-06-15 17:30:00.123456+05:30"),
+            "2024-06-15 12:00:00.123456"
+        );
+        assert_eq!(normalize_timestamptz("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn test_strip_money_symbol() {
+        assert_eq!(strip_money_symbol("$99.95"), "99.95");
+        assert_eq!(strip_money_symbol("$1,234.56"), "1234.56");
+        assert_eq!(strip_money_symbol("-$100.00"), "-100.00");
+        assert_eq!(strip_money_symbol("€99,95"), "99.95");
+        assert_eq!(strip_money_symbol("42.50"), "42.50");
     }
 }

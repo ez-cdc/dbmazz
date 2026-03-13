@@ -197,10 +197,9 @@ impl CdcEngine {
 
     /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
-        let state_store = self
-            .state_store
-            .as_ref()
-            .expect("state_store must be initialized before load_checkpoint");
+        let state_store = self.state_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("state_store must be initialized before load_checkpoint")
+        })?;
         let last_lsn = state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
 
@@ -492,10 +491,9 @@ impl CdcEngine {
         // 3. WAL data is gone → permanent data loss
 
         // 1. Save checkpoint to persistent storage
-        let state_store = self
-            .state_store
-            .as_ref()
-            .expect("state_store must be initialized before checkpoint feedback");
+        let state_store = self.state_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("state_store must be initialized before checkpoint feedback")
+        })?;
         if let Err(e) = state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await

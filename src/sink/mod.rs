@@ -1,6 +1,4 @@
 pub mod adapter;
-pub mod curl_loader;
-pub mod starrocks;
 
 use crate::pipeline::schema_cache::{SchemaCache, SchemaDelta};
 use crate::source::parser::CdcMessage;
