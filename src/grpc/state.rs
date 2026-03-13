@@ -361,3 +361,183 @@ impl SharedState {
         true // PK not in any finished chunk → emit
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state() -> Arc<SharedState> {
+        SharedState::new(CdcConfig {
+            flush_size: 1000,
+            flush_interval_ms: 5000,
+            tables: vec!["public.users".to_string()],
+            slot_name: "test_slot".to_string(),
+        })
+    }
+
+    // ── Fast-path: no snapshot active ──────────────────────────────
+
+    #[tokio::test]
+    async fn should_emit_true_when_no_snapshot() {
+        let state = make_state();
+        // snapshot_active is false by default
+        assert!(state.should_emit(1, 100, Some(42)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_true_when_no_pk() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // No PK → can't deduplicate → emit
+        assert!(state.should_emit(1, 100, None).await);
+    }
+
+    // ── No chunks registered for relation ──────────────────────────
+
+    #[tokio::test]
+    async fn should_emit_true_when_no_chunks_for_relation() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // No chunks registered at all
+        assert!(state.should_emit(1, 100, Some(50)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_true_when_different_relation() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // Register chunk for relation 1
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        // Query relation 2 → no chunks → emit
+        assert!(state.should_emit(2, 100, Some(50)).await);
+    }
+
+    // ── PK inside finished chunk ───────────────────────────────────
+
+    #[tokio::test]
+    async fn should_suppress_when_pk_in_chunk_and_lsn_before_hw() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // Chunk [0, 100) with hw_lsn = 500
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        // PK=50, event_lsn=400 (before HW) → suppress
+        assert!(!state.should_emit(1, 400, Some(50)).await);
+    }
+
+    #[tokio::test]
+    async fn should_suppress_when_lsn_equals_hw() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        // PK=50, event_lsn=500 (exactly at HW) → suppress (event_lsn > hw_lsn is false)
+        assert!(!state.should_emit(1, 500, Some(50)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_when_lsn_after_hw() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        // PK=50, event_lsn=501 (after HW) → emit (new change after snapshot)
+        assert!(state.should_emit(1, 501, Some(50)).await);
+    }
+
+    // ── PK at chunk boundaries ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn should_suppress_at_chunk_start() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // Chunk [10, 20) with hw_lsn = 500
+        state.register_finished_chunk(1, 10, 20, 500).await;
+        // PK=10 (inclusive start) → inside chunk → suppress
+        assert!(!state.should_emit(1, 400, Some(10)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_at_chunk_end_exclusive() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // Chunk [10, 20) with hw_lsn = 500
+        state.register_finished_chunk(1, 10, 20, 500).await;
+        // PK=20 (exclusive end) → outside chunk → emit
+        assert!(state.should_emit(1, 400, Some(20)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_pk_before_chunk() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 10, 20, 500).await;
+        // PK=9 → before chunk → emit
+        assert!(state.should_emit(1, 400, Some(9)).await);
+    }
+
+    // ── Multiple chunks ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn should_suppress_in_second_chunk() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 400).await;
+        state.register_finished_chunk(1, 100, 200, 600).await;
+        // PK=150 in second chunk, lsn=500 (before hw=600) → suppress
+        assert!(!state.should_emit(1, 500, Some(150)).await);
+    }
+
+    #[tokio::test]
+    async fn should_emit_between_non_contiguous_chunks() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 400).await;
+        state.register_finished_chunk(1, 200, 300, 600).await;
+        // PK=150 → gap between chunks → emit
+        assert!(state.should_emit(1, 100, Some(150)).await);
+    }
+
+    #[tokio::test]
+    async fn different_hw_per_chunk() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        // First chunk finished at lsn 400, second at lsn 600
+        state.register_finished_chunk(1, 0, 100, 400).await;
+        state.register_finished_chunk(1, 100, 200, 600).await;
+        // PK=50, lsn=450 → in first chunk (hw=400), lsn > hw → emit
+        assert!(state.should_emit(1, 450, Some(50)).await);
+        // PK=150, lsn=450 → in second chunk (hw=600), lsn <= hw → suppress
+        assert!(!state.should_emit(1, 450, Some(150)).await);
+    }
+
+    // ── Snapshot deactivation clears dedup ─────────────────────────
+
+    #[tokio::test]
+    async fn should_emit_after_snapshot_deactivated() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        // While active → suppress
+        assert!(!state.should_emit(1, 400, Some(50)).await);
+        // Deactivate snapshot
+        state.set_snapshot_active(false);
+        // Now fast-path → emit
+        assert!(state.should_emit(1, 400, Some(50)).await);
+    }
+
+    // ── Multiple relations ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn chunks_are_per_relation() {
+        let state = make_state();
+        state.set_snapshot_active(true);
+        state.register_finished_chunk(1, 0, 100, 500).await;
+        state.register_finished_chunk(2, 0, 50, 300).await;
+        // Relation 1, PK=50, lsn=400 → suppress (hw=500)
+        assert!(!state.should_emit(1, 400, Some(50)).await);
+        // Relation 2, PK=50 → outside [0,50) → emit (end is exclusive)
+        assert!(state.should_emit(2, 400, Some(50)).await);
+        // Relation 2, PK=25, lsn=400 → suppress (hw=300, 400 > 300 → emit!)
+        assert!(state.should_emit(2, 400, Some(25)).await);
+        // Relation 2, PK=25, lsn=200 → suppress (200 <= 300)
+        assert!(!state.should_emit(2, 200, Some(25)).await);
+    }
+}
