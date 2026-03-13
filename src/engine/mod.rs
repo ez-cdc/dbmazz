@@ -200,7 +200,7 @@ impl CdcEngine {
         let state_store = self
             .state_store
             .as_ref()
-            .expect("state_store must be initialized before load_checkpoint");
+            .ok_or_else(|| anyhow::anyhow!("state_store must be initialized before load_checkpoint"))?;
         let last_lsn = state_store.load_checkpoint(&self.config.slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
 
@@ -495,7 +495,7 @@ impl CdcEngine {
         let state_store = self
             .state_store
             .as_ref()
-            .expect("state_store must be initialized before checkpoint feedback");
+            .ok_or_else(|| anyhow::anyhow!("state_store must be initialized before checkpoint feedback"))?;
         if let Err(e) = state_store
             .save_checkpoint(&self.config.slot_name, confirmed_lsn)
             .await

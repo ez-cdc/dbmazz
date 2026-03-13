@@ -135,7 +135,7 @@ impl NewSinkAdapter {
                 let columns = self.tuple_to_column_values(tuple, schema);
 
                 Some(CdcRecord::Insert {
-                    table: TableRef::new(Some("public".to_string()), schema.name.clone()),
+                    table: TableRef::new(Some(schema.namespace.clone()), schema.name.clone()),
                     columns,
                     position: position.clone(),
                 })
@@ -153,7 +153,7 @@ impl NewSinkAdapter {
                     .map(|t| self.tuple_to_column_values(t, schema));
 
                 Some(CdcRecord::Update {
-                    table: TableRef::new(Some("public".to_string()), schema.name.clone()),
+                    table: TableRef::new(Some(schema.namespace.clone()), schema.name.clone()),
                     old_columns,
                     new_columns,
                     position: position.clone(),
@@ -169,7 +169,7 @@ impl NewSinkAdapter {
                 let columns = self.tuple_to_column_values(old, schema);
 
                 Some(CdcRecord::Delete {
-                    table: TableRef::new(Some("public".to_string()), schema.name.clone()),
+                    table: TableRef::new(Some(schema.namespace.clone()), schema.name.clone()),
                     columns,
                     position: position.clone(),
                 })
