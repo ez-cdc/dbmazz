@@ -181,9 +181,7 @@ impl TypeMapper {
     ///
     /// JSON value suitable for Stream Load
     pub fn pg_text_to_json(&self, text: &str, pg_type_id: u32) -> serde_json::Value {
-        use crate::connectors::sources::postgres::types::{
-            normalize_timestamptz, parse_pg_array, strip_money_symbol,
-        };
+        use crate::utils::{normalize_timestamptz, parse_pg_array, strip_money_symbol};
 
         match pg_type_id {
             // Boolean

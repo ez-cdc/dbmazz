@@ -210,9 +210,7 @@ impl NewSinkAdapter {
 
     /// Convert a PostgreSQL text value to a generic Value based on type OID
     fn convert_pg_value(&self, text: &str, pg_type_id: u32) -> Value {
-        use crate::connectors::sources::postgres::types::{
-            normalize_timestamptz, parse_pg_array, strip_money_symbol,
-        };
+        use crate::utils::{normalize_timestamptz, parse_pg_array, strip_money_symbol};
 
         match pg_type_id {
             // Boolean
@@ -437,4 +435,5 @@ mod tests {
             Ok(())
         }
     }
+
 }
