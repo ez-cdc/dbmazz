@@ -4,6 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, Config, CopyBothDuplex, NoTls};
 use tracing::{error, info, warn};
 
+use crate::utils::validate_sql_identifier;
+
 /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
 /// Difference from Unix epoch in microseconds
 const PG_EPOCH_OFFSET_USEC: i64 = 946_684_800_000_000;
@@ -60,6 +62,10 @@ impl PostgresSource {
                 }
             });
 
+            // Validate slot name before using in SQL
+            validate_sql_identifier(&slot_name)
+                .context("invalid replication slot name")?;
+
             // Try to create the slot (ignore if it already exists)
             let _ = slot_client
                 .simple_query(&format!(
@@ -105,6 +111,12 @@ impl PostgresSource {
         } else {
             format!("{:X}/{:X}", start_lsn >> 32, start_lsn & 0xFFFFFFFF)
         };
+
+        // Validate identifiers before interpolating into SQL
+        validate_sql_identifier(&self.slot_name)
+            .context("invalid replication slot name")?;
+        validate_sql_identifier(&self.publication_name)
+            .context("invalid publication name")?;
 
         let query = format!(
             "START_REPLICATION SLOT {} LOGICAL {} (proto_version '1', publication_names '{}')",
