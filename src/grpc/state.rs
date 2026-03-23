@@ -69,8 +69,6 @@ pub struct SharedState {
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
     pub skip_slot_cleanup: AtomicBool,
     pub replication_lag_ms: AtomicU64,
-    #[cfg(feature = "demo")]
-    pub demo_event_tx: tokio::sync::broadcast::Sender<String>,
     // Snapshot progress (written by snapshot worker, read by gRPC status service)
     pub snapshot_chunks_total: AtomicU64,
     pub snapshot_chunks_done: AtomicU64,
@@ -113,11 +111,6 @@ impl SharedState {
             events_last_second: AtomicU64::new(0),
             skip_slot_cleanup: AtomicBool::new(false),
             replication_lag_ms: AtomicU64::new(0),
-            #[cfg(feature = "demo")]
-            demo_event_tx: {
-                let (tx, _) = tokio::sync::broadcast::channel(256);
-                tx
-            },
             snapshot_chunks_total: AtomicU64::new(0),
             snapshot_chunks_done: AtomicU64::new(0),
             snapshot_rows_synced: AtomicU64::new(0),
