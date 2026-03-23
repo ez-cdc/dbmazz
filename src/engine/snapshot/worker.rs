@@ -1,7 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Snapshot worker: reads existing rows from PostgreSQL and loads them into StarRocks.
+//! Snapshot worker: reads existing rows from PostgreSQL and loads them into the sink.
 //!
 //! # Algorithm (Flink CDC concurrent snapshot)
 //!
@@ -12,7 +12,7 @@
 //! 1. Emit LW watermark via `pg_logical_emit_message`
 //! 2. `SELECT * FROM table WHERE pk >= start AND pk < end`
 //! 3. Emit HW watermark → returns the HW LSN
-//! 4. Stream Load rows to StarRocks (upsert)
+//! 4. Convert rows to CdcRecord::Insert → sink.write_batch()
 //! 5. Mark chunk COMPLETE in `dbmazz_snapshot_state`
 //! 6. Register (start_pk, end_pk, hw_lsn) in `SharedState.finished_chunks`
 //! 7. Update `SharedState` snapshot progress counters
@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_postgres::{Client, NoTls};
@@ -32,8 +31,9 @@ use super::quote_ident;
 use super::state_store;
 use super::utils::find_integer_pk_column;
 use crate::config::Config;
-use crate::connectors::sinks::starrocks::stream_load::{StreamLoadClient, StreamLoadOptions};
-use crate::connectors::sinks::starrocks::StarRocksSinkConfig;
+use crate::core::position::SourcePosition;
+use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
+use crate::core::Sink;
 use crate::grpc::state::{CdcState, SharedState, Stage};
 use tokio::time::Duration;
 
@@ -47,7 +47,14 @@ struct TableMeta {
 ///
 /// This function is spawned as a concurrent task alongside the WAL consumer.
 /// It exits when all chunks are complete or on a non-retriable error.
-pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -> Result<()> {
+///
+/// `sink_factory` creates a fresh Sink instance for each parallel worker,
+/// mirroring the PG connection pool pattern.
+pub async fn run_snapshot(
+    config: Arc<Config>,
+    shared_state: Arc<SharedState>,
+    sink_factory: Arc<dyn Fn() -> Result<Box<dyn Sink>> + Send + Sync>,
+) -> Result<()> {
     info!(
         "Snapshot worker starting (chunk_size={}, workers={})",
         config.snapshot_chunk_size, config.snapshot_parallel_workers
@@ -76,15 +83,15 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
     // Ensure state table exists
     state_store::ensure_state_table(&client).await?;
 
-    // Build the Stream Load client using the normalized HTTP URL from the sink config
-    let sr_config = StarRocksSinkConfig::from_sink_config(&config.sink)
-        .context("snapshot worker: failed to build StarRocks config")?;
-    let sl_client = Arc::new(StreamLoadClient::new(
-        sr_config.http_url.clone(),
-        sr_config.database.clone(),
-        sr_config.user.clone(),
-        sr_config.password.clone(),
-    ));
+    // Create a sink pool — one sink instance per parallel worker
+    let n_workers = (config.snapshot_parallel_workers as usize).max(1);
+    let mut sink_pool: Vec<Box<dyn Sink>> = Vec::with_capacity(n_workers);
+    for i in 0..n_workers {
+        let sink = sink_factory()
+            .with_context(|| format!("snapshot worker: failed to create sink instance {}", i))?;
+        sink_pool.push(sink);
+    }
+    let sink_pool = Arc::new(tokio::sync::Mutex::new(sink_pool));
 
     let slot_name = config.slot_name.clone();
     let tables = config.tables.clone();
@@ -132,7 +139,6 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
     // Open N worker PG connections for truly parallel SELECTs.
     // Each worker gets a dedicated connection (vs pipelining on one, which PG serializes).
     // The original `client` is reserved for the producer task (chunking + state_store).
-    let n_workers = (config.snapshot_parallel_workers as usize).max(1);
     let mut pool_conns: Vec<Arc<Client>> = Vec::with_capacity(n_workers);
     for i in 0..n_workers {
         let (c, conn) = tokio_postgres::connect(&plain_url, NoTls)
@@ -223,8 +229,8 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
     let mut join_set = JoinSet::new();
     while let Some((table, chunk)) = rx.recv().await {
         let pool = Arc::clone(&pool);
+        let sink_pool = Arc::clone(&sink_pool);
         let semaphore = Arc::clone(&semaphore);
-        let sl_client = Arc::clone(&sl_client);
         let slot_name = slot_name.clone();
         let shared_state = Arc::clone(&shared_state);
         let table_meta = Arc::clone(&table_meta);
@@ -250,13 +256,20 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
             let meta = table_meta
                 .get(&table)
                 .ok_or_else(|| anyhow::anyhow!("no metadata for table {}", table))?;
+
+            // Acquire PG connection and sink from pools
             let pg_client = match pool.lock().await.pop() {
                 Some(c) => c,
-                None => return Err(anyhow::anyhow!("snapshot pool exhausted")),
+                None => return Err(anyhow::anyhow!("snapshot PG pool exhausted")),
             };
+            let mut sink = match sink_pool.lock().await.pop() {
+                Some(s) => s,
+                None => return Err(anyhow::anyhow!("snapshot sink pool exhausted")),
+            };
+
             let result = process_chunk(
                 &pg_client,
-                &sl_client,
+                &mut *sink,
                 &slot_name,
                 &table,
                 &chunk,
@@ -264,7 +277,11 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
                 meta,
             )
             .await;
+
+            // Return resources to pools
             pool.lock().await.push(pg_client);
+            sink_pool.lock().await.push(sink);
+
             result
         });
     }
@@ -313,10 +330,10 @@ pub async fn run_snapshot(config: Arc<Config>, shared_state: Arc<SharedState>) -
     Ok(())
 }
 
-/// Process a single chunk: LW watermark → SELECT → HW watermark → Stream Load → mark complete.
+/// Process a single chunk: LW watermark → SELECT → HW watermark → write_batch → mark complete.
 async fn process_chunk(
     client: &Client,
-    sl_client: &StreamLoadClient,
+    sink: &mut dyn Sink,
     slot_name: &str,
     table: &str,
     chunk: &Chunk,
@@ -341,10 +358,6 @@ async fn process_chunk(
         .context("failed to emit LW watermark")?;
 
     // Step 2: SELECT rows for this chunk
-    // Extract table name for the destination (strip schema prefix)
-    let dest_table = table.rsplit('.').next().unwrap_or(table);
-
-    // Use pre-computed metadata (avoids redundant catalog queries per chunk)
     let col_names = &meta.col_names;
 
     // Build SELECT with all columns cast to ::text for universal type handling
@@ -368,7 +381,7 @@ async fn process_chunk(
     let row_count = rows.len() as i64;
 
     // Step 3: Emit HW (high watermark) immediately after SELECT — captures LSN
-    // before Stream Load so WAL events during load are correctly deduplicated.
+    // before sink write so WAL events during load are correctly deduplicated.
     let hw_content = format!("HW:{}:{}:{}", table, chunk.start_pk, chunk.end_pk);
     let hw_row = client
         .query_one(
@@ -378,40 +391,54 @@ async fn process_chunk(
         .await
         .context("failed to emit HW watermark")?;
 
-    // pg_logical_emit_message returns pg_lsn (displayed as hex string like "0/1234AB")
     let hw_lsn_str: String = hw_row.get(0);
     let hw_lsn = parse_pg_lsn(&hw_lsn_str)
         .ok_or_else(|| anyhow::anyhow!("failed to parse HW LSN: '{}'", hw_lsn_str))?;
 
-    // Step 4: Serialize rows to JSON (for Stream Load)
-    // All columns are text thanks to ::text cast, so we just read Option<String>
-    let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let body = if rows.is_empty() {
-        b"[]".to_vec()
-    } else {
-        serialize_text_rows_to_json(&rows, col_names, &synced_at, hw_lsn)?
-    };
-
-    // Step 5: Stream Load to StarRocks (only if there are rows)
+    // Step 4: Convert rows to CdcRecord::Insert and write via sink
     if !rows.is_empty() {
-        let body_arc = Arc::new(body);
-        let result: crate::connectors::sinks::starrocks::stream_load::StreamLoadResult = sl_client
-            .send(dest_table, body_arc, StreamLoadOptions::default())
-            .await
-            .with_context(|| {
-                format!(
-                    "Stream Load failed for {} chunk {}",
-                    table, chunk.partition_id
-                )
-            })?;
+        let (schema, table_name) = split_table_name(table);
+        let table_ref = TableRef::new(Some(schema), table_name);
+        let position = SourcePosition::Lsn(hw_lsn);
+
+        let records: Vec<CdcRecord> = rows
+            .iter()
+            .map(|row| {
+                let columns: Vec<ColumnValue> = col_names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        let val: Option<String> = row.get(i);
+                        let value = match val {
+                            Some(s) => Value::String(s),
+                            None => Value::Null,
+                        };
+                        ColumnValue::new(name.clone(), value)
+                    })
+                    .collect();
+
+                CdcRecord::Insert {
+                    table: table_ref.clone(),
+                    columns,
+                    position: position.clone(),
+                }
+            })
+            .collect();
+
+        sink.write_batch(records).await.with_context(|| {
+            format!(
+                "Sink write failed for {} chunk {}",
+                table, chunk.partition_id
+            )
+        })?;
 
         debug!(
-            "Stream Load chunk {}/{}: {} rows loaded",
-            table, chunk.partition_id, result.loaded_rows
+            "Wrote chunk {}/{}: {} rows via sink",
+            table, chunk.partition_id, row_count
         );
     }
 
-    // Step 6: Mark chunk complete in state store
+    // Step 5: Mark chunk complete in state store
     state_store::mark_chunk_complete(
         client,
         slot_name,
@@ -422,7 +449,7 @@ async fn process_chunk(
     )
     .await?;
 
-    // Step 7: Register in SharedState so WAL consumer can deduplicate
+    // Step 6: Register in SharedState so WAL consumer can deduplicate
     let relation_id = get_relation_id(client, table).await.unwrap_or_else(|e| {
         tracing::warn!(
             "Could not resolve relation OID for table '{}': {}. WAL dedup may be incomplete.",
@@ -455,96 +482,19 @@ async fn process_chunk(
     Ok(())
 }
 
-/// Serialize tokio_postgres rows to a JSON array string for Stream Load.
-/// Format: `[{"col1":"val1","col2":"val2"}, ...]`
-/// Serialize rows to JSON where all columns were cast to ::text in the query.
-/// Each column is read as Option<String> — no type-specific conversions needed.
-/// Appends CDC audit columns (dbmazz_op_type, dbmazz_is_deleted, dbmazz_synced_at, dbmazz_cdc_version).
-fn serialize_text_rows_to_json(
-    rows: &[tokio_postgres::Row],
-    col_names: &[String],
-    synced_at: &str,
-    hw_lsn: u64,
-) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    out.push(b'[');
-
-    let cdc_version_str = (hw_lsn as i64).to_string();
-
-    for (row_idx, row) in rows.iter().enumerate() {
-        if row_idx > 0 {
-            out.push(b',');
-        }
-        out.push(b'{');
-        for (col_idx, col_name) in col_names.iter().enumerate() {
-            if col_idx > 0 {
-                out.push(b',');
-            }
-            let val: Option<String> = row.get(col_idx);
-
-            out.push(b'"');
-            out.extend_from_slice(col_name.as_bytes());
-            out.extend_from_slice(b"\":");
-            match val {
-                Some(s) => {
-                    out.push(b'"');
-                    // Escape JSON-special chars at byte level (avoids UTF-8 decode/re-encode)
-                    write_json_escaped(&mut out, &s);
-                    out.push(b'"');
-                }
-                None => out.extend_from_slice(b"null"),
-            }
-        }
-
-        // Append CDC audit columns
-        out.extend_from_slice(b",\"dbmazz_op_type\":0");
-        out.extend_from_slice(b",\"dbmazz_is_deleted\":false");
-        out.extend_from_slice(b",\"dbmazz_synced_at\":\"");
-        out.extend_from_slice(synced_at.as_bytes());
-        out.extend_from_slice(b"\"");
-        out.extend_from_slice(b",\"dbmazz_cdc_version\":");
-        out.extend_from_slice(cdc_version_str.as_bytes());
-
-        out.push(b'}');
+/// Split a possibly schema-qualified table name into (schema, table).
+fn split_table_name(table: &str) -> (String, String) {
+    if table.contains('.') {
+        let parts: Vec<&str> = table.splitn(2, '.').collect();
+        (parts[0].to_string(), parts[1].to_string())
+    } else {
+        ("public".to_string(), table.to_string())
     }
-
-    out.push(b']');
-    Ok(out)
-}
-
-/// Write a JSON-escaped string directly at the byte level.
-///
-/// JSON-special characters (`"`, `\`, `\n`, `\r`, `\t`) are all ASCII (< 0x80).
-/// Multi-byte UTF-8 continuation bytes are >= 0x80 and never match these,
-/// so we can safely scan and copy byte slices between escape points.
-#[inline]
-fn write_json_escaped(out: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-    let mut start = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        let escape: &[u8] = match b {
-            b'"' => b"\\\"",
-            b'\\' => b"\\\\",
-            b'\n' => b"\\n",
-            b'\r' => b"\\r",
-            b'\t' => b"\\t",
-            _ => continue,
-        };
-        out.extend_from_slice(&bytes[start..i]);
-        out.extend_from_slice(escape);
-        start = i + 1;
-    }
-    out.extend_from_slice(&bytes[start..]);
 }
 
 /// Get column names for a table.
 async fn get_column_names(client: &Client, table_name: &str) -> Result<Vec<String>> {
-    let (schema, table) = if table_name.contains('.') {
-        let parts: Vec<&str> = table_name.splitn(2, '.').collect();
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        ("public".to_string(), table_name.to_string())
-    };
+    let (schema, table) = split_table_name(table_name);
 
     let rows = client
         .query(
@@ -595,12 +545,7 @@ fn strip_replication_param(url_str: &str) -> String {
 
 /// Get the pg_class OID (relation_id) for a table, matching what the WAL handler sees.
 async fn get_relation_id(client: &Client, table_name: &str) -> Result<u32> {
-    let (schema, table) = if table_name.contains('.') {
-        let parts: Vec<&str> = table_name.splitn(2, '.').collect();
-        (parts[0].to_string(), parts[1].to_string())
-    } else {
-        ("public".to_string(), table_name.to_string())
-    };
+    let (schema, table) = split_table_name(table_name);
 
     let row = client
         .query_one(

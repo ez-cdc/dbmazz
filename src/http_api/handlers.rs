@@ -576,6 +576,7 @@ pub async fn start_replication(
         user: sink.user.clone(),
         password: sink.password.clone(),
         starrocks: Some(StarRocksSinkConfig {}),
+        postgres: None,
     };
 
     let config = Config {

@@ -3,8 +3,10 @@ use bytes::{Buf, Bytes};
 use memchr::memchr;
 use simdutf8::basic::from_utf8;
 
-/// Wrapper que incluye LSN del WAL para checkpointing
+/// Wrapper que incluye LSN del WAL para checkpointing.
+/// Deprecated: use pipeline::PipelineEvent instead. Kept for backward compatibility.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CdcEvent {
     pub lsn: u64, // LSN del WAL donde ocurrió este evento
     pub message: CdcMessage,

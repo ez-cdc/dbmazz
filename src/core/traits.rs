@@ -1,5 +1,5 @@
 use crate::core::position::SourcePosition;
-use crate::core::record::CdcRecord;
+use crate::core::record::{CdcRecord, DataType};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,28 @@ pub struct SinkResult {
     pub last_position: Option<SourcePosition>,
 }
 
+/// Schema of a source table — provided to sinks during setup so they can
+/// create destination tables, raw tables, stages, etc.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SourceTableSchema {
+    pub schema: String,
+    pub name: String,
+    pub columns: Vec<SourceColumn>,
+    pub primary_keys: Vec<String>,
+}
+
+/// A single column in a source table schema
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SourceColumn {
+    pub name: String,
+    pub data_type: DataType,
+    pub nullable: bool,
+    /// Original PostgreSQL type OID (useful for PG-to-PG sinks)
+    pub pg_type_id: u32,
+}
+
 #[async_trait]
 #[allow(dead_code)]
 pub trait Source: Send + Sync {
@@ -72,9 +94,17 @@ pub trait Sink: Send + Sync {
     /// Validates the sink connection and configuration
     async fn validate_connection(&self) -> Result<()>;
 
-    /// Writes a batch of CDC records to the sink
+    /// Prepare the destination: create target tables, raw tables, stages, etc.
+    /// Called once at startup before CDC and snapshot begin.
+    /// Receives source table schemas so the sink can generate appropriate DDL.
+    async fn setup(&mut self, _source_schemas: &[SourceTableSchema]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Writes a batch of CDC records to the sink.
+    /// Each sink decides how to apply them (Stream Load, raw table + MERGE, stage, etc).
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
 
-    /// Closes the sink and flushes any remaining data
+    /// Close the sink: flush pending data and clean up resources.
     async fn close(&mut self) -> Result<()>;
 }
