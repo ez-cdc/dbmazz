@@ -8,8 +8,8 @@
 //! - Handles INSERT (NOT MATCHED), DELETE (MATCHED), UPDATE (MATCHED)
 //! - Generates one WHEN MATCHED clause per unique TOAST column combination
 
-use crate::core::traits::SourceTableSchema;
 use super::types::pg_oid_to_target_type;
+use crate::core::traits::SourceTableSchema;
 
 /// Generate a complete MERGE SQL statement for a single batch.
 ///
@@ -36,7 +36,10 @@ pub fn generate_merge(
         .iter()
         .map(|col| {
             let pg_type = pg_oid_to_target_type(col.pg_type_id);
-            format!("(_data->>'{name}')::{pg_type} AS \"{name}\"", name = col.name)
+            format!(
+                "(_data->>'{name}')::{pg_type} AS \"{name}\"",
+                name = col.name
+            )
         })
         .collect();
 
@@ -70,7 +73,11 @@ pub fn generate_merge(
         .collect();
 
     // All column names (for INSERT)
-    let all_col_names: Vec<&str> = source_schema.columns.iter().map(|c| c.name.as_str()).collect();
+    let all_col_names: Vec<&str> = source_schema
+        .columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
 
     // --- Build the SQL ---
 
@@ -87,14 +94,8 @@ pub fn generate_merge(
     sql.push_str("            ORDER BY _timestamp DESC\n");
     sql.push_str("        ) AS _rank\n");
     sql.push_str(&format!("    FROM {}\n", raw_table));
-    sql.push_str(&format!(
-        "    WHERE _batch_id = {}\n",
-        batch_id
-    ));
-    sql.push_str(&format!(
-        "      AND _dst_table = '{}'\n",
-        dst_qualified
-    ));
+    sql.push_str(&format!("    WHERE _batch_id = {}\n", batch_id));
+    sql.push_str(&format!("      AND _dst_table = '{}'\n", dst_qualified));
     sql.push_str(")\n");
 
     // MERGE INTO
@@ -217,13 +218,7 @@ mod tests {
     #[test]
     fn test_generate_merge_basic() {
         let schema = test_schema();
-        let sql = generate_merge(
-            "_dbmazz._raw_job",
-            "public",
-            &schema,
-            &["".to_string()],
-            1,
-        );
+        let sql = generate_merge("_dbmazz._raw_job", "public", &schema, &["".to_string()], 1);
 
         // Should contain MERGE INTO
         assert!(sql.contains("MERGE INTO \"public\".\"orders\" AS dst"));
@@ -260,8 +255,13 @@ mod tests {
         );
 
         // Should have two WHEN MATCHED UPDATE clauses
-        let update_count = sql.matches("WHEN MATCHED AND src._record_type != 2").count();
-        assert_eq!(update_count, 2, "Should have 2 UPDATE clauses (one per TOAST combination)");
+        let update_count = sql
+            .matches("WHEN MATCHED AND src._record_type != 2")
+            .count();
+        assert_eq!(
+            update_count, 2,
+            "Should have 2 UPDATE clauses (one per TOAST combination)"
+        );
 
         // First clause: no TOAST, updates all
         assert!(sql.contains("AND src._toast_columns = ''"));
@@ -297,18 +297,14 @@ mod tests {
             primary_keys: vec!["order_id".to_string(), "item_id".to_string()],
         };
 
-        let sql = generate_merge(
-            "_dbmazz._raw_job",
-            "public",
-            &schema,
-            &["".to_string()],
-            1,
-        );
+        let sql = generate_merge("_dbmazz._raw_job", "public", &schema, &["".to_string()], 1);
 
         // Composite PK in PARTITION BY
-        assert!(sql.contains("PARTITION BY (_data->>'order_id')::integer, (_data->>'item_id')::integer"));
+        assert!(sql
+            .contains("PARTITION BY (_data->>'order_id')::integer, (_data->>'item_id')::integer"));
         // Composite PK in ON clause
-        assert!(sql.contains("dst.\"order_id\" = src.\"order_id\" AND dst.\"item_id\" = src.\"item_id\""));
+        assert!(sql
+            .contains("dst.\"order_id\" = src.\"order_id\" AND dst.\"item_id\" = src.\"item_id\""));
     }
 
     #[test]

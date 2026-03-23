@@ -69,7 +69,13 @@ impl PostgresSink {
         let safe_job = pg_config
             .job_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>();
         let raw_table_name = format!("_dbmazz._raw_{}", safe_job);
 
@@ -214,8 +220,7 @@ impl Sink for PostgresSink {
 
         let client = self.connect().await?;
         let (records_written, bytes_written) =
-            raw_table::write_batch_to_raw(client, &raw_table, &job_name, lsn, &records)
-                .await?;
+            raw_table::write_batch_to_raw(client, &raw_table, &job_name, lsn, &records).await?;
 
         // Notify normalizer (non-blocking — if channel is full, normalizer will catch up)
         if let Some(ref tx) = self.normalize_tx {

@@ -7,8 +7,8 @@ use anyhow::{Context, Result};
 use tokio_postgres::Client;
 use tracing::info;
 
-use crate::core::traits::SourceTableSchema;
 use super::types::pg_oid_to_target_type;
+use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name in the target database
 const METADATA_SCHEMA: &str = "_dbmazz";
@@ -121,7 +121,10 @@ async fn create_metadata_table(client: &Client) -> Result<()> {
         .await
         .context("Failed to create metadata table")?;
 
-    info!("  [OK] Metadata table {}.\"_metadata\" ready", METADATA_SCHEMA);
+    info!(
+        "  [OK] Metadata table {}.\"_metadata\" ready",
+        METADATA_SCHEMA
+    );
     Ok(())
 }
 
@@ -145,7 +148,10 @@ async fn create_target_table(
         .get(0);
 
     if exists {
-        info!("  [OK] Table \"{}\".\"{}\" already exists", target_schema, source.name);
+        info!(
+            "  [OK] Table \"{}\".\"{}\" already exists",
+            target_schema, source.name
+        );
         return Ok(());
     }
 
@@ -166,7 +172,11 @@ async fn create_target_table(
     let pk_clause = if source.primary_keys.is_empty() {
         String::new()
     } else {
-        let pk_cols: Vec<String> = source.primary_keys.iter().map(|k| format!("\"{}\"", k)).collect();
+        let pk_cols: Vec<String> = source
+            .primary_keys
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect();
         format!(",\n    PRIMARY KEY ({})", pk_cols.join(", "))
     };
 
@@ -178,10 +188,12 @@ async fn create_target_table(
         pk_clause
     );
 
-    client
-        .batch_execute(&ddl)
-        .await
-        .with_context(|| format!("Failed to create target table {}.{}", target_schema, source.name))?;
+    client.batch_execute(&ddl).await.with_context(|| {
+        format!(
+            "Failed to create target table {}.{}",
+            target_schema, source.name
+        )
+    })?;
 
     info!(
         "  [OK] Created table \"{}\".\"{}\" ({} columns, {} PKs)",
@@ -198,7 +210,13 @@ async fn create_target_table(
 /// Replaces non-alphanumeric characters with underscores.
 fn sanitize_identifier(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

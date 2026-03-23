@@ -190,7 +190,9 @@ impl CdcEngine {
             let snap_sink_factory = Arc::clone(&sink_factory);
 
             tokio::spawn(async move {
-                match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory).await {
+                match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory)
+                    .await
+                {
                     Ok(()) => {
                         snap_state.set_snapshot_active(false);
                         info!("Snapshot completed successfully");
@@ -254,11 +256,15 @@ impl CdcEngine {
 
     /// Introspect source PostgreSQL to get table schemas.
     /// Used by sinks that need to create target tables (e.g., PostgreSQL sink).
-    async fn introspect_source_schemas(&self) -> Result<Vec<crate::core::traits::SourceTableSchema>> {
+    async fn introspect_source_schemas(
+        &self,
+    ) -> Result<Vec<crate::core::traits::SourceTableSchema>> {
         use crate::core::traits::{SourceColumn, SourceTableSchema};
         use crate::source::converter::pg_type_to_data_type;
 
-        let plain_url = self.config.database_url
+        let plain_url = self
+            .config
+            .database_url
             .replace("&replication=database", "")
             .replace("?replication=database&", "?")
             .replace("?replication=database", "");
@@ -521,10 +527,7 @@ impl CdcEngine {
     }
 
     /// Check CDC state (Pause/Stop/Draining) - Synchronous
-    fn check_state_control_sync(
-        &self,
-        tx: &mpsc::Sender<PipelineEvent>,
-    ) -> Option<ControlFlow> {
+    fn check_state_control_sync(&self, tx: &mpsc::Sender<PipelineEvent>) -> Option<ControlFlow> {
         let current_state = self.shared_state.state();
 
         match current_state {

@@ -117,8 +117,7 @@ pub async fn handle_xlog_data(
             match &cdc_msg {
                 CdcMessage::Insert { relation_id, tuple } => {
                     if shared_state.is_snapshot_active() {
-                        let pk =
-                            extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
+                        let pk = extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
                         if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }
@@ -130,8 +129,7 @@ pub async fn handle_xlog_data(
                     ..
                 } => {
                     if shared_state.is_snapshot_active() {
-                        let pk =
-                            extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
+                        let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
                         if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }

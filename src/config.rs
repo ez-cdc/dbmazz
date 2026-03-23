@@ -452,7 +452,10 @@ impl Config {
                     .as_ref()
                     .map(|p| p.schema.as_str())
                     .unwrap_or("public");
-                info!("Sink: PostgreSQL (db: {}, schema: {})", self.sink.database, schema);
+                info!(
+                    "Sink: PostgreSQL (db: {}, schema: {})",
+                    self.sink.database, schema
+                );
             }
         }
 
