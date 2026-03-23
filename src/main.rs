@@ -6,15 +6,12 @@
 mod config;
 mod connectors;
 mod core;
-#[cfg(feature = "demo")]
-mod demo;
 mod engine;
 mod grpc;
 #[cfg(feature = "http-api")]
 mod http_api;
 mod pipeline;
 mod replication;
-mod sink;
 mod source;
 mod state_store;
 mod utils;
@@ -38,13 +35,6 @@ async fn main() -> Result<()> {
         .init();
 
     dotenv().ok();
-
-    #[cfg(feature = "demo")]
-    {
-        if std::env::var("DEMO_MODE").unwrap_or_default() == "true" {
-            return demo::run().await;
-        }
-    }
 
     // When http-api is enabled, support two modes:
     //   1. Auto-start: env vars present → start engine + HTTP dashboard

@@ -330,7 +330,7 @@ match record {
     CdcRecord::Begin { xid } => {
         // Start transaction if supported
     }
-    CdcRecord::Commit { xid, position } => {
+    CdcRecord::Commit { xid, position, commit_timestamp_us } => {
         // Commit transaction if supported
     }
     CdcRecord::Heartbeat { position } => {

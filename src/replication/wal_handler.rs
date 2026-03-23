@@ -5,7 +5,10 @@ use tokio::sync::mpsc;
 use tracing::error;
 
 use crate::grpc::state::SharedState;
-use crate::source::parser::{CdcEvent, CdcMessage, PgOutputParser};
+use crate::pipeline::schema_cache::SchemaCache;
+use crate::pipeline::PipelineEvent;
+use crate::source::converter;
+use crate::source::parser::{CdcMessage, PgOutputParser};
 use crate::source::postgres::build_standby_status_update;
 
 /// PostgreSQL replication message types
@@ -61,12 +64,17 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
     }
 }
 
-/// Process XLogData data
+/// Process XLogData data.
+///
+/// Converts pgoutput CdcMessage to generic CdcRecord before sending to the pipeline.
+/// SchemaCache is updated here (on Relation messages) so the converter can look up
+/// column names and types for Insert/Update/Delete messages.
 pub async fn handle_xlog_data(
     data: Bytes,
     lsn: u64,
-    tx: &mpsc::Sender<CdcEvent>,
+    tx: &mpsc::Sender<PipelineEvent>,
     shared_state: &SharedState,
+    schema_cache: &mut SchemaCache,
     flush_size: usize,
 ) -> Result<()> {
     // Update LSN in SharedState
@@ -81,29 +89,36 @@ pub async fn handle_xlog_data(
 
     match PgOutputParser::parse(pgoutput_tag, pgoutput_body) {
         Ok(Some(cdc_msg)) => {
-            // Side-effects before forwarding to pipeline:
+            // Update SchemaCache on Relation messages (must happen before conversion)
+            if matches!(&cdc_msg, CdcMessage::Relation { .. }) {
+                schema_cache.update(&cdc_msg);
+            }
+
+            // Update PK index cache for snapshot deduplication
+            if let CdcMessage::Relation { id, columns, .. } = &cdc_msg {
+                let pk_indices: Vec<usize> = columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, col)| col.is_key())
+                    .map(|(i, _)| i)
+                    .collect();
+                let mut cache = shared_state.relation_pk_cols.write().await;
+                cache.insert(*id, pk_indices);
+            }
+
+            // Logical messages (LW/HW watermarks) are informational only for the
+            // WAL consumer — deduplication state is managed by the snapshot worker.
+            // Just skip these messages — do not forward to the pipeline.
+            if matches!(&cdc_msg, CdcMessage::LogicalMessage { .. }) {
+                return Ok(());
+            }
+
+            // For row changes during an active snapshot: check should_emit()
             match &cdc_msg {
-                // Update relation PK column index cache (for snapshot deduplication)
-                CdcMessage::Relation { id, columns, .. } => {
-                    let pk_indices: Vec<usize> = columns
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, col)| col.is_key())
-                        .map(|(i, _)| i)
-                        .collect();
-                    let mut cache = shared_state.relation_pk_cols.write().await;
-                    cache.insert(*id, pk_indices);
-                }
-                // Logical messages (LW/HW watermarks) are informational only for the
-                // WAL consumer — deduplication state is managed by the snapshot worker.
-                // Just skip these messages — do not forward to the pipeline.
-                CdcMessage::LogicalMessage { .. } => {
-                    return Ok(());
-                }
-                // For row changes during an active snapshot: check should_emit()
                 CdcMessage::Insert { relation_id, tuple } => {
                     if shared_state.is_snapshot_active() {
-                        let pk = extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
+                        let pk =
+                            extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
                         if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }
@@ -115,7 +130,8 @@ pub async fn handle_xlog_data(
                     ..
                 } => {
                     if shared_state.is_snapshot_active() {
-                        let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
+                        let pk =
+                            extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
                         if !shared_state.should_emit(*relation_id, lsn, pk).await {
                             return Ok(());
                         }
@@ -127,21 +143,21 @@ pub async fn handle_xlog_data(
                 _ => {}
             }
 
-            let event = CdcEvent {
-                lsn,
-                message: cdc_msg,
-            };
+            // Convert CdcMessage → CdcRecord (the boundary between PG-specific and generic)
+            if let Some(record) = converter::convert_message(&cdc_msg, schema_cache, lsn) {
+                let event = PipelineEvent { lsn, record };
 
-            shared_state.increment_events();
+                shared_state.increment_events();
 
-            // Update pending events count
-            let capacity = tx.capacity();
-            let pending = (flush_size * 2).saturating_sub(capacity);
-            shared_state.set_pending(pending as u64);
+                // Update pending events count
+                let capacity = tx.capacity();
+                let pending = (flush_size * 2).saturating_sub(capacity);
+                shared_state.set_pending(pending as u64);
 
-            if let Err(e) = tx.send(event).await {
-                error!("Failed to send to pipeline: {}", e);
-                return Err(e.into());
+                if let Err(e) = tx.send(event).await {
+                    error!("Failed to send to pipeline: {}", e);
+                    return Err(e.into());
+                }
             }
         }
         Ok(None) => {}
