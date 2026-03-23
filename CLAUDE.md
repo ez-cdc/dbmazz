@@ -2,88 +2,116 @@
 
 ## Project Overview
 
-Rust CDC (Change Data Capture) daemon. Reads PostgreSQL WAL (Write-Ahead Log) via logical replication and streams changes to StarRocks via Stream Load HTTP API. Each instance handles one replication job.
+Rust CDC (Change Data Capture) daemon. Reads PostgreSQL WAL (Write-Ahead Log) via logical replication and streams changes to any supported sink. Each instance handles one replication job.
+
+Supported sinks: StarRocks (stable), PostgreSQL (in development).
 
 ## Architecture
 
 ```
 dbmazz (single binary, tokio async runtime)
 ├── Source: PostgreSQL logical replication
-│   ├── Replication slot management
 │   ├── WAL message parsing (pgoutput protocol)
+│   ├── source/converter.rs: CdcMessage → CdcRecord (generic boundary)
+│   ├── Replication slot + publication management
 │   └── LSN tracking (current_lsn, confirmed_lsn)
-├── Pipeline
-│   ├── Schema cache (table metadata, column types)
-│   ├── Record transformation (PG types → StarRocks types)
-│   └── Batching and buffering
-├── Sink: StarRocks Stream Load
-│   ├── HTTP-based bulk loading
-│   ├── CSV/JSON format conversion
-│   └── Transaction management
+├── Pipeline (generic — only sees CdcRecord, never pgoutput)
+│   ├── Batching (FLUSH_SIZE / FLUSH_INTERVAL_MS)
+│   ├── Calls sink.write_batch(Vec<CdcRecord>)
+│   └── Checkpoint feedback (LSN confirmation)
+├── Sink trait (6 methods — see ARCHITECTURE.md)
+│   ├── StarRocksSink: JSON → Stream Load HTTP API
+│   └── (future: PostgresSink, SnowflakeSink, etc.)
+├── Snapshot (Flink CDC concurrent snapshot, uses same write_batch)
 └── gRPC server
-    ├── Health and status reporting
-    ├── Metrics exposure (LSN, events, tables)
-    └── State management (running, paused, stopped)
+    ├── Health, Control, Status, Metrics services
+    └── SharedState (metrics, dedup, control signals)
 ```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and design decisions.
 
 ## Key Directories
 
-- `src/connectors/sources/postgres/` - PostgreSQL source connector
-  - `replication.rs` - WAL logical replication stream
+- `src/core/` - Generic abstractions: CdcRecord, Value, Sink trait, SourceTableSchema
+- `src/source/` - PostgreSQL source layer
+  - `converter.rs` - CdcMessage → CdcRecord conversion (the PG↔generic boundary)
   - `parser.rs` - pgoutput protocol parser
-  - `types.rs` - PG type mapping
-  - `config.rs` - Source configuration
-  - `setup.rs` - Replication slot and publication setup
-- `src/connectors/sinks/starrocks/` - StarRocks sink connector
-  - `stream_load.rs` - HTTP Stream Load client
-  - `types.rs` - StarRocks type mapping
-  - `config.rs` - Sink configuration
-  - `setup.rs` - Table validation and DDL
-- `src/pipeline/` - Data pipeline (schema cache, transformation, batching)
-- `src/core/` - Core abstractions (Record, Position, traits, errors)
-- `src/engine/` - Engine orchestration
-  - `snapshot/` - Snapshot/backfill worker (Flink CDC concurrent snapshot algorithm)
-  - `setup/` - Source/sink setup phase
-- `src/replication/` - WAL handler and replication state
-- `src/http_api/` - HTTP API + web UI (--features http-api)
-- `src/demo/` - Demo/quickstart data generation (--features demo)
-- `src/grpc/` - gRPC server (state, services, metrics)
+  - `postgres.rs` - Replication connection
+- `src/pipeline/` - Generic batching + dispatch to sink
+  - `schema_cache.rs` - Table schema tracking (used by converter)
+- `src/connectors/sinks/` - Sink implementations
+  - `mod.rs` - `create_sink()` factory
+  - `starrocks/` - StarRocks: Stream Load HTTP API
+- `src/engine/` - Orchestration (setup → CDC → snapshot → shutdown)
+  - `snapshot/` - Flink CDC concurrent snapshot (PK-range chunking, watermarks, dedup)
+  - `setup/` - Source + sink setup (conditional by SinkType)
+- `src/replication/` - WAL handler (parse, convert, dedup, send to pipeline)
+- `src/grpc/` - gRPC server (SharedState, services)
 - `src/config.rs` - Configuration from environment variables
-- `src/source/` - Source abstraction layer
-- `src/sink/` - Sink abstraction layer
+- `src/state_store.rs` - LSN checkpoint persistence
 
 ## Feature Flags
 
 - `--features http-api` - Enables HTTP API + web UI on port 8080 (setup wizard, dashboard, REST endpoints)
 - `--features demo` - Enables demo mode with sample data generation
 
-## HTTP API (--features http-api)
-
-When built with `--features http-api`, dbmazz exposes a web UI and REST endpoints on `HTTP_API_PORT` (default 8080):
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/` | Web UI (setup wizard or live dashboard) |
-| GET | `/healthz` | Health check |
-| GET | `/status` | Full metrics JSON |
-| GET | `/metrics/prometheus` | Prometheus metrics |
-| POST | `/pause` | Pause replication |
-| POST | `/resume` | Resume replication |
-| POST | `/drain-stop` | Graceful drain and stop |
-| POST | `/api/datasources/test` | Test connection |
-| POST | `/api/tables/discover` | Discover tables |
-| POST | `/api/replication/start` | Start replication |
-| POST | `/api/replication/stop` | Stop replication |
-
 ## Snapshot / Backfill
 
 Set `DO_SNAPSHOT=true` for initial data backfill. Uses Flink CDC concurrent snapshot algorithm:
 1. Chunks table by PK ranges (`SNAPSHOT_CHUNK_SIZE`, default 50000 rows)
-2. For each chunk: low-watermark → SELECT → high-watermark → Stream Load
+2. For each chunk: low-watermark → SELECT → high-watermark → sink.write_batch()
 3. WAL consumer checks `should_emit()` to suppress duplicate events within completed chunks
 4. Progress tracked in `dbmazz_snapshot_state` table (resumable)
+5. N parallel workers, each with its own PG connection and sink instance
 
 Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
+
+## Adding a New Sink
+
+```
+1. Create src/connectors/sinks/my_sink/
+   ├── mod.rs      Implement Sink trait (6 methods)
+   └── config.rs   MySinkConfig
+
+2. Add SinkType::MySink to src/config.rs
+
+3. Add match arm in create_sink() (src/connectors/sinks/mod.rs)
+
+4. Add match arm in SetupManager (src/engine/setup/mod.rs)
+
+Done. CDC and snapshot work automatically via write_batch().
+```
+
+## Sink Trait
+
+```rust
+trait Sink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> SinkCapabilities;
+    async fn validate_connection(&self) -> Result<()>;
+    async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> { Ok(()) }
+    async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
+    async fn close(&mut self) -> Result<()>;  // flush + cleanup
+}
+```
+
+6 methods, 1 with default. Modeled after Kafka Connect. The sink is fully responsible for its loading strategy — the engine doesn't know about Stream Load, COPY protocol, S3 staging, etc. Snapshot and CDC both use `write_batch()`.
+
+## Key Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOURCE_URL` | — | PostgreSQL connection string |
+| `SOURCE_TYPE` | `postgres` | Source connector type |
+| `SINK_URL` | — | Sink connection URL |
+| `SINK_TYPE` | `starrocks` | Sink connector type (starrocks) |
+| `SINK_DATABASE` | — | Target database name |
+| `FLUSH_SIZE` | `10000` | Max events per batch |
+| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
+| `GRPC_PORT` | `50051` | gRPC server port |
+| `DO_SNAPSHOT` | `false` | Enable initial snapshot |
+| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
+| `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot (no CDC) |
 
 ## gRPC Services
 
@@ -92,31 +120,15 @@ Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
 - `CdcStatusService` - GetStatus (LSN, events, snapshot progress)
 - `CdcMetricsService` - StreamMetrics (streaming metrics at configurable interval)
 
-## Key Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SOURCE_URL` | — | PostgreSQL connection string |
-| `SOURCE_TYPE` | `postgres` | Source connector type |
-| `SINK_URL` | — | StarRocks FE HTTP URL |
-| `SINK_TYPE` | `starrocks` | Sink connector type |
-| `FLUSH_SIZE` | `10000` | Max events per batch |
-| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
-| `GRPC_PORT` | `50051` | gRPC server port |
-| `HTTP_API_PORT` | `8080` | HTTP API port |
-| `DO_SNAPSHOT` | `false` | Enable initial snapshot |
-| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
-| `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot (no CDC) |
-
 ## Versioning & Release
 
 Format: `vMAJOR.MINOR.PATCH` (e.g., `v1.3.2`). Tags only on `main`.
 
 | Bump | When |
 |------|------|
-| **MAJOR** | Breaking changes in checkpoint/state_store format (requires re-snapshot), breaking gRPC service changes, incompatible config changes |
-| **MINOR** | New source/sink connector types, new PG type support, new features (e.g., snapshot improvements), new gRPC methods (additive), new config options with defaults |
-| **PATCH** | Bug fixes, type mapping fixes, performance improvements, Stream Load optimizations, dependency updates |
+| **MAJOR** | Breaking changes in checkpoint/state_store format, breaking gRPC changes, incompatible config changes |
+| **MINOR** | New sink connector types, new PG type support, new features, new gRPC methods (additive) |
+| **PATCH** | Bug fixes, type mapping fixes, performance improvements, dependency updates |
 
 ### Branching
 
@@ -124,60 +136,55 @@ Format: `vMAJOR.MINOR.PATCH` (e.g., `v1.3.2`). Tags only on `main`.
 - Tags from `main`: `v1.3.0`
 - Hotfix: branch `release/v1.3.x` from tag → cherry-pick fix → tag `v1.3.1`
 
-### Compatibility
-
-- Checkpoint format changes must be backward-compatible (can read old checkpoints) or bump MAJOR
-- gRPC services consumed by worker-agent: changes must be additive
-- New PG types or Stream Load format changes are MINOR (additive capability)
-
 ### Deploy
 
 - Binaries uploaded to S3/GCS: `releases/dbmazz/vX.Y.Z/dbmazz-linux-amd64`
-- Rollout via canary tiers (same as worker-agent): `canary` → `early_adopter` → `stable`
+- Rollout via canary tiers: `canary` → `early_adopter` → `stable`
 - Worker-agent manages dbmazz lifecycle; version comes from `daemon_versions` table
 
 ## Build & Test
 
 ```bash
-cargo build --release    # Build
-cargo test               # Test
-cargo fmt -- --check     # Format check
-cargo clippy -- -D warnings  # Lint
+cargo build --release                    # Build
+cargo build --release --features http-api # With web UI
+cargo test                               # Test
+cargo fmt -- --check                     # Format check
+cargo clippy -- -D warnings              # Lint
 ```
 
 ## Review Rules
 
-These are patterns that have caused real bugs or are critical for data integrity. Flag them with HIGH confidence.
+These are patterns that have caused real bugs or are critical for data integrity.
 
 ### Data Integrity
-- LSN (Log Sequence Number) tracking MUST be accurate. `confirmed_lsn` should only advance AFTER data is successfully committed to StarRocks. Premature confirmation = data loss.
-- Stream Load responses MUST be fully checked. StarRocks returns HTTP 200 even for partial failures - always check the response body JSON for `Status` field.
-- Replication slot management: NEVER drop a replication slot without confirming the consumer is done. Lost slots = re-snapshot required.
+- LSN tracking MUST be accurate. `confirmed_lsn` only advances AFTER data is committed to the sink. Premature confirmation = data loss.
+- Checkpoint saved BEFORE confirming to PostgreSQL. Always. See `handle_checkpoint_feedback()` in engine.
+- Replication slot: NEVER drop without confirming the consumer is done. Lost slots = re-snapshot required.
+- Sink responses MUST be fully checked. StarRocks returns HTTP 200 even for partial failures.
+
+### Pipeline & Sink
+- Pipeline only sees `CdcRecord` — never `CdcMessage` or pgoutput types.
+- Conversion happens in `source/converter.rs`, not in the sink or pipeline.
+- Sink implementations are self-contained. Internal strategy (raw table, staging, etc.) is not exposed via the trait.
+- `write_batch()` handles both CDC and snapshot records — no separate snapshot path.
 
 ### PostgreSQL Replication
-- WAL parser MUST handle all pgoutput message types: Begin, Commit, Relation, Insert, Update, Delete, Truncate, Type, Origin. Unknown types should be logged and skipped, not panic.
-- Column type mapping between PostgreSQL and StarRocks MUST be exhaustive. Unmapped types should produce a clear error, not silently drop data.
+- WAL parser MUST handle all pgoutput message types. Unknown types: log and skip, never panic.
 - `keepalive` messages MUST be responded to promptly to prevent replication slot disconnection.
-
-### StarRocks Stream Load
-- Stream Load MUST use `partial_update` mode where appropriate to avoid overwriting unchanged columns.
-- Connection timeouts MUST be set on all HTTP calls to StarRocks. Hanging connections block the entire pipeline.
-- CSV escaping MUST handle: commas, quotes, newlines, null bytes, and binary data in text columns.
+- Column type mapping MUST be exhaustive. Unmapped types → clear error, never silent data drop.
 
 ### Credential Safety
-- Database credentials come from environment variables or gRPC config. NEVER log connection strings, passwords, or auth tokens.
-- Structs containing `password` fields MUST NOT use `#[derive(Debug)]` without redacting sensitive fields.
+- NEVER log connection strings, passwords, or auth tokens.
+- Structs with `password` fields MUST NOT use `#[derive(Debug)]` without redacting.
 
 ### Error Handling
-- Use `tracing` (info!, warn!, error!) for all logging. NEVER use `println!` or `eprintln!` in production code.
-- Transient errors (network, timeout) should be retried with backoff. Permanent errors (schema mismatch, auth failure) should be reported and stop the pipeline.
-- `unwrap()` MUST NOT appear in production code paths. Use `?` or explicit error handling.
+- Use `tracing` for all logging. NEVER `println!` or `eprintln!`.
+- Transient errors → retry with backoff. Permanent errors → report and stop pipeline.
+- `unwrap()` MUST NOT appear in production code paths.
 
 ### Rust Patterns
-- Prefer `?` over `match` for error propagation. Use `.context("msg")` or `.with_context(|| format!(...))` from anyhow for meaningful error chains.
-- Use `Arc<T>` for shared ownership across tasks. Use `Arc<RwLock<T>>` only when mutation is needed — prefer atomics (`AtomicU64`, `AtomicBool`) for counters and flags.
-- Async: always use `tokio::select!` with `biased;` when one branch is a cancellation signal. Put the cancellation arm first.
-- Never block the tokio runtime — use `spawn_blocking` for CPU-heavy or synchronous I/O work.
-- For hot-path serialization (Stream Load, WAL parsing), prefer byte-level operations over `serde_json` — allocate with `Vec::with_capacity()` and use `extend_from_slice`.
-- Use `#[cfg(test)]` modules for unit tests, keep them in the same file as the code they test.
-- Prefer `tracing::instrument` on async functions for automatic span creation. Use `skip(self)` to avoid logging large structs.
+- Prefer `?` over `match` for error propagation. Use `.context()` from anyhow.
+- `Arc<T>` for shared ownership. Prefer atomics over `RwLock` for counters/flags.
+- Async: `tokio::select!` with `biased;` when one branch is a cancellation signal.
+- Never block the tokio runtime — use `spawn_blocking` for CPU-heavy work.
+- Hot-path serialization: byte-level operations, `Vec::with_capacity()`, `extend_from_slice`.

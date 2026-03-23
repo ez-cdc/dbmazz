@@ -12,7 +12,7 @@ Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rus
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 
-[Quickstart](#-quickstart) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Quickstart](#-quickstart) · [Test a sink](#-test-a-sink-end-to-end) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
@@ -53,6 +53,41 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ---
 
+## 🧪 Test a sink end-to-end
+
+Each sink has a docker-compose profile that spins up source DB + target DB + dbmazz with snapshot enabled. Two scripts handle validation:
+
+- **`deploy/test-sink.sh`** — verifies snapshot + CDC correctness (INSERT, UPDATE, DELETE). Pass/fail.
+- **`deploy/load-test.py`** — generates sustained load and shows replication metrics in a live terminal dashboard.
+
+```bash
+# 1. Start fresh (builds dbmazz + both databases with seed data)
+docker compose -f deploy/docker-compose.yml --profile pg-target down -v
+docker compose -f deploy/docker-compose.yml --profile pg-target up -d
+
+# 2. Verify snapshot → CDC transition + INSERT/UPDATE/DELETE
+bash deploy/test-sink.sh pg-target
+
+# 3. Load test — generates traffic + shows throughput, lag, row counts
+python3 deploy/load-test.py pg-target --rate 1000 --duration 60
+```
+
+| Profile | Source | Target | Dashboard |
+|---------|--------|--------|-----------|
+| `quickstart` | PostgreSQL | StarRocks | [localhost:8080](http://localhost:8080) |
+| `pg-target` | PostgreSQL | PostgreSQL | [localhost:8080](http://localhost:8080) |
+
+```bash
+# Cleanup
+docker compose -f deploy/docker-compose.yml --profile pg-target down -v
+```
+
+> **Requirements for load-test.py:** `pip install psycopg2-binary rich`
+
+> Adding a new sink? Add a profile to `deploy/docker-compose.yml` + a test function to `deploy/test-sink.sh`. See the [sink connector template](src/connectors/sinks/_template/README.md).
+
+---
+
 ## Why dbmazz?
 
 Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestration. dbmazz is a single binary — download, run, replicate.
@@ -69,11 +104,12 @@ Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestr
 
 ### Supported databases
 
-| Source | Sink |
-|:-------|:-----|
-| PostgreSQL | StarRocks |
+| Source | Sink | Status |
+|:-------|:-----|:-------|
+| PostgreSQL | StarRocks | Stable |
+| PostgreSQL | PostgreSQL | In development |
 
-More connectors coming soon.
+Snowflake, MongoDB, S3, and more on the [roadmap](.plans/multi-sink-roadmap.md).
 
 ---
 
@@ -323,25 +359,23 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapsho
 <summary><strong>🏗️ Architecture</strong></summary>
 
 ```
-PostgreSQL                  dbmazz                    StarRocks
-┌──────────┐    WAL     ┌──────────────┐  Stream  ┌──────────┐
-│  Tables   │──────────▶│  Pipeline    │─────────▶│  Tables   │
-│           │  logical  │  - Batching  │  Load    │  + audit  │
-│  INSERT   │  replic.  │  - Schema    │  HTTP    │  columns  │
-│  UPDATE   │           │  - Checkpoint│          │           │
-│  DELETE   │           └──────────────┘          └──────────┘
-└──────────┘               5MB RAM                    <1s lag
+PostgreSQL (source)            dbmazz                         Sink (target)
+┌──────────────┐            ┌──────────────────┐          ┌──────────────┐
+│  WAL         │  logical   │ WAL Handler      │          │ StarRocks    │
+│  (INSERT,    │  replic.   │   ▼              │          │ PostgreSQL   │
+│   UPDATE,    │ ─────────▶ │ CdcRecord        │  write   │ Snowflake    │
+│   DELETE)    │ (pgoutput) │   ▼              │──batch──▶│ ...          │
+│              │            │ Pipeline         │          │              │
+│              │ ◀──────────│ Checkpoint (LSN) │          │              │
+└──────────────┘  confirm   └──────────────────┘          └──────────────┘
+                                 ~5 MB RAM                     <1s lag
 ```
 
-dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, transforms events into batches, and loads them into StarRocks via the Stream Load HTTP API. Each instance handles one replication job.
+dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, converts events to generic `CdcRecord` types, batches them in a pipeline, and writes to any supported sink via the `Sink` trait. Each instance handles one replication job.
 
-| Source | Method | Status |
-|--------|--------|--------|
-| **PostgreSQL** | Logical Replication (pgoutput) | Stable |
+The sink is fully responsible for its loading strategy (Stream Load, COPY, S3 staging, etc.). The engine and pipeline are sink-agnostic.
 
-| Sink | Method | Status |
-|------|--------|--------|
-| **StarRocks** | Stream Load HTTP API | Stable |
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and how to add new sinks.
 
 </details>
 
@@ -354,6 +388,7 @@ cargo build --release --features http-api # With web UI + HTTP API
 ```
 
 </details>
+
 
 ---
 
