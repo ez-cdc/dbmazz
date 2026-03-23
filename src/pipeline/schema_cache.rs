@@ -12,6 +12,7 @@ pub struct TableSchema {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SchemaDelta {
     pub table_name: String,
     pub added_columns: Vec<AddedColumn>,

@@ -1,17 +1,21 @@
 pub mod schema_cache;
 
+use crate::core::{CdcRecord, Sink};
 use crate::grpc::state::SharedState;
-use crate::pipeline::schema_cache::SchemaCache;
-use crate::sink::Sink;
-use crate::source::parser::{CdcEvent, CdcMessage};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+/// Event sent from the WAL handler to the Pipeline.
+/// Contains a generic CdcRecord (not pgoutput-specific).
+pub struct PipelineEvent {
+    pub lsn: u64,
+    pub record: CdcRecord,
+}
+
 pub struct Pipeline {
-    rx: mpsc::Receiver<CdcEvent>,
-    schema_cache: SchemaCache,
+    rx: mpsc::Receiver<PipelineEvent>,
     sink: Box<dyn Sink + Send>,
     batch_size: usize,
     batch_timeout: Duration,
@@ -22,14 +26,13 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub fn new(
-        rx: mpsc::Receiver<CdcEvent>,
+        rx: mpsc::Receiver<PipelineEvent>,
         sink: Box<dyn Sink + Send>,
         batch_size: usize,
         batch_timeout: Duration,
     ) -> Self {
         Self {
             rx,
-            schema_cache: SchemaCache::new(),
             sink,
             batch_size,
             batch_timeout,
@@ -52,21 +55,17 @@ impl Pipeline {
     }
 
     pub async fn run(mut self) {
-        let mut batch = Vec::with_capacity(self.batch_size);
+        let mut batch: Vec<CdcRecord> = Vec::with_capacity(self.batch_size);
         let mut interval = tokio::time::interval(self.batch_timeout);
         let mut last_lsn: u64 = 0;
 
         loop {
             // Check if paused before processing
             if let Some(ref state) = self.shared_state {
-                let current_state = state.state();
-                if current_state == crate::grpc::state::CdcState::Paused {
+                if state.state() == crate::grpc::state::CdcState::Paused {
                     // Flush pending batch before pausing
-                    if !batch.is_empty() {
-                        if !self.flush_batch(&batch, last_lsn).await {
-                            break; // Stop on flush failure
-                        }
-                        batch.clear();
+                    if !batch.is_empty() && !self.flush_batch(&mut batch, last_lsn).await {
+                        break; // Stop on flush failure
                     }
                     // Sleep while paused
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -80,28 +79,17 @@ impl Pipeline {
                         Some(event) => {
                             last_lsn = event.lsn; // Update LSN
 
-                            // Detect schema changes
-                            if let Some(delta) = self.schema_cache.update(&event.message) {
-                                info!("[SCHEMA] Schema change detected for table {}: {} new columns",
-                                    delta.table_name, delta.added_columns.len());
-                                if let Err(e) = self.sink.apply_schema_delta(&delta).await {
-                                    error!("Schema evolution failed: {}", e);
-                                    // Continue processing - do not stop the pipeline due to DDL errors
-                                }
-                            }
-
                             // Track the latest commit timestamp for lag calculation
-                            if let CdcMessage::Commit { timestamp, .. } = &event.message {
-                                self.last_commit_timestamp_us = *timestamp;
+                            if let CdcRecord::Commit { commit_timestamp_us, .. } = &event.record {
+                                self.last_commit_timestamp_us = *commit_timestamp_us;
                             }
 
-                            batch.push(event.message);
+                            batch.push(event.record);
 
                             if batch.len() >= self.batch_size {
-                                if !self.flush_batch(&batch, last_lsn).await {
+                                if !self.flush_batch(&mut batch, last_lsn).await {
                                     break; // Stop on flush failure
                                 }
-                                batch.clear();
                                 if let Some(ref state) = self.shared_state {
                                     state.set_pending(0);
                                 }
@@ -116,10 +104,9 @@ impl Pipeline {
                 }
                 _ = interval.tick() => {
                     if !batch.is_empty() {
-                        if !self.flush_batch(&batch, last_lsn).await {
+                        if !self.flush_batch(&mut batch, last_lsn).await {
                             break; // Stop on flush failure
                         }
-                        batch.clear();
                         if let Some(ref state) = self.shared_state {
                             state.set_pending(0);
                         }
@@ -134,51 +121,19 @@ impl Pipeline {
                 "Pipeline stopped with {} pending events in batch",
                 batch.len()
             );
-            self.flush_batch(&batch, last_lsn).await;
+            self.flush_batch(&mut batch, last_lsn).await;
         }
         info!("Pipeline shutdown complete");
     }
 
     /// Flush batch to sink. Returns true on success, false on failure (pipeline should stop).
-    async fn flush_batch(&mut self, batch: &[CdcMessage], lsn: u64) -> bool {
-        match self.sink.push_batch(batch, &self.schema_cache, lsn).await {
-            Ok(_) => {
-                // Emit CDC events to demo broadcast channel (compiled out in production)
-                #[cfg(feature = "demo")]
-                {
-                    if let Some(ref state) = self.shared_state {
-                        for msg in batch {
-                            let summary = match msg {
-                                CdcMessage::Insert { relation_id, .. } => {
-                                    let table = self
-                                        .schema_cache
-                                        .get_table_name(*relation_id)
-                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
-                                    Some(format!("INSERT:{}", table))
-                                }
-                                CdcMessage::Update { relation_id, .. } => {
-                                    let table = self
-                                        .schema_cache
-                                        .get_table_name(*relation_id)
-                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
-                                    Some(format!("UPDATE:{}", table))
-                                }
-                                CdcMessage::Delete { relation_id, .. } => {
-                                    let table = self
-                                        .schema_cache
-                                        .get_table_name(*relation_id)
-                                        .unwrap_or_else(|| format!("rel_{}", relation_id));
-                                    Some(format!("DELETE:{}", table))
-                                }
-                                _ => None,
-                            };
-                            if let Some(s) = summary {
-                                let _ = state.demo_event_tx.send(s);
-                            }
-                        }
-                    }
-                }
+    /// Drains the batch Vec so it can be reused without reallocation.
+    async fn flush_batch(&mut self, batch: &mut Vec<CdcRecord>, lsn: u64) -> bool {
+        let records = std::mem::take(batch);
+        let record_count = records.len();
 
+        match self.sink.write_batch(records).await {
+            Ok(_result) => {
                 // Update metric for batches sent
                 if let Some(ref state) = self.shared_state {
                     state.increment_batches();
@@ -186,7 +141,8 @@ impl Pipeline {
                     // Calculate end-to-end replication lag
                     if self.last_commit_timestamp_us > 0 {
                         const PG_EPOCH_OFFSET_USEC: u64 = 946_684_800_000_000;
-                        let commit_unix_us = self.last_commit_timestamp_us + PG_EPOCH_OFFSET_USEC;
+                        let commit_unix_us =
+                            self.last_commit_timestamp_us + PG_EPOCH_OFFSET_USEC;
                         let now_us = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -208,14 +164,10 @@ impl Pipeline {
             }
             Err(e) => {
                 // CRITICAL: Sink failure (StarRocks down, network error, etc.)
-                // If we continue processing, events will be consumed from the channel
-                // but not persisted. On crash, these events are LOST because we never
-                // checkpointed them.
-                error!("CRITICAL: Sink push_batch failed: {}", e);
+                error!("CRITICAL: Sink write_batch failed: {}", e);
                 error!(
                     "CRITICAL: Batch details: {} events, LSN 0x{:X}",
-                    batch.len(),
-                    lsn
+                    record_count, lsn
                 );
 
                 // Set CDC state to Stopped to signal error

@@ -4,7 +4,7 @@
 mod setup;
 pub mod snapshot;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,20 +15,28 @@ use crate::config::Config;
 use crate::connectors::sinks::create_sink;
 use crate::grpc::state::SharedState;
 use crate::grpc::{self, CdcConfig, CdcState, Stage};
-use crate::pipeline::Pipeline;
+use crate::pipeline::schema_cache::SchemaCache;
+use crate::pipeline::{Pipeline, PipelineEvent};
 use crate::replication::{
     handle_keepalive, handle_xlog_data, parse_replication_message, WalMessage,
 };
-use crate::sink::NewSinkAdapter;
 use crate::source::postgres::{build_standby_status_update, PostgresSource};
 use crate::state_store::StateStore;
 use setup::SetupManager;
+
+/// Factory that creates fresh Sink instances (used by snapshot workers).
+type SinkFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn crate::core::Sink>> + Send + Sync>;
 
 /// Main CDC engine that orchestrates all components
 pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
     state_store: Option<StateStore>,
+    /// SchemaCache for converting pgoutput CdcMessage → generic CdcRecord.
+    /// Owned by the engine, passed mutably to the WAL handler.
+    schema_cache: SchemaCache,
+    /// Factory for creating sink instances (snapshot workers need their own).
+    sink_factory: Option<SinkFactory>,
 }
 
 impl CdcEngine {
@@ -49,6 +57,8 @@ impl CdcEngine {
             config,
             shared_state,
             state_store: None,
+            schema_cache: SchemaCache::new(),
+            sink_factory: None,
         }
     }
 
@@ -114,11 +124,11 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Connecting to sink")
             .await;
-        let sink_adapter = self.init_sink()?;
+        let mut sink = create_sink(&self.config.sink)?;
 
-        // Verify HTTP connectivity BEFORE declaring CDC ready
-        if let Err(e) = sink_adapter.verify_http_connection().await {
-            let error_msg = format!("Sink HTTP connection failed: {}", e);
+        // Verify sink connectivity BEFORE declaring CDC ready
+        if let Err(e) = sink.validate_connection().await {
+            let error_msg = format!("Sink connection failed: {}", e);
             self.shared_state
                 .set_setup_error(Some(error_msg.clone()))
                 .await;
@@ -130,10 +140,18 @@ impl CdcEngine {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
-        info!("  [OK] Sink HTTP endpoint accessible");
+        info!("  [OK] Sink connection verified");
+
+        // Stage: SETUP - Sink setup (create target tables, raw tables, etc.)
+        self.shared_state
+            .set_stage(Stage::Setup, "Setting up sink")
+            .await;
+        let source_schemas = self.introspect_source_schemas().await?;
+        sink.setup(&source_schemas).await?;
+        info!("  [OK] Sink setup complete");
 
         // Log sink capabilities
-        let caps = sink_adapter.capabilities();
+        let caps = sink.capabilities();
         info!("  Sink capabilities:");
         info!(
             "    - upsert: {}, delete: {}, schema_evolution: {}",
@@ -151,7 +169,7 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Initializing pipeline")
             .await;
-        let (tx, feedback_rx) = self.init_pipeline(sink_adapter, &caps);
+        let (tx, feedback_rx) = self.init_pipeline(sink, &caps);
 
         // Stage: CDC - Ready to replicate
         self.shared_state.set_stage(Stage::Cdc, "Replicating").await;
@@ -160,12 +178,19 @@ impl CdcEngine {
         // Spawn snapshot worker concurrently if enabled (DO_SNAPSHOT=true)
         // The WAL consumer continues running in parallel; deduplication is handled
         // via should_emit() in wal_handler using the finished_chunks BTreeMap.
+        // Create sink factory for snapshot workers (used by both initial and on-demand snapshots)
+        let sink_config = self.config.sink.clone();
+        let sink_factory: SinkFactory = Arc::new(move || create_sink(&sink_config));
+        self.sink_factory = Some(Arc::clone(&sink_factory));
+
         if self.config.do_snapshot {
             let snap_config = Arc::new(self.config.clone());
             let snap_state = self.shared_state.clone();
             let initial_snapshot_only = self.config.initial_snapshot_only;
+            let snap_sink_factory = Arc::clone(&sink_factory);
+
             tokio::spawn(async move {
-                match snapshot::run_snapshot(snap_config, snap_state.clone()).await {
+                match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory).await {
                     Ok(()) => {
                         snap_state.set_snapshot_active(false);
                         info!("Snapshot completed successfully");
@@ -227,6 +252,94 @@ impl CdcEngine {
         });
     }
 
+    /// Introspect source PostgreSQL to get table schemas.
+    /// Used by sinks that need to create target tables (e.g., PostgreSQL sink).
+    async fn introspect_source_schemas(&self) -> Result<Vec<crate::core::traits::SourceTableSchema>> {
+        use crate::core::traits::{SourceColumn, SourceTableSchema};
+        use crate::source::converter::pg_type_to_data_type;
+
+        let plain_url = self.config.database_url
+            .replace("&replication=database", "")
+            .replace("?replication=database&", "?")
+            .replace("?replication=database", "");
+
+        let (client, connection) = tokio_postgres::connect(&plain_url, tokio_postgres::NoTls)
+            .await
+            .context("Failed to connect to source for schema introspection")?;
+
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let mut schemas = Vec::new();
+
+        for table in &self.config.tables {
+            let (schema_name, table_name) = if table.contains('.') {
+                let parts: Vec<&str> = table.splitn(2, '.').collect();
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                ("public".to_string(), table.to_string())
+            };
+
+            // Get columns
+            let col_rows = client
+                .query(
+                    "SELECT a.attname, a.atttypid::int4, a.attnotnull
+                     FROM pg_attribute a
+                     JOIN pg_class c ON c.oid = a.attrelid
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = $1 AND c.relname = $2
+                       AND a.attnum > 0 AND NOT a.attisdropped
+                     ORDER BY a.attnum",
+                    &[&schema_name, &table_name],
+                )
+                .await
+                .with_context(|| format!("Failed to get columns for {}", table))?;
+
+            let columns: Vec<SourceColumn> = col_rows
+                .iter()
+                .map(|row| {
+                    let name: String = row.get(0);
+                    let type_oid: i32 = row.get(1);
+                    let not_null: bool = row.get(2);
+                    SourceColumn {
+                        name,
+                        data_type: pg_type_to_data_type(type_oid as u32),
+                        nullable: !not_null,
+                        pg_type_id: type_oid as u32,
+                    }
+                })
+                .collect();
+
+            // Get primary key columns
+            let pk_rows = client
+                .query(
+                    "SELECT a.attname
+                     FROM pg_index i
+                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                     JOIN pg_class c ON c.oid = i.indrelid
+                     JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
+                     ORDER BY array_position(i.indkey, a.attnum)",
+                    &[&schema_name, &table_name],
+                )
+                .await
+                .with_context(|| format!("Failed to get PKs for {}", table))?;
+
+            let primary_keys: Vec<String> = pk_rows.iter().map(|r| r.get(0)).collect();
+
+            schemas.push(SourceTableSchema {
+                schema: schema_name,
+                name: table_name,
+                columns,
+                primary_keys,
+            });
+        }
+
+        info!("  Introspected {} source table schemas", schemas.len());
+        Ok(schemas)
+    }
+
     /// Initialize PostgreSQL source
     async fn init_source(&self) -> Result<PostgresSource> {
         let source = PostgresSource::new(
@@ -239,21 +352,12 @@ impl CdcEngine {
         Ok(source)
     }
 
-    /// Initialize sink using trait-based connectors
-    fn init_sink(&self) -> Result<NewSinkAdapter> {
-        let core_sink = create_sink(&self.config.sink)?;
-        Ok(NewSinkAdapter::new(core_sink))
-    }
-
-    /// Initialize pipeline with sink adapter
+    /// Initialize pipeline with sink (core::Sink, no adapter)
     fn init_pipeline(
         &self,
-        sink: NewSinkAdapter,
+        sink: Box<dyn crate::core::Sink>,
         caps: &crate::core::SinkCapabilities,
-    ) -> (
-        mpsc::Sender<crate::source::parser::CdcEvent>,
-        mpsc::Receiver<u64>,
-    ) {
+    ) -> (mpsc::Sender<PipelineEvent>, mpsc::Receiver<u64>) {
         // Job/config values always win. Sink capabilities are only fallback/advisory.
         let batch_size = if self.config.flush_size > 0 {
             self.config.flush_size
@@ -283,7 +387,7 @@ impl CdcEngine {
 
         let pipeline = Pipeline::new(
             rx,
-            Box::new(sink),
+            sink,
             batch_size,
             Duration::from_millis(flush_interval_ms),
         )
@@ -297,9 +401,9 @@ impl CdcEngine {
 
     /// Main replication loop
     async fn run_main_loop<S>(
-        &self,
+        &mut self,
         mut replication_stream: S,
-        tx: mpsc::Sender<crate::source::parser::CdcEvent>,
+        tx: mpsc::Sender<PipelineEvent>,
         mut feedback_rx: mpsc::Receiver<u64>,
         _start_lsn: u64,
     ) -> Result<()>
@@ -350,8 +454,10 @@ impl CdcEngine {
                         let _ = self.shared_state.snapshot_trigger.send(false);
                         let snap_config = Arc::new(self.config.clone());
                         let snap_state = self.shared_state.clone();
+                        let snap_sink_factory = self.sink_factory.clone()
+                            .expect("sink_factory must be initialized before snapshot");
                         tokio::spawn(async move {
-                            match snapshot::run_snapshot(snap_config, snap_state.clone()).await {
+                            match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory).await {
                                 Ok(()) => {
                                     snap_state.set_snapshot_active(false);
                                     info!("On-demand snapshot completed successfully");
@@ -417,7 +523,7 @@ impl CdcEngine {
     /// Check CDC state (Pause/Stop/Draining) - Synchronous
     fn check_state_control_sync(
         &self,
-        tx: &mpsc::Sender<crate::source::parser::CdcEvent>,
+        tx: &mpsc::Sender<PipelineEvent>,
     ) -> Option<ControlFlow> {
         let current_state = self.shared_state.state();
 
@@ -446,9 +552,9 @@ impl CdcEngine {
 
     /// Handle replication messages
     async fn handle_replication_message<S>(
-        &self,
+        &mut self,
         msg: WalMessage,
-        tx: &mpsc::Sender<crate::source::parser::CdcEvent>,
+        tx: &mpsc::Sender<PipelineEvent>,
         replication_stream: &mut S,
     ) -> Result<u64>
     where
@@ -457,7 +563,15 @@ impl CdcEngine {
     {
         match msg {
             WalMessage::XLogData { lsn, data } => {
-                handle_xlog_data(data, lsn, tx, &self.shared_state, self.config.flush_size).await?;
+                handle_xlog_data(
+                    data,
+                    lsn,
+                    tx,
+                    &self.shared_state,
+                    &mut self.schema_cache,
+                    self.config.flush_size,
+                )
+                .await?;
                 Ok(lsn)
             }
             WalMessage::KeepAlive {

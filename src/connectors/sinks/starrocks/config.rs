@@ -199,6 +199,7 @@ mod tests {
             user: "admin".to_string(),
             password: "secret".to_string(),
             starrocks: Some(ConfigStarRocksSinkConfig {}),
+            postgres: None,
         };
 
         let sr_config = StarRocksSinkConfig::from_sink_config(&config).unwrap();
