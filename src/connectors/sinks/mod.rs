@@ -10,6 +10,7 @@
 //! ## Available Sinks
 //!
 //! - **StarRocks**: OLAP database with Stream Load API support
+//! - **PostgreSQL**: Relational database via raw table + MERGE (PG >= 15)
 //!
 //! ## Usage
 //!
@@ -22,10 +23,12 @@
 //! sink.write_batch(records).await?;
 //! ```
 
+pub mod postgres;
 pub mod starrocks;
 
 use anyhow::Result;
 
+use self::postgres::PostgresSink;
 use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::Sink;
@@ -70,16 +73,18 @@ pub fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>> {
         SinkType::StarRocks => {
             let sink = StarRocksSink::new(config)?;
             Ok(Box::new(sink))
-        } // Future sinks can be added here:
-          // SinkType::ClickHouse => Ok(Box::new(ClickHouseSink::new(config)?)),
-          // SinkType::Snowflake => Ok(Box::new(SnowflakeSink::new(config)?)),
+        }
+        SinkType::Postgres => {
+            let sink = PostgresSink::new(config)?;
+            Ok(Box::new(sink))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SinkConfig, SinkType, StarRocksSinkConfig};
+    use crate::config::{PostgresSinkConfig, SinkConfig, SinkType, StarRocksSinkConfig};
 
     #[test]
     fn test_create_starrocks_sink() {
@@ -91,6 +96,27 @@ mod tests {
             user: "root".to_string(),
             password: "".to_string(),
             starrocks: Some(StarRocksSinkConfig {}),
+            postgres: None,
+        };
+
+        let result = create_sink(&config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_create_postgres_sink() {
+        let config = SinkConfig {
+            sink_type: SinkType::Postgres,
+            url: "postgres://localhost/test".to_string(),
+            port: 5432,
+            database: "test_db".to_string(),
+            user: "postgres".to_string(),
+            password: "".to_string(),
+            starrocks: None,
+            postgres: Some(PostgresSinkConfig {
+                schema: "public".to_string(),
+                job_name: "test_slot".to_string(),
+            }),
         };
 
         let result = create_sink(&config);

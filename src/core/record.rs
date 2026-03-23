@@ -31,6 +31,9 @@ pub enum CdcRecord {
     Commit {
         xid: u64,
         position: SourcePosition,
+        /// Source commit timestamp in microseconds (PG epoch for PostgreSQL).
+        /// Used for end-to-end replication lag calculation.
+        commit_timestamp_us: u64,
     },
     Heartbeat {
         position: SourcePosition,

@@ -2,23 +2,36 @@
 # dbmazz CDC Daemon — Self-Hosted Deployment
 # =============================================================================
 #
-# Two modes:
+# Profiles:
 #
-#   Quickstart (includes PostgreSQL + StarRocks + sample data):
-#     docker compose -f deploy/docker-compose.yml --profile quickstart up -d
-#     Open http://localhost:8080 — configure datasources, discover tables, start replication
+#   quickstart — PG source + StarRocks target + web UI (configure from browser):
+#     docker compose --profile quickstart up -d
+#     Open http://localhost:8080
 #
-#   Production (bring your own databases):
-#     docker compose -f deploy/docker-compose.yml up -d
-#     Open http://localhost:8080 — connect your own PostgreSQL and StarRocks
+#   pg-target — PG source + PG target + web UI:
+#     docker compose --profile pg-target up -d
+#     Open http://localhost:8080
+#     Source: postgres://postgres:postgres@postgres:5432/dbmazz
+#     Target: postgres://postgres:postgres@postgres-target:5432/dbmazz_target
+#
+#   production — bring your own databases + web UI:
+#     docker compose up -d
+#     Open http://localhost:8080
+#
+# Adding a new sink profile:
+#   1. Add target service(s) with profiles: ["my-sink"]
+#   2. Add dbmazz-my-sink service with SINK_TYPE + connection env vars
+#   3. Add verification to deploy/test-sink.sh
+#   4. Run: docker compose --profile my-sink up -d
 
 services:
   # ---------------------------------------------------------------------------
-  # Quickstart databases (only start with --profile quickstart)
+  # Source PostgreSQL — shared by all test profiles
+  # WAL logical enabled, seed data: 500 orders + 1500 order_items
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16
-    profiles: ["quickstart"]
+    profiles: ["quickstart", "pg-target"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -44,6 +57,9 @@ services:
     networks:
       - dbmazz
 
+  # ---------------------------------------------------------------------------
+  # Profile: quickstart — StarRocks target + web UI
+  # ---------------------------------------------------------------------------
   starrocks:
     image: starrocks/allin1-ubuntu:latest
     profiles: ["quickstart"]
@@ -77,15 +93,14 @@ services:
     networks:
       - dbmazz
 
-  # ---------------------------------------------------------------------------
-  # dbmazz CDC daemon (always starts)
-  # ---------------------------------------------------------------------------
+  # dbmazz for quickstart — web UI, configure from browser
   dbmazz:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
       args:
         CARGO_FEATURES: "http-api"
+    profiles: ["quickstart"]
     ports:
       - "${HTTP_API_PORT:-8080}:${HTTP_API_PORT:-8080}"
       - "${GRPC_PORT:-50051}:${GRPC_PORT:-50051}"
@@ -93,8 +108,6 @@ services:
       - path: .env
         required: false
     environment:
-      # Only non-connection settings have defaults.
-      # Connection vars (SOURCE_URL, SINK_URL, etc.) come from .env or browser setup.
       HTTP_API_PORT: "${HTTP_API_PORT:-8080}"
       GRPC_PORT: "${GRPC_PORT:-50051}"
       FLUSH_SIZE: "${FLUSH_SIZE:-2000}"
@@ -103,10 +116,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-        required: false
       starrocks-init:
         condition: service_completed_successfully
-        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${HTTP_API_PORT:-8080}/healthz"]
@@ -117,6 +128,88 @@ services:
     networks:
       - dbmazz
 
+  # ---------------------------------------------------------------------------
+  # Profile: pg-target — PG source + PG target + web UI
+  # User configures connections from http://localhost:8080
+  #
+  # Connection details for the browser:
+  #   Source: postgres://postgres:postgres@postgres:5432/dbmazz
+  #   Target: postgres://postgres:postgres@postgres-target:5432/dbmazz_target
+  # ---------------------------------------------------------------------------
+  postgres-target:
+    image: postgres:16
+    profiles: ["pg-target"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dbmazz_target
+    ports:
+      - "25432:5432"
+    volumes:
+      - pg_target_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    networks:
+      - dbmazz
+
+  # dbmazz for pg-target — preconfigured + dashboard UI on :8080
+  dbmazz-cdc:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CARGO_FEATURES: "http-api"
+    profiles: ["pg-target"]
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    environment:
+      # Source
+      SOURCE_URL: "postgres://postgres:postgres@postgres:5432/dbmazz?replication=database"
+      SOURCE_SLOT_NAME: "dbmazz_slot"
+      SOURCE_PUBLICATION_NAME: "dbmazz_pub"
+      TABLES: "orders,order_items"
+      # Sink
+      SINK_TYPE: "postgres"
+      SINK_URL: "postgres://postgres:postgres@postgres-target:5432/dbmazz_target"
+      SINK_DATABASE: "dbmazz_target"
+      SINK_SCHEMA: "public"
+      # Pipeline
+      FLUSH_SIZE: "1000"
+      FLUSH_INTERVAL_MS: "2000"
+      # Snapshot
+      DO_SNAPSHOT: "true"
+      SNAPSHOT_CHUNK_SIZE: "10000"
+      SNAPSHOT_PARALLEL_WORKERS: "2"
+      # UI + logging
+      HTTP_API_PORT: "8080"
+      GRPC_PORT: "50051"
+      RUST_LOG: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-target:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - dbmazz
+
+  # ---------------------------------------------------------------------------
+  # Future profiles: add target + dbmazz service per sink type
+  # ---------------------------------------------------------------------------
+  # Profile: snowflake
+  # Profile: mongodb
+  # Profile: s3
+
 networks:
   dbmazz:
     driver: bridge
@@ -124,3 +217,4 @@ networks:
 volumes:
   pgdata:
   srdata:
+  pg_target_data:

@@ -429,6 +429,7 @@ mod tests {
             user: "root".to_string(),
             password: "".to_string(),
             starrocks: Some(ConfigStarRocksSinkConfig {}),
+            postgres: None,
         }
     }
 

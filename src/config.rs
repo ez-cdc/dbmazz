@@ -96,14 +96,18 @@ impl std::fmt::Debug for SourceConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SinkType {
     StarRocks,
-    // Future: ClickHouse, Snowflake, etc.
+    Postgres,
 }
 
 impl SinkType {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "starrocks" => Ok(SinkType::StarRocks),
-            other => anyhow::bail!("Unsupported sink type: '{}'. Supported: starrocks", other),
+            "postgres" | "postgresql" => Ok(SinkType::Postgres),
+            other => anyhow::bail!(
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres",
+                other
+            ),
         }
     }
 }
@@ -112,6 +116,7 @@ impl std::fmt::Display for SinkType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SinkType::StarRocks => write!(f, "starrocks"),
+            SinkType::Postgres => write!(f, "postgres"),
         }
     }
 }
@@ -120,7 +125,15 @@ impl std::fmt::Display for SinkType {
 #[derive(Debug, Clone)]
 pub struct StarRocksSinkConfig {
     // StarRocks-specific options can be added here
-    // e.g., stream_load_url, timeout settings, etc.
+}
+
+/// PostgreSQL target-specific sink configuration
+#[derive(Debug, Clone)]
+pub struct PostgresSinkConfig {
+    /// Target schema (default: "public")
+    pub schema: String,
+    /// Job name for raw table and metadata tracking (defaults to slot_name)
+    pub job_name: String,
 }
 
 /// Generic sink configuration
@@ -134,6 +147,8 @@ pub struct SinkConfig {
     pub password: String,
     #[allow(dead_code)]
     pub starrocks: Option<StarRocksSinkConfig>,
+    #[allow(dead_code)]
+    pub postgres: Option<PostgresSinkConfig>,
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -146,6 +161,7 @@ impl std::fmt::Debug for SinkConfig {
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
             .field("starrocks", &self.starrocks)
+            .field("postgres", &self.postgres)
             .finish()
     }
 }
@@ -316,6 +332,15 @@ impl Config {
         // Build sink-specific config
         let starrocks_config = match sink_type {
             SinkType::StarRocks => Some(StarRocksSinkConfig {}),
+            SinkType::Postgres => None,
+        };
+
+        let postgres_config = match sink_type {
+            SinkType::Postgres => Some(PostgresSinkConfig {
+                schema: optional_env("SINK_SCHEMA", "public"),
+                job_name: slot_name.clone(),
+            }),
+            SinkType::StarRocks => None,
         };
 
         let sink = SinkConfig {
@@ -326,6 +351,7 @@ impl Config {
             user: sink_user.clone(),
             password: sink_password.clone(),
             starrocks: starrocks_config,
+            postgres: postgres_config,
         };
 
         // Pipeline configuration
@@ -418,6 +444,18 @@ impl Config {
         match &self.sink.sink_type {
             SinkType::StarRocks => {
                 info!("Sink: StarRocks (db: {})", self.sink.database);
+            }
+            SinkType::Postgres => {
+                let schema = self
+                    .sink
+                    .postgres
+                    .as_ref()
+                    .map(|p| p.schema.as_str())
+                    .unwrap_or("public");
+                info!(
+                    "Sink: PostgreSQL (db: {}, schema: {})",
+                    self.sink.database, schema
+                );
             }
         }
 
