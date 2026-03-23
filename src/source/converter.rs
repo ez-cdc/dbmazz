@@ -7,8 +7,8 @@
 //! and the generic CDC pipeline. Everything downstream of this converter
 //! (Pipeline, Sink) only sees CdcRecord — never CdcMessage.
 
-use crate::core::record::{CdcRecord, ColumnDef, ColumnValue, DataType, TableRef, Value};
 use crate::core::position::SourcePosition;
+use crate::core::record::{CdcRecord, ColumnDef, ColumnValue, DataType, TableRef, Value};
 use crate::pipeline::schema_cache::{SchemaCache, TableSchema};
 use crate::source::parser::{CdcMessage, TupleData};
 use crate::utils::{normalize_timestamptz, parse_pg_array, strip_money_symbol};
@@ -69,7 +69,9 @@ pub fn convert_message(
         } => {
             let schema = schema_cache.get(*relation_id)?;
             let new_columns = tuple_to_column_values(new_tuple, schema);
-            let old_columns = old_tuple.as_ref().map(|t| tuple_to_column_values(t, schema));
+            let old_columns = old_tuple
+                .as_ref()
+                .map(|t| tuple_to_column_values(t, schema));
 
             Some(CdcRecord::Update {
                 table: TableRef::new(Some(schema.namespace.clone()), schema.name.clone()),

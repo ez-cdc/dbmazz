@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
-use crate::core::traits::SourceTableSchema;
 use super::merge_generator;
+use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name
 const METADATA_SCHEMA: &str = "_dbmazz";
@@ -52,7 +52,10 @@ pub fn spawn_normalizer(config: NormalizerConfig) -> mpsc::Sender<i64> {
 }
 
 /// Main normalizer loop.
-async fn normalizer_loop(config: NormalizerConfig, mut notify_rx: mpsc::Receiver<i64>) -> Result<()> {
+async fn normalizer_loop(
+    config: NormalizerConfig,
+    mut notify_rx: mpsc::Receiver<i64>,
+) -> Result<()> {
     let (client, connection) = tokio_postgres::connect(&config.url, NoTls)
         .await
         .context("Normalizer: failed to connect to target PostgreSQL")?;
@@ -81,13 +84,14 @@ async fn normalizer_loop(config: NormalizerConfig, mut notify_rx: mpsc::Receiver
         )
         .await
         {
-            Ok(Some(_)) => {}           // Notification received
-            Ok(None) => {               // Channel closed → shutdown
+            Ok(Some(_)) => {} // Notification received
+            Ok(None) => {
+                // Channel closed → shutdown
                 info!("Normalizer: channel closed, flushing remaining batches");
                 let _ = process_pending(&client, &config, &schema_map).await;
                 break;
             }
-            Err(_) => {}                // Timeout → poll
+            Err(_) => {} // Timeout → poll
         }
 
         // Drain queued notifications
@@ -152,10 +156,8 @@ async fn process_pending(
                 }
                 Err(e) => {
                     attempt += 1;
-                    let backoff = std::cmp::min(
-                        (2u64.pow(attempt.min(8))) * 1000,
-                        MAX_BACKOFF_SECS * 1000,
-                    );
+                    let backoff =
+                        std::cmp::min((2u64.pow(attempt.min(8))) * 1000, MAX_BACKOFF_SECS * 1000);
                     error!(
                         "Normalizer: batch {} failed (attempt {}): {}. Retrying in {}ms",
                         batch_id, attempt, e, backoff
@@ -266,7 +268,8 @@ async fn normalize_batch(
     // 1. All MERGE statements (one per table)
     // 2. Update normalize_batch_id
     // 3. Cleanup raw table rows for this batch
-    let mut tx_sql = String::with_capacity(merge_statements.iter().map(|s| s.len()).sum::<usize>() + 512);
+    let mut tx_sql =
+        String::with_capacity(merge_statements.iter().map(|s| s.len()).sum::<usize>() + 512);
     tx_sql.push_str("BEGIN;\n");
 
     for stmt in &merge_statements {
@@ -288,7 +291,11 @@ async fn normalize_batch(
 
     tx_sql.push_str("COMMIT;\n");
 
-    debug!("Normalizer: MERGE batch {} ({} tables)", batch_id, merge_statements.len());
+    debug!(
+        "Normalizer: MERGE batch {} ({} tables)",
+        batch_id,
+        merge_statements.len()
+    );
     client
         .batch_execute(&tx_sql)
         .await

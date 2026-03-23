@@ -61,19 +61,20 @@ pub async fn write_batch_to_raw(
 
     for record in records {
         match record {
-            CdcRecord::Insert {
-                table, columns, ..
-            } => {
+            CdcRecord::Insert { table, columns, .. } => {
                 let data_json = columns_to_json(columns);
-                write_copy_row(&mut buf, &RawRow {
-                    timestamp: now_nanos,
-                    dst_table: &table.qualified_name(),
-                    data_json: &data_json,
-                    record_type: 0,
-                    match_data: None,
-                    batch_id,
-                    toast_columns: "",
-                });
+                write_copy_row(
+                    &mut buf,
+                    &RawRow {
+                        timestamp: now_nanos,
+                        dst_table: &table.qualified_name(),
+                        data_json: &data_json,
+                        record_type: 0,
+                        match_data: None,
+                        batch_id,
+                        toast_columns: "",
+                    },
+                );
                 rows_written += 1;
             }
             CdcRecord::Update {
@@ -85,31 +86,35 @@ pub async fn write_batch_to_raw(
                 let toast_cols = extract_toast_columns(new_columns);
                 let data_json = columns_to_json_skip_unchanged(new_columns);
                 let match_json = old_columns.as_ref().map(|cols| columns_to_json(cols));
-                write_copy_row(&mut buf, &RawRow {
-                    timestamp: now_nanos,
-                    dst_table: &table.qualified_name(),
-                    data_json: &data_json,
-                    record_type: 1,
-                    match_data: match_json.as_deref(),
-                    batch_id,
-                    toast_columns: &toast_cols,
-                });
+                write_copy_row(
+                    &mut buf,
+                    &RawRow {
+                        timestamp: now_nanos,
+                        dst_table: &table.qualified_name(),
+                        data_json: &data_json,
+                        record_type: 1,
+                        match_data: match_json.as_deref(),
+                        batch_id,
+                        toast_columns: &toast_cols,
+                    },
+                );
                 rows_written += 1;
             }
-            CdcRecord::Delete {
-                table, columns, ..
-            } => {
+            CdcRecord::Delete { table, columns, .. } => {
                 let data_json = columns_to_json(columns);
                 let match_json = columns_to_json(columns);
-                write_copy_row(&mut buf, &RawRow {
-                    timestamp: now_nanos,
-                    dst_table: &table.qualified_name(),
-                    data_json: &data_json,
-                    record_type: 2,
-                    match_data: Some(&match_json),
-                    batch_id,
-                    toast_columns: "",
-                });
+                write_copy_row(
+                    &mut buf,
+                    &RawRow {
+                        timestamp: now_nanos,
+                        dst_table: &table.qualified_name(),
+                        data_json: &data_json,
+                        record_type: 2,
+                        match_data: Some(&match_json),
+                        batch_id,
+                        toast_columns: "",
+                    },
+                );
                 rows_written += 1;
             }
             // Skip Begin, Commit, Heartbeat, SchemaChange — not data records
@@ -125,10 +130,7 @@ pub async fn write_batch_to_raw(
         .send(buf.freeze())
         .await
         .context("Failed to send COPY data")?;
-    let _rows = copy_sink
-        .finish()
-        .await
-        .context("Failed to finish COPY")?;
+    let _rows = copy_sink.finish().await.context("Failed to finish COPY")?;
 
     // Update lsn_offset (within same transaction, batch_id already incremented above)
     tx.execute(
@@ -342,10 +344,7 @@ mod tests {
     fn test_write_copy_escaped_no_backslash() {
         let mut buf = BytesMut::new();
         write_copy_escaped(&mut buf, r#"{"key":"value"}"#);
-        assert_eq!(
-            std::str::from_utf8(&buf).unwrap(),
-            r#"{"key":"value"}"#
-        );
+        assert_eq!(std::str::from_utf8(&buf).unwrap(), r#"{"key":"value"}"#);
     }
 
     #[test]
@@ -353,8 +352,14 @@ mod tests {
         assert_eq!(value_to_json(&Value::Null), serde_json::Value::Null);
         assert_eq!(value_to_json(&Value::Bool(true)), serde_json::json!(true));
         assert_eq!(value_to_json(&Value::Int64(42)), serde_json::json!(42));
-        assert_eq!(value_to_json(&Value::String("hi".into())), serde_json::json!("hi"));
-        assert_eq!(value_to_json(&Value::Decimal("123.45".into())), serde_json::json!("123.45"));
+        assert_eq!(
+            value_to_json(&Value::String("hi".into())),
+            serde_json::json!("hi")
+        );
+        assert_eq!(
+            value_to_json(&Value::Decimal("123.45".into())),
+            serde_json::json!("123.45")
+        );
         assert_eq!(
             value_to_json(&Value::Uuid("550e8400-e29b-41d4-a716-446655440000".into())),
             serde_json::json!("550e8400-e29b-41d4-a716-446655440000")

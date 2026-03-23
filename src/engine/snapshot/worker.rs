@@ -31,8 +31,8 @@ use super::quote_ident;
 use super::state_store;
 use super::utils::find_integer_pk_column;
 use crate::config::Config;
-use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::position::SourcePosition;
+use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::Sink;
 use crate::grpc::state::{CdcState, SharedState, Stage};
 use tokio::time::Duration;
@@ -425,14 +425,12 @@ async fn process_chunk(
             })
             .collect();
 
-        sink.write_batch(records)
-            .await
-            .with_context(|| {
-                format!(
-                    "Sink write failed for {} chunk {}",
-                    table, chunk.partition_id
-                )
-            })?;
+        sink.write_batch(records).await.with_context(|| {
+            format!(
+                "Sink write failed for {} chunk {}",
+                table, chunk.partition_id
+            )
+        })?;
 
         debug!(
             "Wrote chunk {}/{}: {} rows via sink",

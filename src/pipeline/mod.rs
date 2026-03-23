@@ -141,8 +141,7 @@ impl Pipeline {
                     // Calculate end-to-end replication lag
                     if self.last_commit_timestamp_us > 0 {
                         const PG_EPOCH_OFFSET_USEC: u64 = 946_684_800_000_000;
-                        let commit_unix_us =
-                            self.last_commit_timestamp_us + PG_EPOCH_OFFSET_USEC;
+                        let commit_unix_us = self.last_commit_timestamp_us + PG_EPOCH_OFFSET_USEC;
                         let now_us = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()

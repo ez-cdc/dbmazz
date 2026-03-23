@@ -13,22 +13,22 @@ pub fn pg_oid_to_target_type(pg_type_id: u32) -> &'static str {
         // Boolean
         16 => "boolean",
         // Integer types
-        21 => "smallint",   // int2
-        23 => "integer",    // int4 (also covers serial → integer)
-        20 => "bigint",     // int8 (also covers bigserial → bigint)
+        21 => "smallint", // int2
+        23 => "integer",  // int4 (also covers serial → integer)
+        20 => "bigint",   // int8 (also covers bigserial → bigint)
         // Float types
-        700 => "real",       // float4
+        700 => "real",             // float4
         701 => "double precision", // float8
         // Numeric
         1700 => "numeric",
         // Money
         790 => "money",
         // Character types
-        25 => "text",        // text
-        1043 => "text",      // varchar → text (safer, no length constraint mismatch)
-        1042 => "text",      // bpchar (char) → text
-        18 => "\"char\"",    // internal char type
-        19 => "name",        // name type (63-byte identifier)
+        25 => "text",     // text
+        1043 => "text",   // varchar → text (safer, no length constraint mismatch)
+        1042 => "text",   // bpchar (char) → text
+        18 => "\"char\"", // internal char type
+        19 => "name",     // name type (63-byte identifier)
         // Binary
         17 => "bytea",
         // Date/Time
@@ -87,8 +87,8 @@ pub fn pg_oid_to_target_type(pg_type_id: u32) -> &'static str {
         1022 => "double precision[]",
         1231 => "numeric[]",
         1009 => "text[]",
-        1015 => "text[]",      // varchar[]
-        1014 => "text[]",      // bpchar[]
+        1015 => "text[]", // varchar[]
+        1014 => "text[]", // bpchar[]
         1182 => "date[]",
         1115 => "timestamp without time zone[]",
         1185 => "timestamp with time zone[]",
