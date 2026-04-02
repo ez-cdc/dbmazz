@@ -22,5 +22,9 @@ Cargo.lock
 coverage/
 *.profraw
 
+# Claude Code
+.plans/
+session-logs/
+
 # Misc
 *.old
