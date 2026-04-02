@@ -28,7 +28,7 @@ impl SetupManager {
         info!("═══════════════════════════════════════\n");
 
         // Setup PostgreSQL source (replication slot, publication, etc.)
-        let pg_client = postgres::create_postgres_client(&self.config.database_url).await?;
+        let pg_client = postgres::create_postgres_client(&self.config.source.url).await?;
         let pg_setup = postgres::PostgresSetup::new(&pg_client, &self.config);
         pg_setup.run().await?;
 

@@ -63,9 +63,7 @@ async fn main() -> Result<()> {
             Err(_) => {
                 info!("No database configuration found — starting in setup mode");
                 info!("Open http://0.0.0.0:{} to configure datasources", http_port);
-                return http_api::start_http_server(http_port, None)
-                    .await
-                    .map_err(Into::into);
+                return http_api::start_http_server(http_port, None).await;
             }
         }
     }

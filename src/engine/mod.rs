@@ -49,8 +49,8 @@ impl CdcEngine {
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
-            tables: config.tables.clone(),
-            slot_name: config.slot_name.clone(),
+            tables: config.source.tables.clone(),
+            slot_name: config.source.postgres().slot_name.clone(),
         };
         let shared_state = SharedState::new(cdc_config);
 
@@ -82,7 +82,7 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Connecting to checkpoint store")
             .await;
-        let state_store = StateStore::new(&self.config.database_url).await?;
+        let state_store = StateStore::new(&self.config.source.url).await?;
         self.state_store = Some(state_store);
 
         // Stage: SETUP - Execute automatic setup
@@ -241,7 +241,9 @@ impl CdcEngine {
         let state_store = self.state_store.as_ref().ok_or_else(|| {
             anyhow::anyhow!("state_store must be initialized before load_checkpoint")
         })?;
-        let last_lsn = state_store.load_checkpoint(&self.config.slot_name).await?;
+        let last_lsn = state_store
+            .load_checkpoint(&self.config.source.postgres().slot_name)
+            .await?;
         let start_lsn = last_lsn.unwrap_or(0);
 
         if start_lsn > 0 {
@@ -278,7 +280,8 @@ impl CdcEngine {
 
         let plain_url = self
             .config
-            .database_url
+            .source
+            .url
             .replace("&replication=database", "")
             .replace("?replication=database&", "?")
             .replace("?replication=database", "");
@@ -293,7 +296,7 @@ impl CdcEngine {
 
         let mut schemas = Vec::new();
 
-        for table in &self.config.tables {
+        for table in &self.config.source.tables {
             let (schema_name, table_name) = if table.contains('.') {
                 let parts: Vec<&str> = table.splitn(2, '.').collect();
                 (parts[0].to_string(), parts[1].to_string())
@@ -362,10 +365,11 @@ impl CdcEngine {
 
     /// Initialize PostgreSQL source
     async fn init_source(&self) -> Result<PostgresSource> {
+        let pg = self.config.source.postgres();
         let source = PostgresSource::new(
-            &self.config.database_url,
-            self.config.slot_name.clone(),
-            self.config.publication_name.clone(),
+            &self.config.source.url,
+            pg.slot_name.clone(),
+            pg.publication_name.clone(),
         )
         .await?;
 
@@ -528,9 +532,11 @@ impl CdcEngine {
         // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
         if self.shared_state.should_skip_slot_cleanup() {
             info!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
-        } else if let Err(e) =
-            setup::cleanup_postgres_resources(&self.config.database_url, &self.config.slot_name)
-                .await
+        } else if let Err(e) = setup::cleanup_postgres_resources(
+            &self.config.source.url,
+            &self.config.source.postgres().slot_name,
+        )
+        .await
         {
             warn!("Cleanup warning: {}", e);
             // Non-fatal - continue shutdown
@@ -626,7 +632,7 @@ impl CdcEngine {
             anyhow::anyhow!("state_store must be initialized before checkpoint feedback")
         })?;
         if let Err(e) = state_store
-            .save_checkpoint(&self.config.slot_name, confirmed_lsn)
+            .save_checkpoint(&self.config.source.postgres().slot_name, confirmed_lsn)
             .await
         {
             error!(
