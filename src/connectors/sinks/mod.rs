@@ -31,9 +31,9 @@ use anyhow::Result;
 use self::postgres::PostgresSink;
 use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
-use crate::core::Sink;
+use crate::core::{Sink, SinkMode};
 
-/// Creates a sink connector based on the provided configuration.
+/// Creates a sink connector based on the provided configuration and mode.
 ///
 /// This factory function instantiates the appropriate sink implementation
 /// based on the `sink_type` field in the configuration.
@@ -41,58 +41,16 @@ use crate::core::Sink;
 /// # Arguments
 ///
 /// * `config` - The sink configuration containing connection details and type
-///
-/// # Returns
-///
-/// A boxed `Sink` trait object that can be used to write CDC records
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The sink type is not supported
-/// - The sink configuration is invalid
-/// - The sink fails to initialize
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let config = SinkConfig {
-///     sink_type: SinkType::StarRocks,
-///     url: "http://starrocks:8040".to_string(),
-///     port: 9030,
-///     database: "cdc_db".to_string(),
-///     user: "root".to_string(),
-///     password: "".to_string(),
-///     starrocks: Some(StarRocksSinkConfig {}),
-/// };
-///
-/// let sink = create_sink(&config)?;
-/// ```
-pub fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>> {
+/// * `mode` - `SinkMode::Primary` for the main CDC sink (runs background tasks),
+///   `SinkMode::SnapshotWorker` for snapshot worker instances (skips background tasks)
+pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>> {
     match config.sink_type {
         SinkType::StarRocks => {
-            let sink = StarRocksSink::new(config)?;
+            let sink = StarRocksSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         SinkType::Postgres => {
-            let sink = PostgresSink::new(config)?;
-            Ok(Box::new(sink))
-        }
-    }
-}
-
-/// Creates a sink for snapshot workers.
-/// Same as `create_sink` but signals the sink to skip spawning background tasks
-/// (e.g., the PostgreSQL normalizer) since the primary sink already handles them.
-pub fn create_sink_for_snapshot(config: &SinkConfig) -> Result<Box<dyn Sink>> {
-    match config.sink_type {
-        SinkType::StarRocks => {
-            let sink = StarRocksSink::new(config)?;
-            Ok(Box::new(sink))
-        }
-        SinkType::Postgres => {
-            let mut sink = PostgresSink::new(config)?;
-            sink.skip_normalizer = true;
+            let sink = PostgresSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
     }
@@ -116,7 +74,7 @@ mod tests {
             postgres: None,
         };
 
-        let result = create_sink(&config);
+        let result = create_sink(&config, SinkMode::Primary);
         assert!(result.is_ok());
     }
 
@@ -136,7 +94,7 @@ mod tests {
             }),
         };
 
-        let result = create_sink(&config);
+        let result = create_sink(&config, SinkMode::Primary);
         assert!(result.is_ok());
     }
 }
