@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
-use crate::connectors::sinks::{create_sink, create_sink_for_snapshot};
+use crate::connectors::sinks::create_sink;
+use crate::core::SinkMode;
 use crate::grpc::state::SharedState;
 use crate::grpc::{self, CdcConfig, CdcState, Stage};
 use crate::pipeline::schema_cache::SchemaCache;
@@ -124,7 +125,7 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Connecting to sink")
             .await;
-        let mut sink = create_sink(&self.config.sink)?;
+        let mut sink = create_sink(&self.config.sink, SinkMode::Primary)?;
 
         // Verify sink connectivity BEFORE declaring CDC ready
         if let Err(e) = sink.validate_connection().await {
@@ -192,7 +193,8 @@ impl CdcEngine {
         // via should_emit() in wal_handler using the finished_chunks BTreeMap.
         // Create sink factory for snapshot workers (used by both initial and on-demand snapshots)
         let sink_config = self.config.sink.clone();
-        let sink_factory: SinkFactory = Arc::new(move || create_sink_for_snapshot(&sink_config));
+        let sink_factory: SinkFactory =
+            Arc::new(move || create_sink(&sink_config, SinkMode::SnapshotWorker));
         self.sink_factory = Some(Arc::clone(&sink_factory));
 
         if self.config.do_snapshot {

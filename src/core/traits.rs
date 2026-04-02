@@ -4,6 +4,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Mode in which a sink instance operates.
+/// Primary sinks run background tasks (normalizer, etc.).
+/// SnapshotWorker sinks skip background tasks — the primary handles them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkMode {
+    Primary,
+    SnapshotWorker,
+}
+
 /// Sink capabilities for feature detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SinkCapabilities {
