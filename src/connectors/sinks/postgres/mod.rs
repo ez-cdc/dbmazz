@@ -55,6 +55,8 @@ pub struct PostgresSink {
     raw_table_name: String,
     /// Channel to notify normalizer of new batches
     normalize_tx: Option<mpsc::Sender<i64>>,
+    /// Skip normalizer spawn (set for snapshot worker instances created via sink_factory)
+    pub(crate) skip_normalizer: bool,
 }
 
 impl PostgresSink {
@@ -92,6 +94,7 @@ impl PostgresSink {
             client: None,
             raw_table_name,
             normalize_tx: None,
+            skip_normalizer: false,
         })
     }
 
@@ -171,21 +174,29 @@ impl Sink for PostgresSink {
         let client = self.connect().await?;
         setup::run_setup(&*client, &schema, &job_name, source_schemas).await?;
 
-        // Spawn normalizer background task
-        let normalizer_config = normalizer::NormalizerConfig {
-            url: self.url.clone(),
-            target_schema: self.schema.clone(),
-            job_name: self.job_name.clone(),
-            raw_table: self.raw_table_name.clone(),
-            table_schemas: source_schemas.to_vec(),
-        };
-        let tx = normalizer::spawn_normalizer(normalizer_config);
-        self.normalize_tx = Some(tx);
+        // Spawn normalizer background task (skip for snapshot worker instances —
+        // the primary sink's normalizer handles all batches via polling)
+        if !self.skip_normalizer {
+            let normalizer_config = normalizer::NormalizerConfig {
+                url: self.url.clone(),
+                target_schema: self.schema.clone(),
+                job_name: self.job_name.clone(),
+                raw_table: self.raw_table_name.clone(),
+                table_schemas: source_schemas.to_vec(),
+            };
+            let tx = normalizer::spawn_normalizer(normalizer_config);
+            self.normalize_tx = Some(tx);
 
-        info!(
-            "PostgresSink: setup complete ({} tables, normalizer started)",
-            source_schemas.len()
-        );
+            info!(
+                "PostgresSink: setup complete ({} tables, normalizer started)",
+                source_schemas.len()
+            );
+        } else {
+            info!(
+                "PostgresSink: setup complete ({} tables, normalizer skipped — snapshot worker)",
+                source_schemas.len()
+            );
+        }
         Ok(())
     }
 

@@ -148,8 +148,23 @@ async fn create_target_table(
         .get(0);
 
     if exists {
+        // Ensure metadata columns exist (MERGE needs them)
+        client
+            .batch_execute(&format!(
+                r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS _dbmazz_synced_at TIMESTAMPTZ;
+                   ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS _dbmazz_op_type SMALLINT"#,
+                target_schema, source.name, target_schema, source.name,
+            ))
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to add metadata columns to {}.{}",
+                    target_schema, source.name
+                )
+            })?;
+
         info!(
-            "  [OK] Table \"{}\".\"{}\" already exists",
+            "  [OK] Table \"{}\".\"{}\" already exists (metadata columns verified)",
             target_schema, source.name
         );
         return Ok(());
