@@ -147,7 +147,19 @@ impl CdcEngine {
             .set_stage(Stage::Setup, "Setting up sink")
             .await;
         let source_schemas = self.introspect_source_schemas().await?;
-        sink.setup(&source_schemas).await?;
+        if let Err(e) = sink.setup(&source_schemas).await {
+            let error_msg = format!("Sink setup failed: {}", e);
+            self.shared_state
+                .set_setup_error(Some(error_msg.clone()))
+                .await;
+            self.shared_state
+                .set_stage(Stage::Setup, "Setup failed")
+                .await;
+            error!("{}", error_msg);
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
         info!("  [OK] Sink setup complete");
 
         // Log sink capabilities

@@ -24,19 +24,6 @@ pub enum SetupError {
         error: String,
     },
 
-    // StarRocks
-    SrConnectionFailed {
-        host: String,
-        error: String,
-    },
-    SrTableNotFound {
-        table: String,
-    },
-    SrAuditColumnsFailed {
-        table: String,
-        error: String,
-    },
-
     // General
     #[allow(dead_code)]
     CheckpointFailed {
@@ -65,21 +52,6 @@ impl SetupError {
             }
             SetupError::PgSlotFailed { name, error } => {
                 format!("Failed to setup replication slot '{}': {}", name, error)
-            }
-            SetupError::SrConnectionFailed { host, error } => {
-                format!("StarRocks connection failed to '{}': {}", host, error)
-            }
-            SetupError::SrTableNotFound { table } => {
-                format!(
-                    "Table '{}' not found in StarRocks. Create the table before starting CDC.",
-                    table
-                )
-            }
-            SetupError::SrAuditColumnsFailed { table, error } => {
-                format!(
-                    "Failed to add audit columns to StarRocks table '{}': {}",
-                    table, error
-                )
             }
             SetupError::CheckpointFailed { error } => {
                 format!("Checkpoint load failed: {}", error)
