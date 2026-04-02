@@ -186,22 +186,12 @@ pub struct Config {
     pub sink: SinkConfig,
 
     // =========================================================================
-    // Legacy fields (kept for backward compatibility)
-    // These mirror the nested config values and will be removed in v0.3.0
+    // Source fields (used by engine, setup, snapshot)
     // =========================================================================
-
-    // PostgreSQL (legacy)
     pub database_url: String,
     pub slot_name: String,
     pub publication_name: String,
     pub tables: Vec<String>,
-
-    // StarRocks (legacy)
-    pub starrocks_url: String,
-    pub starrocks_port: u16,
-    pub starrocks_db: String,
-    pub starrocks_user: String,
-    pub starrocks_pass: String,
 
     // Pipeline
     pub flush_size: usize,
@@ -248,11 +238,6 @@ impl std::fmt::Debug for Config {
             .field("slot_name", &self.slot_name)
             .field("publication_name", &self.publication_name)
             .field("tables", &self.tables)
-            .field("starrocks_url", &self.starrocks_url)
-            .field("starrocks_port", &self.starrocks_port)
-            .field("starrocks_db", &self.starrocks_db)
-            .field("starrocks_user", &self.starrocks_user)
-            .field("starrocks_pass", &"[REDACTED]")
             .field("flush_size", &self.flush_size)
             .field("flush_interval_ms", &self.flush_interval_ms)
             .field("grpc_port", &self.grpc_port)
@@ -397,20 +382,15 @@ impl Config {
             == "true";
 
         Ok(Self {
-            // New nested config
+            // Nested config
             source,
             sink,
 
-            // Legacy fields (mirroring nested values for backward compatibility)
+            // Source fields
             database_url: source_url,
             slot_name,
             publication_name,
             tables,
-            starrocks_url: sink_url,
-            starrocks_port: sink_port,
-            starrocks_db: sink_database,
-            starrocks_user: sink_user,
-            starrocks_pass: sink_password,
 
             // Common fields
             flush_size,
@@ -536,15 +516,10 @@ mod tests {
         assert_eq!(config.sink.user, "admin");
         assert_eq!(config.sink.password, "secret");
 
-        // Test legacy fields mirror the values
+        // Test source fields mirror the values
         assert_eq!(config.database_url, "postgres://localhost/testdb");
         assert_eq!(config.slot_name, "test_slot");
         assert_eq!(config.publication_name, "test_pub");
-        assert_eq!(config.starrocks_url, "starrocks.local");
-        assert_eq!(config.starrocks_port, 9030);
-        assert_eq!(config.starrocks_db, "testdb");
-        assert_eq!(config.starrocks_user, "admin");
-        assert_eq!(config.starrocks_pass, "secret");
         assert_eq!(config.tables, vec!["table1", "table2"]);
 
         clear_env_vars();
@@ -575,11 +550,8 @@ mod tests {
         );
         assert_eq!(config.publication_name, "dbmazz_pub");
         assert_eq!(config.sink.port, 9030);
-        assert_eq!(config.starrocks_port, 9030);
         assert_eq!(config.sink.user, "root");
-        assert_eq!(config.starrocks_user, "root");
         assert_eq!(config.sink.password, "");
-        assert_eq!(config.starrocks_pass, "");
         assert_eq!(config.flush_size, 10000);
         assert_eq!(config.flush_interval_ms, 5000);
         assert_eq!(config.grpc_port, 50051);
@@ -682,15 +654,10 @@ mod tests {
 
         let config = Config::from_env().unwrap();
 
-        // Verify flat accessors still work
+        // Verify source accessors still work
         assert_eq!(config.database_url, "postgres://localhost/db");
         assert_eq!(config.slot_name, "my_slot");
         assert_eq!(config.publication_name, "my_pub");
-        assert_eq!(config.starrocks_url, "starrocks.local");
-        assert_eq!(config.starrocks_port, 9030);
-        assert_eq!(config.starrocks_db, "mydb");
-        assert_eq!(config.starrocks_user, "myuser");
-        assert_eq!(config.starrocks_pass, "mypass");
         assert_eq!(config.tables, vec!["orders", "items"]);
         assert_eq!(config.flush_size, 5000);
         assert_eq!(config.flush_interval_ms, 3000);
