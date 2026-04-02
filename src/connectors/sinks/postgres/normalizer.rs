@@ -25,6 +25,9 @@ const METADATA_SCHEMA: &str = "_dbmazz";
 /// Maximum backoff between retries (5 minutes)
 const MAX_BACKOFF_SECS: u64 = 300;
 
+/// Maximum retry attempts per batch before skipping
+const MAX_RETRIES: u32 = 20;
+
 /// Polling interval when no notification received (seconds)
 const POLL_INTERVAL_SECS: u64 = 2;
 
@@ -51,12 +54,9 @@ pub fn spawn_normalizer(config: NormalizerConfig) -> mpsc::Sender<i64> {
     tx
 }
 
-/// Main normalizer loop.
-async fn normalizer_loop(
-    config: NormalizerConfig,
-    mut notify_rx: mpsc::Receiver<i64>,
-) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(&config.url, NoTls)
+/// Connect to target PostgreSQL.
+async fn connect(url: &str) -> Result<Client> {
+    let (client, connection) = tokio_postgres::connect(url, NoTls)
         .await
         .context("Normalizer: failed to connect to target PostgreSQL")?;
 
@@ -65,6 +65,16 @@ async fn normalizer_loop(
             error!("Normalizer connection error: {}", e);
         }
     });
+
+    Ok(client)
+}
+
+/// Main normalizer loop.
+async fn normalizer_loop(
+    config: NormalizerConfig,
+    mut notify_rx: mpsc::Receiver<i64>,
+) -> Result<()> {
+    let mut client = connect(&config.url).await?;
 
     info!("Normalizer started (job: {})", config.job_name);
 
@@ -88,7 +98,7 @@ async fn normalizer_loop(
             Ok(None) => {
                 // Channel closed → shutdown
                 info!("Normalizer: channel closed, flushing remaining batches");
-                let _ = process_pending(&client, &config, &schema_map).await;
+                let _ = process_pending(&mut client, &config, &schema_map).await;
                 break;
             }
             Err(_) => {} // Timeout → poll
@@ -98,8 +108,18 @@ async fn normalizer_loop(
         while notify_rx.try_recv().is_ok() {}
 
         // Process all pending batches (one at a time)
-        if let Err(e) = process_pending(&client, &config, &schema_map).await {
-            error!("Normalizer error: {}", e);
+        if let Err(e) = process_pending(&mut client, &config, &schema_map).await {
+            error!("Normalizer error: {}, reconnecting...", e);
+            match connect(&config.url).await {
+                Ok(new_client) => {
+                    client = new_client;
+                    info!("Normalizer: reconnected successfully");
+                }
+                Err(reconnect_err) => {
+                    error!("Normalizer: reconnection failed: {}", reconnect_err);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
         }
     }
 
@@ -111,7 +131,7 @@ async fn normalizer_loop(
 /// Processes ONE BATCH AT A TIME to avoid dedup issues with MERGE.
 /// Retries each batch with exponential backoff on failure.
 async fn process_pending(
-    client: &Client,
+    client: &mut Client,
     config: &NormalizerConfig,
     schema_map: &HashMap<String, &SourceTableSchema>,
 ) -> Result<()> {
@@ -156,11 +176,30 @@ async fn process_pending(
                 }
                 Err(e) => {
                     attempt += 1;
+
+                    if attempt >= MAX_RETRIES {
+                        error!(
+                            "Normalizer: batch {} permanently failed after {} attempts, skipping. Last error: {}",
+                            batch_id, attempt, e
+                        );
+                        // Advance metadata to unblock subsequent batches
+                        let _ = client
+                            .execute(
+                                &format!(
+                                    "UPDATE {}.\"_metadata\" SET normalize_batch_id = $1 WHERE job_name = $2",
+                                    METADATA_SCHEMA
+                                ),
+                                &[&batch_id, &config.job_name],
+                            )
+                            .await;
+                        break;
+                    }
+
                     let backoff =
                         std::cmp::min((2u64.pow(attempt.min(8))) * 1000, MAX_BACKOFF_SECS * 1000);
                     error!(
-                        "Normalizer: batch {} failed (attempt {}): {}. Retrying in {}ms",
-                        batch_id, attempt, e, backoff
+                        "Normalizer: batch {} failed (attempt {}/{}): {}. Retrying in {}ms",
+                        batch_id, attempt, MAX_RETRIES, e, backoff
                     );
                     tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
                 }
@@ -183,7 +222,7 @@ async fn process_pending(
 /// Normalize a single batch: MERGE raw table → target tables.
 /// Runs entirely within a single transaction (MERGE + metadata + cleanup = atomic).
 async fn normalize_batch(
-    client: &Client,
+    client: &mut Client,
     raw_table: &str,
     target_schema: &str,
     job_name: &str,
@@ -264,42 +303,47 @@ async fn normalize_batch(
         merge_statements.push(merge_sql);
     }
 
-    // Execute everything in a single transaction:
-    // 1. All MERGE statements (one per table)
-    // 2. Update normalize_batch_id
-    // 3. Cleanup raw table rows for this batch
-    let mut tx_sql =
-        String::with_capacity(merge_statements.iter().map(|s| s.len()).sum::<usize>() + 512);
-    tx_sql.push_str("BEGIN;\n");
+    // Execute everything in a single transaction using tokio_postgres transaction API.
+    // This ensures proper rollback on error and keeps the connection healthy.
+    let tx = client
+        .transaction()
+        .await
+        .context("Failed to begin normalize transaction")?;
 
     for stmt in &merge_statements {
-        tx_sql.push_str(stmt);
-        tx_sql.push_str(";\n");
+        tx.batch_execute(stmt)
+            .await
+            .with_context(|| format!("MERGE failed for batch {}", batch_id))?;
     }
 
-    // Update metadata
-    tx_sql.push_str(&format!(
-        "UPDATE {}.\"_metadata\" SET normalize_batch_id = {} WHERE job_name = '{}';\n",
-        METADATA_SCHEMA, batch_id, job_name
-    ));
+    // Update metadata (parameterized)
+    tx.execute(
+        &format!(
+            "UPDATE {}.\"_metadata\" SET normalize_batch_id = $1 WHERE job_name = $2",
+            METADATA_SCHEMA
+        ),
+        &[&batch_id, &job_name],
+    )
+    .await
+    .context("Failed to update normalize_batch_id")?;
 
-    // Cleanup raw table rows for this batch
-    tx_sql.push_str(&format!(
-        "DELETE FROM {} WHERE _batch_id = {};\n",
-        raw_table, batch_id
-    ));
+    // Cleanup raw table rows for this batch (parameterized)
+    tx.execute(
+        &format!("DELETE FROM {} WHERE _batch_id = $1", raw_table),
+        &[&batch_id],
+    )
+    .await
+    .context("Failed to cleanup raw table")?;
 
-    tx_sql.push_str("COMMIT;\n");
+    tx.commit()
+        .await
+        .context("Failed to commit normalize transaction")?;
 
     debug!(
         "Normalizer: MERGE batch {} ({} tables)",
         batch_id,
         merge_statements.len()
     );
-    client
-        .batch_execute(&tx_sql)
-        .await
-        .with_context(|| format!("Normalize batch {} failed", batch_id))?;
 
     Ok(merge_statements.len())
 }
