@@ -59,7 +59,7 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PostgresSinkConfig, SinkConfig, SinkType, StarRocksSinkConfig};
+    use crate::config::{PostgresSinkConfig, SinkConfig, SinkSpecificConfig, SinkType};
 
     #[test]
     fn test_create_starrocks_sink() {
@@ -70,8 +70,7 @@ mod tests {
             database: "test_db".to_string(),
             user: "root".to_string(),
             password: "".to_string(),
-            starrocks: Some(StarRocksSinkConfig {}),
-            postgres: None,
+            specific: SinkSpecificConfig::StarRocks,
         };
 
         let result = create_sink(&config, SinkMode::Primary);
@@ -87,8 +86,7 @@ mod tests {
             database: "test_db".to_string(),
             user: "postgres".to_string(),
             password: "".to_string(),
-            starrocks: None,
-            postgres: Some(PostgresSinkConfig {
+            specific: SinkSpecificConfig::Postgres(PostgresSinkConfig {
                 schema: "public".to_string(),
                 job_name: "test_slot".to_string(),
             }),

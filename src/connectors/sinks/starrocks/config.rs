@@ -186,8 +186,7 @@ impl Default for StarRocksSinkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::StarRocksSinkConfig as ConfigStarRocksSinkConfig;
-    use crate::config::{SinkConfig, SinkType};
+    use crate::config::{SinkConfig, SinkSpecificConfig, SinkType};
 
     #[test]
     fn test_from_sink_config() {
@@ -198,8 +197,7 @@ mod tests {
             database: "cdc_db".to_string(),
             user: "admin".to_string(),
             password: "secret".to_string(),
-            starrocks: Some(ConfigStarRocksSinkConfig {}),
-            postgres: None,
+            specific: SinkSpecificConfig::StarRocks,
         };
 
         let sr_config = StarRocksSinkConfig::from_sink_config(&config).unwrap();

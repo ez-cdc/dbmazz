@@ -6,7 +6,7 @@ Review of the sink factory pattern and trait implementation. Each issue includes
 
 ## Issue 1: SetupManager / Sink::setup() asymmetry
 
-**Status:** pending
+**Status:** done (PR #38)
 
 **Problem:**
 Setup logic is split inconsistently between `SetupManager` (engine/setup/) and `Sink::setup()`:
@@ -33,7 +33,7 @@ Each sink should own its full setup inside `Sink::setup()`. SetupManager should 
 
 ## Issue 2: `skip_normalizer` leaks PostgresSink internals into the factory
 
-**Status:** done
+**Status:** done (PR #39)
 
 **Problem:**
 `create_sink_for_snapshot()` directly accesses `PostgresSink.skip_normalizer`:
@@ -60,7 +60,7 @@ Eliminate the need for sink-specific knowledge in the factory. Options:
 
 ## Issue 3: Duplicated factory functions
 
-**Status:** done
+**Status:** done (PR #39)
 
 **Problem:**
 `create_sink()` and `create_sink_for_snapshot()` are nearly identical — same match arms, same construction. The only difference is `skip_normalizer = true` for PostgresSink. Every new sink must add a match arm in both functions.
@@ -75,7 +75,7 @@ Single factory function with a mode parameter (e.g., `SinkMode::Primary` vs `Sin
 
 ## Issue 4: `SinkConfig` uses mutually exclusive `Option` fields
 
-**Status:** pending
+**Status:** done (PR #40)
 
 **Problem:**
 ```rust
@@ -87,17 +87,11 @@ pub struct SinkConfig {
 
 Each new sink adds another `Option<XConfig>` field. This doesn't enforce mutual exclusivity at the type level — it's possible to have both `Some` or both `None`.
 
-**Files involved:**
-- `src/config.rs` — SinkConfig struct and Config::from_env()
-- `src/connectors/sinks/mod.rs` — factory reads config
-- `src/connectors/sinks/starrocks/config.rs` — StarRocksSinkConfig
-- `src/connectors/sinks/postgres/mod.rs` — reads PostgresSinkConfig
-
-**Goal:**
-Replace with an enum:
+**Resolution:**
+Replaced with `SinkSpecificConfig` enum and a `SinkConfig::postgres_config()` accessor:
 ```rust
 pub enum SinkSpecificConfig {
-    StarRocks(StarRocksSinkConfig),
+    StarRocks,
     Postgres(PostgresSinkConfig),
 }
 ```
@@ -106,13 +100,10 @@ pub enum SinkSpecificConfig {
 
 ## Issue 5: Legacy fields in Config
 
-**Status:** pending (known tech debt, planned for v0.3.0)
+**Status:** done (PR #40)
 
 **Problem:**
-`Config` duplicates all sink fields as flat legacy accessors (`starrocks_url`, `starrocks_port`, etc.). Adding a new sink means adding more legacy fields.
+`Config` had flat source fields (`database_url`, `slot_name`, `publication_name`, `tables`) that duplicated `config.source.*`. All engine, setup, and snapshot code used the flat fields instead of the nested config.
 
-**Files involved:**
-- `src/config.rs` — Config struct, from_env(), Debug impl
-
-**Goal:**
-Remove legacy fields. All consumers should use `config.sink.*` and `config.source.*`. This is already planned for v0.3.0 so it's tracked here for completeness but not prioritized in this effort.
+**Resolution:**
+Migrated all consumers to `config.source.*` and `config.source.postgres().*`. Removed the flat fields from `Config`. Added `SourceConfig::postgres()` helper for ergonomic access.

@@ -56,7 +56,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Verify that all tables exist
     async fn verify_tables_exist(&self) -> Result<(), SetupError> {
-        for table in &self.config.tables {
+        for table in &self.config.source.tables {
             let parts: Vec<&str> = table.split('.').collect();
             let schema = if parts.len() > 1 { parts[0] } else { "public" };
             let table_name = if parts.len() > 1 { parts[1] } else { parts[0] };
@@ -90,7 +90,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Configure REPLICA IDENTITY FULL on all tables
     async fn ensure_replica_identity(&self) -> Result<(), SetupError> {
-        for table in &self.config.tables {
+        for table in &self.config.source.tables {
             // Validate table name to prevent SQL injection
             validate_sql_identifier(table).map_err(|e| SetupError::PgConnectionFailed {
                 host: "PostgreSQL".to_string(),
@@ -140,7 +140,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create/verify Publication
     async fn ensure_publication(&self) -> Result<(), SetupError> {
-        let pub_name = &self.config.publication_name;
+        let pub_name = &self.config.source.postgres().publication_name;
 
         // Validate publication name to prevent SQL injection
         validate_sql_identifier(pub_name).map_err(|e| SetupError::PgPublicationFailed {
@@ -190,7 +190,7 @@ impl<'a> PostgresSetup<'a> {
             }
         } else {
             // Validate all table names before creating publication
-            for table in &self.config.tables {
+            for table in &self.config.source.tables {
                 validate_sql_identifier(table).map_err(|e| SetupError::PgPublicationFailed {
                     name: pub_name.clone(),
                     error: format!("Invalid table name '{}': {}", table, e),
@@ -199,7 +199,7 @@ impl<'a> PostgresSetup<'a> {
 
             // Create new publication
             info!("  Creating publication {}", pub_name);
-            let tables = self.config.tables.join(", ");
+            let tables = self.config.source.tables.join(", ");
             self.client
                 .execute(
                     &format!("CREATE PUBLICATION {} FOR TABLE {}", pub_name, tables),
@@ -239,6 +239,7 @@ impl<'a> PostgresSetup<'a> {
 
         let missing: Vec<String> = self
             .config
+            .source
             .tables
             .iter()
             .filter(|table| {
@@ -258,7 +259,7 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create/verify Replication Slot
     async fn ensure_replication_slot(&self) -> Result<(), SetupError> {
-        let slot_name = &self.config.slot_name;
+        let slot_name = &self.config.source.postgres().slot_name;
 
         // Check if it exists and if it's active
         let slot_info = self
