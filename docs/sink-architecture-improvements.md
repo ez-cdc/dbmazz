@@ -33,7 +33,7 @@ Each sink should own its full setup inside `Sink::setup()`. SetupManager should 
 
 ## Issue 2: `skip_normalizer` leaks PostgresSink internals into the factory
 
-**Status:** pending
+**Status:** done
 
 **Problem:**
 `create_sink_for_snapshot()` directly accesses `PostgresSink.skip_normalizer`:
@@ -60,7 +60,7 @@ Eliminate the need for sink-specific knowledge in the factory. Options:
 
 ## Issue 3: Duplicated factory functions
 
-**Status:** pending
+**Status:** done
 
 **Problem:**
 `create_sink()` and `create_sink_for_snapshot()` are nearly identical — same match arms, same construction. The only difference is `skip_normalizer = true` for PostgresSink. Every new sink must add a match arm in both functions.

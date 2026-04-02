@@ -67,7 +67,8 @@ use tracing::info;
 use crate::config::SinkConfig;
 use crate::core::traits::SourceTableSchema;
 use crate::core::{
-    CdcRecord, ColumnValue, LoadingModel, Sink, SinkCapabilities, SinkResult, SourcePosition,
+    CdcRecord, ColumnValue, LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult,
+    SourcePosition,
 };
 
 pub use self::config::StarRocksSinkConfig;
@@ -121,7 +122,7 @@ impl StarRocksSink {
     /// # Errors
     ///
     /// Returns an error if the configuration is invalid
-    pub fn new(config: &SinkConfig) -> Result<Self> {
+    pub fn new(config: &SinkConfig, _mode: SinkMode) -> Result<Self> {
         let sr_config = StarRocksSinkConfig::from_sink_config(config)?;
         let stream_load = StreamLoadClient::new(
             sr_config.http_url.clone(),
@@ -444,14 +445,14 @@ mod tests {
     #[test]
     fn test_sink_creation() {
         let config = test_config();
-        let sink = StarRocksSink::new(&config);
+        let sink = StarRocksSink::new(&config, SinkMode::Primary);
         assert!(sink.is_ok());
     }
 
     #[test]
     fn test_capabilities() {
         let config = test_config();
-        let sink = StarRocksSink::new(&config).unwrap();
+        let sink = StarRocksSink::new(&config, SinkMode::Primary).unwrap();
         let caps = sink.capabilities();
 
         assert!(caps.supports_upsert);
