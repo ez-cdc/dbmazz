@@ -7,7 +7,6 @@
 //! including:
 //! - Table existence verification
 //! - CDC audit column creation
-//! - Schema evolution (adding columns)
 //!
 //! All DDL operations use the MySQL protocol (port 9030).
 
@@ -16,12 +15,9 @@ use mysql_async::{prelude::Queryable, Conn, OptsBuilder, Pool};
 use tracing::info;
 
 use super::config::StarRocksSinkConfig;
-use super::types::TypeMapper;
-use crate::core::DataType;
 use crate::utils::validate_sql_identifier;
 
 /// CDC audit columns that must exist in all replicated StarRocks tables.
-#[allow(dead_code)]
 const AUDIT_COLUMNS: &[(&str, &str)] = &[
     (
         "dbmazz_op_type",
@@ -44,18 +40,13 @@ const AUDIT_COLUMNS: &[(&str, &str)] = &[
 /// - Connection validation
 /// - Table existence checks
 /// - Audit column management
-/// - Schema evolution
-#[allow(dead_code)]
 pub struct StarRocksSetup {
     /// MySQL connection pool for DDL operations
     pool: Pool,
     /// StarRocks configuration
     config: StarRocksSinkConfig,
-    /// Type mapper for data type conversions
-    type_mapper: TypeMapper,
 }
 
-#[allow(dead_code)]
 impl StarRocksSetup {
     /// Creates a new StarRocks setup instance.
     ///
@@ -69,11 +60,7 @@ impl StarRocksSetup {
     pub fn new(config: StarRocksSinkConfig) -> Result<Self> {
         let pool = Self::create_pool(&config)?;
 
-        Ok(Self {
-            pool,
-            config,
-            type_mapper: TypeMapper::new(),
-        })
+        Ok(Self { pool, config })
     }
 
     /// Creates a MySQL connection pool for DDL operations.
@@ -118,7 +105,7 @@ impl StarRocksSetup {
     }
 
     /// Verifies connectivity to StarRocks via MySQL protocol.
-    pub async fn verify_connection(&self) -> Result<()> {
+    async fn verify_connection(&self) -> Result<()> {
         let mut conn = self.get_connection().await?;
 
         // Test simple query
@@ -132,7 +119,7 @@ impl StarRocksSetup {
     }
 
     /// Verifies that all specified tables exist in StarRocks.
-    pub async fn verify_tables_exist(&self, tables: &[String]) -> Result<()> {
+    async fn verify_tables_exist(&self, tables: &[String]) -> Result<()> {
         let mut conn = self.get_connection().await?;
 
         for table in tables {
@@ -163,7 +150,7 @@ impl StarRocksSetup {
     }
 
     /// Ensures all tables have the required CDC audit columns.
-    pub async fn ensure_audit_columns(&self, tables: &[String]) -> Result<()> {
+    async fn ensure_audit_columns(&self, tables: &[String]) -> Result<()> {
         for table in tables {
             let table_name = table.split('.').next_back().unwrap_or(table);
             self.ensure_audit_columns_for_table(table_name).await?;
@@ -212,69 +199,6 @@ impl StarRocksSetup {
         Ok(())
     }
 
-    /// Adds a new column to a table (for schema evolution).
-    ///
-    /// # Arguments
-    ///
-    /// * `table` - Target table name
-    /// * `column_name` - New column name
-    /// * `data_type` - Column data type
-    pub async fn add_column(
-        &self,
-        table: &str,
-        column_name: &str,
-        data_type: &DataType,
-    ) -> Result<()> {
-        // Validate table name to prevent SQL injection
-        validate_sql_identifier(table)
-            .map_err(|e| anyhow!("Invalid table name '{}': {}", table, e))?;
-
-        // Validate column name
-        validate_sql_identifier(column_name)
-            .map_err(|e| anyhow!("Invalid column name '{}': {}", column_name, e))?;
-
-        // Validate database name
-        validate_sql_identifier(&self.config.database)
-            .map_err(|e| anyhow!("Invalid database name '{}': {}", self.config.database, e))?;
-
-        let sr_type = self.type_mapper.to_starrocks_type(data_type);
-
-        let sql = format!(
-            "ALTER TABLE {}.{} ADD COLUMN {} {}",
-            self.config.database, table, column_name, sr_type
-        );
-
-        let mut conn = self.get_connection().await?;
-
-        match conn.query_drop(&sql).await {
-            Ok(_) => {
-                info!(
-                    "Schema evolution: added column {} ({}) to {}",
-                    column_name, sr_type, table
-                );
-                Ok(())
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                // Ignore if column already exists
-                if err_msg.contains("Duplicate column") || err_msg.contains("already exists") {
-                    info!(
-                        "Column {} already exists in {}, skipping",
-                        column_name, table
-                    );
-                    Ok(())
-                } else {
-                    Err(anyhow!(
-                        "Failed to add column {} to {}: {}",
-                        column_name,
-                        table,
-                        err_msg
-                    ))
-                }
-            }
-        }
-    }
-
     /// Gets the list of columns for a table.
     async fn get_table_columns(&self, conn: &mut Conn, table: &str) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = conn
@@ -295,12 +219,6 @@ impl StarRocksSetup {
             .get_conn()
             .await
             .map_err(|e| anyhow!("Failed to get MySQL connection: {}", e))
-    }
-
-    /// Closes the connection pool.
-    pub async fn close(self) -> Result<()> {
-        // Pool will be dropped and connections closed
-        Ok(())
     }
 }
 

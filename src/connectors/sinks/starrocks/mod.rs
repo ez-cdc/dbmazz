@@ -65,6 +65,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::config::SinkConfig;
+use crate::core::traits::SourceTableSchema;
 use crate::core::{
     CdcRecord, ColumnValue, LoadingModel, Sink, SinkCapabilities, SinkResult, SourcePosition,
 };
@@ -349,6 +350,13 @@ impl Sink for StarRocksSink {
 
     async fn validate_connection(&self) -> Result<()> {
         self.stream_load.verify_connection().await
+    }
+
+    async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> {
+        let sr_setup = setup::StarRocksSetup::new(self.config.clone())?;
+        let tables: Vec<String> = source_schemas.iter().map(|s| s.name.clone()).collect();
+        sr_setup.run(&tables).await?;
+        Ok(())
     }
 
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult> {
