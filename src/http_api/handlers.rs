@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 
 use super::{HttpAppState, SinkSetupConfig, SourceSetupConfig};
 use crate::config::{
-    Config, PostgresSourceConfig, SinkConfig, SinkType, SourceConfig, SourceType,
-    StarRocksSinkConfig,
+    Config, PostgresSourceConfig, SinkConfig, SinkSpecificConfig, SinkType, SourceConfig,
+    SourceType,
 };
 use crate::engine::CdcEngine;
 use crate::grpc::state::{CdcState, Stage};
@@ -570,27 +570,17 @@ pub async fn start_replication(
 
     let sink_config = SinkConfig {
         sink_type: SinkType::StarRocks,
-        url: starrocks_url.clone(),
+        url: starrocks_url,
         port: sink.fe_mysql_port,
-        database: sink.database.clone(),
-        user: sink.user.clone(),
-        password: sink.password.clone(),
-        starrocks: Some(StarRocksSinkConfig {}),
-        postgres: None,
+        database: sink.database,
+        user: sink.user,
+        password: sink.password,
+        specific: SinkSpecificConfig::StarRocks,
     };
 
     let config = Config {
         source: source_config,
         sink: sink_config,
-        database_url,
-        slot_name,
-        publication_name,
-        tables,
-        starrocks_url,
-        starrocks_port: sink.fe_mysql_port,
-        starrocks_db: sink.database,
-        starrocks_user: sink.user,
-        starrocks_pass: sink.password,
         flush_size,
         flush_interval_ms,
         grpc_port: 50051,
