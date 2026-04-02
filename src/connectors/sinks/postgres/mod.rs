@@ -35,7 +35,7 @@ use crate::config::SinkConfig;
 use crate::core::position::SourcePosition;
 use crate::core::record::CdcRecord;
 use crate::core::traits::{
-    LoadingModel, Sink, SinkCapabilities, SinkResult, SourceTableSchema, StageFormat,
+    LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult, SourceTableSchema, StageFormat,
 };
 
 /// PostgreSQL sink — writes CDC records to a target PostgreSQL database.
@@ -55,14 +55,14 @@ pub struct PostgresSink {
     raw_table_name: String,
     /// Channel to notify normalizer of new batches
     normalize_tx: Option<mpsc::Sender<i64>>,
-    /// Skip normalizer spawn (set for snapshot worker instances created via sink_factory)
-    pub(crate) skip_normalizer: bool,
+    /// Sink operating mode
+    mode: SinkMode,
 }
 
 impl PostgresSink {
     /// Create a new PostgresSink from the provided configuration.
     /// Connection is lazy — established on first use.
-    pub fn new(config: &SinkConfig) -> Result<Self> {
+    pub fn new(config: &SinkConfig, mode: SinkMode) -> Result<Self> {
         let pg_config = config
             .postgres
             .as_ref()
@@ -94,7 +94,7 @@ impl PostgresSink {
             client: None,
             raw_table_name,
             normalize_tx: None,
-            skip_normalizer: false,
+            mode,
         })
     }
 
@@ -176,7 +176,7 @@ impl Sink for PostgresSink {
 
         // Spawn normalizer background task (skip for snapshot worker instances —
         // the primary sink's normalizer handles all batches via polling)
-        if !self.skip_normalizer {
+        if self.mode == SinkMode::Primary {
             let normalizer_config = normalizer::NormalizerConfig {
                 url: self.url.clone(),
                 target_schema: self.schema.clone(),
