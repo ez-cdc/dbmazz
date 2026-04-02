@@ -81,6 +81,23 @@ pub fn create_sink(config: &SinkConfig) -> Result<Box<dyn Sink>> {
     }
 }
 
+/// Creates a sink for snapshot workers.
+/// Same as `create_sink` but signals the sink to skip spawning background tasks
+/// (e.g., the PostgreSQL normalizer) since the primary sink already handles them.
+pub fn create_sink_for_snapshot(config: &SinkConfig) -> Result<Box<dyn Sink>> {
+    match config.sink_type {
+        SinkType::StarRocks => {
+            let sink = StarRocksSink::new(config)?;
+            Ok(Box::new(sink))
+        }
+        SinkType::Postgres => {
+            let mut sink = PostgresSink::new(config)?;
+            sink.skip_normalizer = true;
+            Ok(Box::new(sink))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
