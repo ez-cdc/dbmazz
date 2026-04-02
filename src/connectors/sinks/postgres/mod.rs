@@ -63,10 +63,7 @@ impl PostgresSink {
     /// Create a new PostgresSink from the provided configuration.
     /// Connection is lazy — established on first use.
     pub fn new(config: &SinkConfig, mode: SinkMode) -> Result<Self> {
-        let pg_config = config
-            .postgres
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("PostgresSinkConfig is required for postgres sink"))?;
+        let pg_config = config.postgres_config()?;
 
         let safe_job = pg_config
             .job_name

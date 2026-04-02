@@ -37,7 +37,6 @@ impl std::fmt::Display for SourceType {
 #[derive(Debug, Clone)]
 pub struct PostgresSourceConfig {
     pub slot_name: String,
-    #[allow(dead_code)]
     pub publication_name: String,
 }
 
@@ -45,11 +44,19 @@ pub struct PostgresSourceConfig {
 #[derive(Clone)]
 pub struct SourceConfig {
     pub source_type: SourceType,
-    #[allow(dead_code)]
     pub url: String,
-    #[allow(dead_code)]
     pub tables: Vec<String>,
     pub postgres: Option<PostgresSourceConfig>,
+}
+
+impl SourceConfig {
+    /// Returns the PostgreSQL-specific source config.
+    /// Panics if source_type is not Postgres (currently the only option).
+    pub fn postgres(&self) -> &PostgresSourceConfig {
+        self.postgres
+            .as_ref()
+            .expect("PostgresSourceConfig must be set for Postgres source")
+    }
 }
 
 impl std::fmt::Debug for SourceConfig {
@@ -121,12 +128,6 @@ impl std::fmt::Display for SinkType {
     }
 }
 
-/// StarRocks-specific sink configuration
-#[derive(Debug, Clone)]
-pub struct StarRocksSinkConfig {
-    // StarRocks-specific options can be added here
-}
-
 /// PostgreSQL target-specific sink configuration
 #[derive(Debug, Clone)]
 pub struct PostgresSinkConfig {
@@ -145,10 +146,14 @@ pub struct SinkConfig {
     pub database: String,
     pub user: String,
     pub password: String,
-    #[allow(dead_code)]
-    pub starrocks: Option<StarRocksSinkConfig>,
-    #[allow(dead_code)]
-    pub postgres: Option<PostgresSinkConfig>,
+    pub specific: SinkSpecificConfig,
+}
+
+/// Sink-specific configuration, enforces mutual exclusivity at the type level.
+#[derive(Debug, Clone)]
+pub enum SinkSpecificConfig {
+    StarRocks,
+    Postgres(PostgresSinkConfig),
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -160,9 +165,18 @@ impl std::fmt::Debug for SinkConfig {
             .field("database", &self.database)
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
-            .field("starrocks", &self.starrocks)
-            .field("postgres", &self.postgres)
+            .field("specific", &self.specific)
             .finish()
+    }
+}
+
+impl SinkConfig {
+    /// Returns the PostgreSQL-specific config, or an error if this is not a Postgres sink.
+    pub fn postgres_config(&self) -> Result<&PostgresSinkConfig> {
+        match &self.specific {
+            SinkSpecificConfig::Postgres(pg) => Ok(pg),
+            _ => anyhow::bail!("PostgresSinkConfig is required for postgres sink"),
+        }
     }
 }
 
@@ -171,27 +185,10 @@ impl std::fmt::Debug for SinkConfig {
 // =============================================================================
 
 /// Central configuration for dbmazz loaded from environment variables
-///
-/// This struct maintains backward compatibility with the original flat structure
-/// while also providing new nested `source` and `sink` configurations.
-///
-/// **New code** should use the nested `source` and `sink` fields.
-/// **Legacy fields** are kept for backward compatibility and will be removed in a future version.
 #[derive(Clone)]
 pub struct Config {
-    // =========================================================================
-    // New nested configuration (preferred)
-    // =========================================================================
     pub source: SourceConfig,
     pub sink: SinkConfig,
-
-    // =========================================================================
-    // Source fields (used by engine, setup, snapshot)
-    // =========================================================================
-    pub database_url: String,
-    pub slot_name: String,
-    pub publication_name: String,
-    pub tables: Vec<String>,
 
     // Pipeline
     pub flush_size: usize,
@@ -209,35 +206,9 @@ pub struct Config {
 
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Redact password from database_url
-        let redacted_db_url = if self.database_url.contains("://") {
-            if let Some(at_pos) = self.database_url.rfind('@') {
-                if let Some(scheme_end) = self.database_url.find("://") {
-                    let scheme_part = &self.database_url[..=scheme_end + 2];
-                    let after_at = &self.database_url[at_pos..];
-                    let between = &self.database_url[scheme_end + 3..at_pos];
-                    if between.contains(':') {
-                        format!("{}[REDACTED]{}", scheme_part, after_at)
-                    } else {
-                        self.database_url.clone()
-                    }
-                } else {
-                    self.database_url.clone()
-                }
-            } else {
-                self.database_url.clone()
-            }
-        } else {
-            self.database_url.clone()
-        };
-
         f.debug_struct("Config")
             .field("source", &self.source)
             .field("sink", &self.sink)
-            .field("database_url", &redacted_db_url)
-            .field("slot_name", &self.slot_name)
-            .field("publication_name", &self.publication_name)
-            .field("tables", &self.tables)
             .field("flush_size", &self.flush_size)
             .field("flush_interval_ms", &self.flush_interval_ms)
             .field("grpc_port", &self.grpc_port)
@@ -315,17 +286,12 @@ impl Config {
         let sink_password = optional_env("SINK_PASSWORD", "");
 
         // Build sink-specific config
-        let starrocks_config = match sink_type {
-            SinkType::StarRocks => Some(StarRocksSinkConfig {}),
-            SinkType::Postgres => None,
-        };
-
-        let postgres_config = match sink_type {
-            SinkType::Postgres => Some(PostgresSinkConfig {
+        let specific = match sink_type {
+            SinkType::StarRocks => SinkSpecificConfig::StarRocks,
+            SinkType::Postgres => SinkSpecificConfig::Postgres(PostgresSinkConfig {
                 schema: optional_env("SINK_SCHEMA", "public"),
                 job_name: slot_name.clone(),
             }),
-            SinkType::StarRocks => None,
         };
 
         let sink = SinkConfig {
@@ -335,8 +301,7 @@ impl Config {
             database: sink_database.clone(),
             user: sink_user.clone(),
             password: sink_password.clone(),
-            starrocks: starrocks_config,
-            postgres: postgres_config,
+            specific,
         };
 
         // Pipeline configuration
@@ -382,22 +347,11 @@ impl Config {
             == "true";
 
         Ok(Self {
-            // Nested config
             source,
             sink,
-
-            // Source fields
-            database_url: source_url,
-            slot_name,
-            publication_name,
-            tables,
-
-            // Common fields
             flush_size,
             flush_interval_ms,
             grpc_port,
-
-            // Snapshot
             do_snapshot,
             snapshot_chunk_size,
             snapshot_parallel_workers,
@@ -426,12 +380,10 @@ impl Config {
                 info!("Sink: StarRocks (db: {})", self.sink.database);
             }
             SinkType::Postgres => {
-                let schema = self
-                    .sink
-                    .postgres
-                    .as_ref()
-                    .map(|p| p.schema.as_str())
-                    .unwrap_or("public");
+                let schema = match &self.sink.specific {
+                    SinkSpecificConfig::Postgres(pg) => pg.schema.as_str(),
+                    _ => "public",
+                };
                 info!(
                     "Sink: PostgreSQL (db: {}, schema: {})",
                     self.sink.database, schema
@@ -444,7 +396,7 @@ impl Config {
             self.flush_size, self.flush_interval_ms
         );
         info!("gRPC: port {}", self.grpc_port);
-        info!("Tables: {:?}", self.tables);
+        info!("Tables: {:?}", self.source.tables);
     }
 }
 
@@ -470,6 +422,8 @@ mod tests {
         env::remove_var("SINK_DATABASE");
         env::remove_var("SINK_USER");
         env::remove_var("SINK_PASSWORD");
+
+        env::remove_var("SINK_SCHEMA");
 
         // Clear common variables
         env::remove_var("TABLES");
@@ -501,14 +455,8 @@ mod tests {
         // Test new nested structure
         assert_eq!(config.source.url, "postgres://localhost/testdb");
         assert_eq!(config.source.source_type, SourceType::Postgres);
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().slot_name,
-            "test_slot"
-        );
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().publication_name,
-            "test_pub"
-        );
+        assert_eq!(config.source.postgres().slot_name, "test_slot");
+        assert_eq!(config.source.postgres().publication_name, "test_pub");
         assert_eq!(config.sink.url, "starrocks.local");
         assert_eq!(config.sink.sink_type, SinkType::StarRocks);
         assert_eq!(config.sink.port, 9030);
@@ -516,11 +464,11 @@ mod tests {
         assert_eq!(config.sink.user, "admin");
         assert_eq!(config.sink.password, "secret");
 
-        // Test source fields mirror the values
-        assert_eq!(config.database_url, "postgres://localhost/testdb");
-        assert_eq!(config.slot_name, "test_slot");
-        assert_eq!(config.publication_name, "test_pub");
-        assert_eq!(config.tables, vec!["table1", "table2"]);
+        // Verify source fields are accessible via nested config
+        assert_eq!(config.source.url, "postgres://localhost/testdb");
+        assert_eq!(config.source.postgres().slot_name, "test_slot");
+        assert_eq!(config.source.postgres().publication_name, "test_pub");
+        assert_eq!(config.source.tables, vec!["table1", "table2"]);
 
         clear_env_vars();
     }
@@ -539,16 +487,8 @@ mod tests {
         // Check defaults
         assert_eq!(config.source.source_type, SourceType::Postgres);
         assert_eq!(config.sink.sink_type, SinkType::StarRocks);
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().slot_name,
-            "dbmazz_slot"
-        );
-        assert_eq!(config.slot_name, "dbmazz_slot");
-        assert_eq!(
-            config.source.postgres.as_ref().unwrap().publication_name,
-            "dbmazz_pub"
-        );
-        assert_eq!(config.publication_name, "dbmazz_pub");
+        assert_eq!(config.source.postgres().slot_name, "dbmazz_slot");
+        assert_eq!(config.source.postgres().publication_name, "dbmazz_pub");
         assert_eq!(config.sink.port, 9030);
         assert_eq!(config.sink.user, "root");
         assert_eq!(config.sink.password, "");
@@ -601,7 +541,7 @@ mod tests {
 
         let config = Config::from_env().unwrap();
 
-        assert_eq!(config.tables, vec!["table1", "table2", "table3"]);
+        assert_eq!(config.source.tables, vec!["table1", "table2", "table3"]);
 
         clear_env_vars();
     }
@@ -635,10 +575,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_backward_compatibility_with_original_api() {
+    fn test_full_config_via_nested_accessors() {
         clear_env_vars();
 
-        // Use current env var names (SOURCE_URL/SINK_URL API)
         env::set_var("SOURCE_URL", "postgres://localhost/db");
         env::set_var("SOURCE_SLOT_NAME", "my_slot");
         env::set_var("SOURCE_PUBLICATION_NAME", "my_pub");
@@ -654,14 +593,50 @@ mod tests {
 
         let config = Config::from_env().unwrap();
 
-        // Verify source accessors still work
-        assert_eq!(config.database_url, "postgres://localhost/db");
-        assert_eq!(config.slot_name, "my_slot");
-        assert_eq!(config.publication_name, "my_pub");
-        assert_eq!(config.tables, vec!["orders", "items"]);
+        // Source
+        assert_eq!(config.source.url, "postgres://localhost/db");
+        assert_eq!(config.source.postgres().slot_name, "my_slot");
+        assert_eq!(config.source.postgres().publication_name, "my_pub");
+        assert_eq!(config.source.tables, vec!["orders", "items"]);
+
+        // Sink
+        assert_eq!(config.sink.url, "starrocks.local");
+        assert_eq!(config.sink.port, 9030);
+        assert_eq!(config.sink.database, "mydb");
+        assert_eq!(config.sink.user, "myuser");
+        assert_eq!(config.sink.password, "mypass");
+        assert!(matches!(
+            config.sink.specific,
+            SinkSpecificConfig::StarRocks
+        ));
+
+        // Pipeline
         assert_eq!(config.flush_size, 5000);
         assert_eq!(config.flush_interval_ms, 3000);
         assert_eq!(config.grpc_port, 50052);
+
+        clear_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_postgres_sink_config() {
+        clear_env_vars();
+
+        env::set_var("SOURCE_URL", "postgres://localhost/db");
+        env::set_var("SINK_URL", "postgres://target/db");
+        env::set_var("SINK_TYPE", "postgres");
+        env::set_var("SINK_DATABASE", "mydb");
+        env::set_var("SINK_SCHEMA", "custom_schema");
+
+        let config = Config::from_env().unwrap();
+
+        let pg = config.sink.postgres_config().unwrap();
+        assert_eq!(pg.schema, "custom_schema");
+        assert!(matches!(
+            config.sink.specific,
+            SinkSpecificConfig::Postgres(_)
+        ));
 
         clear_env_vars();
     }

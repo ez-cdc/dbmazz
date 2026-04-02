@@ -68,7 +68,7 @@ pub async fn run_snapshot(
 
     // Connect to PostgreSQL (regular connection, not replication).
     // Strip `replication=database` from the URL — DDL is not allowed in replication mode.
-    let plain_url = strip_replication_param(&config.database_url);
+    let plain_url = strip_replication_param(&config.source.url);
     let (client, connection) = tokio_postgres::connect(&plain_url, NoTls)
         .await
         .context("snapshot worker: failed to connect to PostgreSQL")?;
@@ -93,8 +93,8 @@ pub async fn run_snapshot(
     }
     let sink_pool = Arc::new(tokio::sync::Mutex::new(sink_pool));
 
-    let slot_name = config.slot_name.clone();
-    let tables = config.tables.clone();
+    let slot_name = config.source.postgres().slot_name.clone();
+    let tables = config.source.tables.clone();
     let chunk_size = config.snapshot_chunk_size;
 
     // Pre-compute table metadata to avoid redundant catalog queries per chunk.
