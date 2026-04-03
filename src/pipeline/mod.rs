@@ -61,7 +61,7 @@ impl Pipeline {
 
         loop {
             // Check if paused before processing
-            if let Some(ref state) = self.shared_state {
+            if let Some(state) = &self.shared_state {
                 if state.state() == crate::grpc::state::CdcState::Paused {
                     // Flush pending batch before pausing
                     if !batch.is_empty() && !self.flush_batch(&mut batch, last_lsn).await {
@@ -90,7 +90,7 @@ impl Pipeline {
                                 if !self.flush_batch(&mut batch, last_lsn).await {
                                     break; // Stop on flush failure
                                 }
-                                if let Some(ref state) = self.shared_state {
+                                if let Some(state) = &self.shared_state {
                                     state.set_pending(0);
                                 }
                             }
@@ -107,7 +107,7 @@ impl Pipeline {
                         if !self.flush_batch(&mut batch, last_lsn).await {
                             break; // Stop on flush failure
                         }
-                        if let Some(ref state) = self.shared_state {
+                        if let Some(state) = &self.shared_state {
                             state.set_pending(0);
                         }
                     }
@@ -135,7 +135,7 @@ impl Pipeline {
         match self.sink.write_batch(records).await {
             Ok(_result) => {
                 // Update metric for batches sent
-                if let Some(ref state) = self.shared_state {
+                if let Some(state) = &self.shared_state {
                     state.increment_batches();
 
                     // Calculate end-to-end replication lag
@@ -152,7 +152,7 @@ impl Pipeline {
                 }
 
                 // Send LSN to the feedback channel to confirm checkpoint
-                if let Some(ref tx) = self.feedback_tx {
+                if let Some(tx) = &self.feedback_tx {
                     if let Err(e) = tx.send(lsn).await {
                         error!("Failed to send checkpoint feedback: {}", e);
                         // This is critical - cannot confirm checkpoint
@@ -170,7 +170,7 @@ impl Pipeline {
                 );
 
                 // Set CDC state to Stopped to signal error
-                if let Some(ref state) = self.shared_state {
+                if let Some(state) = &self.shared_state {
                     state.set_state(crate::grpc::state::CdcState::Stopped);
                     error!("CRITICAL: CDC state set to Stopped due to sink failure");
                 }
