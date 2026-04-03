@@ -4,7 +4,125 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, Config, CopyBothDuplex, NoTls};
 use tracing::{error, info, warn};
 
+use crate::core::traits::{SourceColumn, SourceTableSchema};
+use crate::source::converter::pg_type_to_data_type;
 use crate::utils::validate_sql_identifier;
+
+/// Strips the `replication=database` query parameter from a PostgreSQL URL.
+/// Needed when opening a normal (non-replication) connection from a URL that
+/// was originally configured for logical replication.
+pub fn strip_replication_param(url_str: &str) -> String {
+    match url::Url::parse(url_str) {
+        Ok(mut parsed) => {
+            let pairs: Vec<(String, String)> = parsed
+                .query_pairs()
+                .filter(|(k, _)| k != "replication")
+                .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                .collect();
+            if pairs.is_empty() {
+                parsed.set_query(None);
+            } else {
+                let qs = pairs
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                parsed.set_query(Some(&qs));
+            }
+            parsed.to_string()
+        }
+        Err(_) => {
+            // Fallback: simple string replacement
+            url_str
+                .replace("&replication=database", "")
+                .replace("?replication=database&", "?")
+                .replace("?replication=database", "")
+        }
+    }
+}
+
+/// Introspects source PostgreSQL tables to get their schemas (columns, types, PKs).
+/// Opens a short-lived normal connection to the source database.
+pub async fn introspect_schemas(
+    source_url: &str,
+    tables: &[String],
+) -> Result<Vec<SourceTableSchema>> {
+    let plain_url = strip_replication_param(source_url);
+
+    let (client, connection) = tokio_postgres::connect(&plain_url, NoTls)
+        .await
+        .context("Failed to connect to source for schema introspection")?;
+
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut schemas = Vec::new();
+
+    for table in tables {
+        let (schema_name, table_name) = if table.contains('.') {
+            let parts: Vec<&str> = table.splitn(2, '.').collect();
+            (parts[0].to_string(), parts[1].to_string())
+        } else {
+            ("public".to_string(), table.to_string())
+        };
+
+        let col_rows = client
+            .query(
+                "SELECT a.attname, a.atttypid::int4, a.attnotnull
+                 FROM pg_attribute a
+                 JOIN pg_class c ON c.oid = a.attrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = $1 AND c.relname = $2
+                   AND a.attnum > 0 AND NOT a.attisdropped
+                 ORDER BY a.attnum",
+                &[&schema_name, &table_name],
+            )
+            .await
+            .with_context(|| format!("Failed to get columns for {}", table))?;
+
+        let columns: Vec<SourceColumn> = col_rows
+            .iter()
+            .map(|row| {
+                let name: String = row.get(0);
+                let type_oid: i32 = row.get(1);
+                let not_null: bool = row.get(2);
+                SourceColumn {
+                    name,
+                    data_type: pg_type_to_data_type(type_oid as u32),
+                    nullable: !not_null,
+                    pg_type_id: type_oid as u32,
+                }
+            })
+            .collect();
+
+        let pk_rows = client
+            .query(
+                "SELECT a.attname
+                 FROM pg_index i
+                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                 JOIN pg_class c ON c.oid = i.indrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
+                 ORDER BY array_position(i.indkey, a.attnum)",
+                &[&schema_name, &table_name],
+            )
+            .await
+            .with_context(|| format!("Failed to get PKs for {}", table))?;
+
+        let primary_keys: Vec<String> = pk_rows.iter().map(|r| r.get(0)).collect();
+
+        schemas.push(SourceTableSchema {
+            schema: schema_name,
+            name: table_name,
+            columns,
+            primary_keys,
+        });
+    }
+
+    info!("  Introspected {} source table schemas", schemas.len());
+    Ok(schemas)
+}
 
 /// PostgreSQL epoch: 2000-01-01 00:00:00 UTC
 /// Difference from Unix epoch in microseconds

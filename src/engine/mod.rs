@@ -4,7 +4,7 @@
 mod setup;
 pub mod snapshot;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use crate::pipeline::{Pipeline, PipelineEvent};
 use crate::replication::{
     handle_keepalive, handle_xlog_data, parse_replication_message, WalMessage,
 };
-use crate::source::postgres::{build_standby_status_update, PostgresSource};
+use crate::source::postgres::{build_standby_status_update, introspect_schemas, PostgresSource};
 use crate::state_store::StateStore;
 use setup::SetupManager;
 
@@ -32,20 +32,20 @@ type SinkFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn crate::core::Sink>> + 
 pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
-    state_store: Option<StateStore>,
+    state_store: StateStore,
     /// SchemaCache for converting pgoutput CdcMessage → generic CdcRecord.
     /// Owned by the engine, passed mutably to the WAL handler.
     schema_cache: SchemaCache,
     /// Factory for creating sink instances (snapshot workers need their own).
-    sink_factory: Option<SinkFactory>,
+    sink_factory: SinkFactory,
 }
 
 impl CdcEngine {
-    /// Create new CdcEngine
-    /// NOTE: Does NOT connect to PostgreSQL here. The gRPC server must start first
-    /// so the worker-agent health check can succeed. StateStore is initialized lazily
-    /// in run() after the gRPC server is listening.
-    pub fn new(config: Config) -> Self {
+    /// Create new CdcEngine.
+    ///
+    /// Connects to PostgreSQL for checkpoint storage. The gRPC server is started
+    /// first in `run()` so the worker-agent health check can succeed immediately.
+    pub async fn new(config: Config) -> Result<Self> {
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
@@ -54,13 +54,19 @@ impl CdcEngine {
         };
         let shared_state = SharedState::new(cdc_config);
 
-        Self {
+        let state_store = StateStore::new(&config.source.url).await?;
+
+        let sink_config = config.sink.clone();
+        let sink_factory: SinkFactory =
+            Arc::new(move || create_sink(&sink_config, SinkMode::SnapshotWorker));
+
+        Ok(Self {
             config,
             shared_state,
-            state_store: None,
+            state_store,
             schema_cache: SchemaCache::new(),
-            sink_factory: None,
-        }
+            sink_factory,
+        })
     }
 
     /// Returns a clone of the SharedState Arc.
@@ -78,28 +84,12 @@ impl CdcEngine {
             .await;
         self.start_grpc_server();
 
-        // Stage: SETUP - Initialize StateStore (connects to PostgreSQL for checkpoints)
-        self.shared_state
-            .set_stage(Stage::Setup, "Connecting to checkpoint store")
-            .await;
-        let state_store = StateStore::new(&self.config.source.url).await?;
-        self.state_store = Some(state_store);
-
-        // Stage: SETUP - Execute automatic setup
+        // Stage: SETUP - Source setup (replication slot, publication)
         self.shared_state
             .set_stage(Stage::Setup, "Running automatic setup")
             .await;
         if let Err(e) = self.run_setup().await {
-            // Save error in SharedState for Health Check
-            self.shared_state.set_setup_error(Some(e.to_string())).await;
-            self.shared_state
-                .set_stage(Stage::Setup, "Setup failed")
-                .await;
-            error!("Setup failed: {}", e);
-            // Keep gRPC server running so control plane can query the error
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
+            self.halt_on_setup_error(&e.to_string()).await;
         }
 
         // Stage: SETUP - Checkpoint
@@ -127,19 +117,9 @@ impl CdcEngine {
             .await;
         let mut sink = create_sink(&self.config.sink, SinkMode::Primary)?;
 
-        // Verify sink connectivity BEFORE declaring CDC ready
         if let Err(e) = sink.validate_connection().await {
-            let error_msg = format!("Sink connection failed: {}", e);
-            self.shared_state
-                .set_setup_error(Some(error_msg.clone()))
+            self.halt_on_setup_error(&format!("Sink connection failed: {}", e))
                 .await;
-            self.shared_state
-                .set_stage(Stage::Setup, "Setup failed")
-                .await;
-            error!("{}", error_msg);
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
         }
         info!("  [OK] Sink connection verified");
 
@@ -147,19 +127,11 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Setting up sink")
             .await;
-        let source_schemas = self.introspect_source_schemas().await?;
+        let source_schemas =
+            introspect_schemas(&self.config.source.url, &self.config.source.tables).await?;
         if let Err(e) = sink.setup(&source_schemas).await {
-            let error_msg = format!("Sink setup failed: {}", e);
-            self.shared_state
-                .set_setup_error(Some(error_msg.clone()))
+            self.halt_on_setup_error(&format!("Sink setup failed: {}", e))
                 .await;
-            self.shared_state
-                .set_stage(Stage::Setup, "Setup failed")
-                .await;
-            error!("{}", error_msg);
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
         }
         info!("  [OK] Sink setup complete");
 
@@ -191,46 +163,58 @@ impl CdcEngine {
         // Spawn snapshot worker concurrently if enabled (DO_SNAPSHOT=true)
         // The WAL consumer continues running in parallel; deduplication is handled
         // via should_emit() in wal_handler using the finished_chunks BTreeMap.
-        // Create sink factory for snapshot workers (used by both initial and on-demand snapshots)
-        let sink_config = self.config.sink.clone();
-        let sink_factory: SinkFactory =
-            Arc::new(move || create_sink(&sink_config, SinkMode::SnapshotWorker));
-        self.sink_factory = Some(Arc::clone(&sink_factory));
-
         if self.config.do_snapshot {
-            let snap_config = Arc::new(self.config.clone());
-            let snap_state = self.shared_state.clone();
-            let initial_snapshot_only = self.config.initial_snapshot_only;
-            let snap_sink_factory = Arc::clone(&sink_factory);
-
-            tokio::spawn(async move {
-                match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory)
-                    .await
-                {
-                    Ok(()) => {
-                        snap_state.set_snapshot_active(false);
-                        info!("Snapshot completed successfully");
-                        if initial_snapshot_only {
-                            info!("Initial snapshot only mode: triggering graceful shutdown");
-                            let _ = snap_state.shutdown_tx.send(true);
-                        }
-                    }
-                    Err(e) => {
-                        snap_state.set_snapshot_active(false);
-                        snap_state.set_snapshot_error(Some(format!("{}", e))).await;
-                        error!("Snapshot worker error: {}", e);
-                    }
-                }
-            });
-            info!("Snapshot worker spawned (DO_SNAPSHOT=true)");
+            self.spawn_snapshot_worker(self.config.initial_snapshot_only);
         }
 
-        // 6. Execute main loop
-        self.run_main_loop(replication_stream, tx, feedback_rx, start_lsn)
+        // Execute main loop
+        self.run_main_loop(replication_stream, tx, feedback_rx)
             .await
     }
 
-    /// Execute automatic setup (PostgreSQL + StarRocks)
+    /// Record a setup error in SharedState and block forever so the gRPC server
+    /// keeps running (the control plane can query the error via Health Check).
+    async fn halt_on_setup_error(&self, msg: &str) -> ! {
+        self.shared_state
+            .set_setup_error(Some(msg.to_string()))
+            .await;
+        self.shared_state
+            .set_stage(Stage::Setup, "Setup failed")
+            .await;
+        error!("{}", msg);
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    }
+
+    /// Spawn a snapshot worker task. Used for both initial (DO_SNAPSHOT=true)
+    /// and on-demand (StartSnapshot gRPC RPC) snapshots.
+    fn spawn_snapshot_worker(&self, shutdown_on_complete: bool) {
+        let snap_config = Arc::new(self.config.clone());
+        let snap_state = self.shared_state.clone();
+        let snap_sink_factory = Arc::clone(&self.sink_factory);
+
+        tokio::spawn(async move {
+            match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory).await {
+                Ok(()) => {
+                    snap_state.set_snapshot_active(false);
+                    info!("Snapshot completed successfully");
+                    if shutdown_on_complete {
+                        info!("Initial snapshot only mode: triggering graceful shutdown");
+                        let _ = snap_state.shutdown_tx.send(true);
+                    }
+                }
+                Err(e) => {
+                    snap_state.set_snapshot_active(false);
+                    snap_state.set_snapshot_error(Some(format!("{}", e))).await;
+                    error!("Snapshot worker error: {}", e);
+                }
+            }
+        });
+        info!("Snapshot worker spawned");
+    }
+
+    /// Execute source setup (replication slot, publication).
     async fn run_setup(&self) -> Result<(), setup::SetupError> {
         let setup_manager = SetupManager::new(self.config.clone());
         setup_manager.run().await
@@ -238,12 +222,8 @@ impl CdcEngine {
 
     /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
-        let state_store = self.state_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("state_store must be initialized before load_checkpoint")
-        })?;
-        let last_lsn = state_store
-            .load_checkpoint(&self.config.source.postgres().slot_name)
-            .await?;
+        let slot_name = &self.config.source.postgres().slot_name;
+        let last_lsn = self.state_store.load_checkpoint(slot_name).await?;
         let start_lsn = last_lsn.unwrap_or(0);
 
         if start_lsn > 0 {
@@ -268,99 +248,6 @@ impl CdcEngine {
                 error!("gRPC server error: {}", e);
             }
         });
-    }
-
-    /// Introspect source PostgreSQL to get table schemas.
-    /// Used by sinks that need to create target tables (e.g., PostgreSQL sink).
-    async fn introspect_source_schemas(
-        &self,
-    ) -> Result<Vec<crate::core::traits::SourceTableSchema>> {
-        use crate::core::traits::{SourceColumn, SourceTableSchema};
-        use crate::source::converter::pg_type_to_data_type;
-
-        let plain_url = self
-            .config
-            .source
-            .url
-            .replace("&replication=database", "")
-            .replace("?replication=database&", "?")
-            .replace("?replication=database", "");
-
-        let (client, connection) = tokio_postgres::connect(&plain_url, tokio_postgres::NoTls)
-            .await
-            .context("Failed to connect to source for schema introspection")?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-
-        let mut schemas = Vec::new();
-
-        for table in &self.config.source.tables {
-            let (schema_name, table_name) = if table.contains('.') {
-                let parts: Vec<&str> = table.splitn(2, '.').collect();
-                (parts[0].to_string(), parts[1].to_string())
-            } else {
-                ("public".to_string(), table.to_string())
-            };
-
-            // Get columns
-            let col_rows = client
-                .query(
-                    "SELECT a.attname, a.atttypid::int4, a.attnotnull
-                     FROM pg_attribute a
-                     JOIN pg_class c ON c.oid = a.attrelid
-                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                     WHERE n.nspname = $1 AND c.relname = $2
-                       AND a.attnum > 0 AND NOT a.attisdropped
-                     ORDER BY a.attnum",
-                    &[&schema_name, &table_name],
-                )
-                .await
-                .with_context(|| format!("Failed to get columns for {}", table))?;
-
-            let columns: Vec<SourceColumn> = col_rows
-                .iter()
-                .map(|row| {
-                    let name: String = row.get(0);
-                    let type_oid: i32 = row.get(1);
-                    let not_null: bool = row.get(2);
-                    SourceColumn {
-                        name,
-                        data_type: pg_type_to_data_type(type_oid as u32),
-                        nullable: !not_null,
-                        pg_type_id: type_oid as u32,
-                    }
-                })
-                .collect();
-
-            // Get primary key columns
-            let pk_rows = client
-                .query(
-                    "SELECT a.attname
-                     FROM pg_index i
-                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                     JOIN pg_class c ON c.oid = i.indrelid
-                     JOIN pg_namespace n ON n.oid = c.relnamespace
-                     WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary
-                     ORDER BY array_position(i.indkey, a.attnum)",
-                    &[&schema_name, &table_name],
-                )
-                .await
-                .with_context(|| format!("Failed to get PKs for {}", table))?;
-
-            let primary_keys: Vec<String> = pk_rows.iter().map(|r| r.get(0)).collect();
-
-            schemas.push(SourceTableSchema {
-                schema: schema_name,
-                name: table_name,
-                columns,
-                primary_keys,
-            });
-        }
-
-        info!("  Introspected {} source table schemas", schemas.len());
-        Ok(schemas)
     }
 
     /// Initialize PostgreSQL source
@@ -429,7 +316,6 @@ impl CdcEngine {
         mut replication_stream: S,
         tx: mpsc::Sender<PipelineEvent>,
         mut feedback_rx: mpsc::Receiver<u64>,
-        _start_lsn: u64,
     ) -> Result<()>
     where
         S: StreamExt<Item = Result<bytes::Bytes, tokio_postgres::Error>>
@@ -476,23 +362,7 @@ impl CdcEngine {
                         info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");
                         // Reset trigger so it doesn't fire again
                         let _ = self.shared_state.snapshot_trigger.send(false);
-                        let snap_config = Arc::new(self.config.clone());
-                        let snap_state = self.shared_state.clone();
-                        let snap_sink_factory = self.sink_factory.clone()
-                            .expect("sink_factory must be initialized before snapshot");
-                        tokio::spawn(async move {
-                            match snapshot::run_snapshot(snap_config, snap_state.clone(), snap_sink_factory).await {
-                                Ok(()) => {
-                                    snap_state.set_snapshot_active(false);
-                                    info!("On-demand snapshot completed successfully");
-                                }
-                                Err(e) => {
-                                    snap_state.set_snapshot_active(false);
-                                    snap_state.set_snapshot_error(Some(format!("{}", e))).await;
-                                    error!("On-demand snapshot worker error: {}", e);
-                                }
-                            }
-                        });
+                        self.spawn_snapshot_worker(false);
                     }
                 }
 
@@ -628,11 +498,10 @@ impl CdcEngine {
         // 3. WAL data is gone → permanent data loss
 
         // 1. Save checkpoint to persistent storage
-        let state_store = self.state_store.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("state_store must be initialized before checkpoint feedback")
-        })?;
-        if let Err(e) = state_store
-            .save_checkpoint(&self.config.source.postgres().slot_name, confirmed_lsn)
+        let slot_name = &self.config.source.postgres().slot_name;
+        if let Err(e) = self
+            .state_store
+            .save_checkpoint(slot_name, confirmed_lsn)
             .await
         {
             error!(

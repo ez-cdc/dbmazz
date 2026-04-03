@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         match Config::from_env() {
             Ok(config) => {
                 config.print_banner();
-                let engine = CdcEngine::new(config);
+                let engine = CdcEngine::new(config).await?;
                 let shared = engine.shared_state();
 
                 tokio::spawn(async move {
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     {
         let config = Config::from_env()?;
         config.print_banner();
-        let engine = CdcEngine::new(config);
+        let engine = CdcEngine::new(config).await?;
         engine.run().await
     }
 }

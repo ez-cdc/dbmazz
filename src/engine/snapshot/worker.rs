@@ -35,6 +35,7 @@ use crate::core::position::SourcePosition;
 use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::Sink;
 use crate::grpc::state::{CdcState, SharedState, Stage};
+use crate::source::postgres::strip_replication_param;
 use tokio::time::Duration;
 
 /// Pre-computed metadata for a snapshot table (avoids redundant catalog queries per chunk).
@@ -513,36 +514,6 @@ async fn get_column_names(client: &Client, table_name: &str) -> Result<Vec<Strin
 }
 
 /// Strip the `replication=database` query parameter from a PostgreSQL URL.
-fn strip_replication_param(url_str: &str) -> String {
-    match url::Url::parse(url_str) {
-        Ok(mut parsed) => {
-            let pairs: Vec<(String, String)> = parsed
-                .query_pairs()
-                .filter(|(k, _)| k != "replication")
-                .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect();
-            if pairs.is_empty() {
-                parsed.set_query(None);
-            } else {
-                let qs = pairs
-                    .iter()
-                    .map(|(k, v)| format!("{}={}", k, v))
-                    .collect::<Vec<_>>()
-                    .join("&");
-                parsed.set_query(Some(&qs));
-            }
-            parsed.to_string()
-        }
-        Err(_) => {
-            // Fallback: simple string replacement
-            url_str
-                .replace("&replication=database", "")
-                .replace("?replication=database&", "?")
-                .replace("?replication=database", "")
-        }
-    }
-}
-
 /// Get the pg_class OID (relation_id) for a table, matching what the WAL handler sees.
 async fn get_relation_id(client: &Client, table_name: &str) -> Result<u32> {
     let (schema, table) = split_table_name(table_name);

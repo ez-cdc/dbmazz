@@ -590,7 +590,16 @@ pub async fn start_replication(
         initial_snapshot_only: false,
     };
 
-    let engine = CdcEngine::new(config);
+    let engine = match CdcEngine::new(config).await {
+        Ok(e) => e,
+        Err(e) => {
+            error!("Failed to initialize CDC engine: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("{}", e)})),
+            );
+        }
+    };
     let shared = engine.shared_state();
 
     *state.engine_state.write().await = Some(shared);
