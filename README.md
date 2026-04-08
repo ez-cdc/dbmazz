@@ -108,8 +108,9 @@ Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestr
 |:-------|:-----|:-------|
 | PostgreSQL | StarRocks | Stable |
 | PostgreSQL | PostgreSQL | In development |
+| PostgreSQL | Snowflake | In development |
 
-Snowflake, MongoDB, S3, and more on the [roadmap](.plans/multi-sink-roadmap.md).
+MongoDB, S3, and more on the [roadmap](.plans/multi-sink-roadmap.md).
 
 ---
 
@@ -259,7 +260,12 @@ When built with `--features http-api`, all connection variables are optional —
 | `SINK_PORT` | `9030` | StarRocks FE MySQL port |
 | `SINK_DATABASE` | — | Target database in StarRocks |
 | `SINK_USER` | `root` | StarRocks user |
-| `SINK_PASSWORD` | *(empty)* | StarRocks password |
+| `SINK_PASSWORD` | *(empty)* | Sink password |
+| `SINK_SNOWFLAKE_ACCOUNT` | — | Snowflake account identifier (e.g. `xy12345.us-east-1`) |
+| `SINK_SNOWFLAKE_WAREHOUSE` | — | Snowflake warehouse for COPY/MERGE |
+| `SINK_SNOWFLAKE_ROLE` | *(empty)* | Snowflake role (optional) |
+| `SINK_SNOWFLAKE_PRIVATE_KEY_PATH` | *(empty)* | Path to RSA key for JWT auth (optional) |
+| `SINK_SNOWFLAKE_SOFT_DELETE` | `true` | Soft delete mode (`true`/`false`) |
 | `FLUSH_SIZE` | `10000` | Max events per batch |
 | `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing a batch |
 | `GRPC_PORT` | `50051` | gRPC server port |
