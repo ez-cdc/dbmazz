@@ -24,11 +24,13 @@
 //! ```
 
 pub mod postgres;
+pub mod snowflake;
 pub mod starrocks;
 
 use anyhow::Result;
 
 use self::postgres::PostgresSink;
+use self::snowflake::SnowflakeSink;
 use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::{Sink, SinkMode};
@@ -53,6 +55,10 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
             let sink = PostgresSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
+        SinkType::Snowflake => {
+            let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
     }
 }
 
@@ -60,6 +66,7 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
 mod tests {
     use super::*;
     use crate::config::{PostgresSinkConfig, SinkConfig, SinkSpecificConfig, SinkType};
+    use serial_test::serial;
 
     #[test]
     fn test_create_starrocks_sink() {
@@ -94,5 +101,28 @@ mod tests {
 
         let result = create_sink(&config, SinkMode::Primary);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn test_create_snowflake_sink() {
+        std::env::set_var("SINK_SNOWFLAKE_ACCOUNT", "test_account");
+        std::env::set_var("SINK_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH");
+
+        let config = SinkConfig {
+            sink_type: SinkType::Snowflake,
+            url: "test_account.snowflakecomputing.com".to_string(),
+            port: 443,
+            database: "test_db".to_string(),
+            user: "test_user".to_string(),
+            password: "test_pass".to_string(),
+            specific: SinkSpecificConfig::Snowflake,
+        };
+
+        let result = create_sink(&config, SinkMode::Primary);
+        assert!(result.is_ok());
+
+        std::env::remove_var("SINK_SNOWFLAKE_ACCOUNT");
+        std::env::remove_var("SINK_SNOWFLAKE_WAREHOUSE");
     }
 }

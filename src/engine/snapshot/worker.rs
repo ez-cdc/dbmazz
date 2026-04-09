@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 use tokio_postgres::{Client, NoTls};
@@ -317,18 +317,26 @@ pub async fn run_snapshot(
         );
         shared_state.set_snapshot_active(false);
         shared_state.set_stage(Stage::Cdc, "Replicating").await;
+        Ok(())
     } else {
+        let done = final_done as u64;
+        let total = final_total as u64;
         warn!(
-            "Snapshot finished with some failed chunks in {:.1}s — will retry on next start",
+            "Snapshot finished with failed chunks ({}/{} complete) in {:.1}s — will retry on next start",
+            done,
+            total,
             elapsed.as_secs_f64()
         );
         shared_state.set_snapshot_active(false);
         shared_state
             .set_stage(Stage::Cdc, "Replicating (snapshot incomplete)")
             .await;
+        Err(anyhow!(
+            "Snapshot incomplete: {} of {} chunks failed",
+            total.saturating_sub(done),
+            total
+        ))
     }
-
-    Ok(())
 }
 
 /// Process a single chunk: LW watermark → SELECT → HW watermark → write_batch → mark complete.

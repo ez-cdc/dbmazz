@@ -53,6 +53,26 @@ url = "2.5"
 # Force vendored OpenSSL for musl cross-compilation
 openssl-sys = { version = "0.9", features = ["vendored"] }
 
+# Parquet file generation (Snowflake sink)
+arrow = { version = "53", default-features = false, features = ["json"] }
+parquet = { version = "53", default-features = false, features = ["snap", "arrow"] }
+
+# JWT auth for Snowflake
+jsonwebtoken = "9"
+
+# RSA key loading (Snowflake key-pair auth)
+rsa = "0.9"
+pem = "3"
+sha2 = "0.10"
+base64 = "0.22"
+
+# AWS SigV4 signing (Snowflake S3 stage uploads)
+aws-sigv4 = "1.2"
+aws-credential-types = "1.2"
+
+# UUID generation (Snowflake stage file naming)
+uuid = { version = "1", features = ["v4"] }
+
 axum = { version = "0.7", features = ["json"], optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 

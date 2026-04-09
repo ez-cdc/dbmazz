@@ -10,7 +10,7 @@ PostgreSQL (source)             dbmazz                          Sink (target)
 │ WAL          │   logical   │ WAL Handler        │          │ StarRocks    │
 │ (INSERT,     │  replication│   │                │          │ PostgreSQL   │
 │  UPDATE,     │ ──────────▶ │   ▼                │          │ Snowflake    │
-│  DELETE)     │  (pgoutput) │ source/converter   │          │ ...          │
+│  DELETE)     │  (pgoutput) │ source/converter   │          │ (+ future)   │
 │              │             │   │                │          │              │
 │              │             │   ▼                │          │              │
 │              │             │ Pipeline           │  write   │              │
@@ -177,16 +177,25 @@ src/
 │       ├── starrocks/               StarRocks sink
 │       │   ├── mod.rs               StarRocksSink (JSON → Stream Load HTTP)
 │       │   ├── stream_load.rs       HTTP Stream Load client
-│       │   └── types.rs             PG → StarRocks type mapping
-│       └── postgres/                PostgreSQL sink
-│           ├── mod.rs               PostgresSink (COPY → raw table → MERGE)
-│           ├── raw_table.rs         COPY writer for raw staging table
+│       │   ├── types.rs             PG → StarRocks type mapping
+│       │   └── config.rs            StarRocksSinkConfig
+│       ├── postgres/                PostgreSQL sink
+│       │   ├── mod.rs               PostgresSink (COPY → raw table → MERGE)
+│       │   ├── raw_table.rs         COPY writer for raw staging table
+│       │   ├── normalizer.rs        Async MERGE loop (raw table → target)
+│       │   ├── merge_generator.rs   Dynamic MERGE SQL generation
+│       │   ├── setup.rs             DDL: raw table, metadata, target tables
+│       │   └── types.rs             PG → PG type mapping
+│       └── snowflake/               Snowflake sink
+│           ├── mod.rs               SnowflakeSink (Parquet → PUT → COPY INTO → MERGE)
+│           ├── client.rs            HTTP client (password + JWT auth, SQL execution)
+│           ├── config.rs            SnowflakeSinkConfig
+│           ├── parquet_writer.rs    CdcRecord → Arrow → Parquet (in-memory)
+│           ├── stage.rs             PUT protocol + S3/GCS/Azure upload
+│           ├── setup.rs             DDL: TRANSIENT schema, stage, raw table, targets
+│           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
-│           ├── merge_generator.rs   Dynamic MERGE SQL generation
-│           ├── setup.rs             DDL: raw table, metadata, target tables
-│           └── types.rs             PG → PG type mapping
-│           ├── types.rs             PG → StarRocks type mapping
-│           └── config.rs            StarRocksSinkConfig
+│           └── types.rs             PG → Snowflake type mapping
 ├── grpc/                            gRPC server
 │   ├── state.rs                     SharedState (metrics, dedup, control)
 │   └── services.rs                  Health, Control, Status, Metrics
