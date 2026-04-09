@@ -146,9 +146,7 @@ impl StageManager {
         token: &str,
     ) -> Result<()> {
         use aws_credential_types::Credentials;
-        use aws_sigv4::http_request::{
-            sign, SignableBody, SignableRequest, SigningSettings,
-        };
+        use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
         use aws_sigv4::sign::v4;
         use sha2::{Digest, Sha256};
         use std::time::SystemTime;
@@ -216,16 +214,10 @@ impl StageManager {
             .into();
 
         // Create a signable request
-        let header_iter = signed_headers
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()));
-        let signable_request = SignableRequest::new(
-            "PUT",
-            &url,
-            header_iter,
-            SignableBody::Bytes(&data),
-        )
-        .context("Failed to create signable request")?;
+        let header_iter = signed_headers.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+        let signable_request =
+            SignableRequest::new("PUT", &url, header_iter, SignableBody::Bytes(&data))
+                .context("Failed to create signable request")?;
 
         // Sign the request — returns instructions (headers to add) + signature
         let signing_output =

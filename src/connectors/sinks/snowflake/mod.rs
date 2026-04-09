@@ -190,8 +190,8 @@ impl SnowflakeSink {
             .await
             .context("Failed to get next batch_id from sequence")?;
 
-        let global_batch_id = parse_nextval(&seq_result)
-            .context("Failed to parse sequence NEXTVAL result")?;
+        let global_batch_id =
+            parse_nextval(&seq_result).context("Failed to parse sequence NEXTVAL result")?;
 
         // 2. COPY INTO loads ALL staged files at once. The Parquet's own _batch_id
         // column is ignored — we override it with the global_batch_id so the raw
