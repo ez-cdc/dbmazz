@@ -25,7 +25,7 @@ Clone and run — PostgreSQL, StarRocks, and sample data included:
 ```bash
 git clone https://github.com/ez-cdc/dbmazz.git
 cd dbmazz
-docker compose -f deploy/docker-compose.yml --profile quickstart up -d
+docker compose -f deploy/docker-compose.yml --profile starrocks up -d
 ```
 
 Open **[http://localhost:8080](http://localhost:8080)** — you'll see a live dashboard with real-time metrics, throughput chart, and replication controls.
@@ -62,7 +62,7 @@ Each sink has a docker-compose profile that spins up source DB + target + dbmazz
 
 | Profile | Source | Target | Requirements |
 |---------|--------|--------|--------------|
-| `quickstart` | PostgreSQL | StarRocks | Docker only |
+| `starrocks` | PostgreSQL | StarRocks | Docker only |
 | `pg-target` | PostgreSQL | PostgreSQL | Docker only |
 | `snowflake` | PostgreSQL | Snowflake (cloud) | Snowflake account + [`snowsql`](https://docs.snowflake.com/en/user-guide/snowsql-install-config) |
 
@@ -87,13 +87,14 @@ docker compose -f deploy/docker-compose.yml --profile pg-target down -v
 
 ```bash
 # Start (StarRocks takes ~60s to initialize on first run)
-docker compose -f deploy/docker-compose.yml --profile quickstart down -v
-docker compose -f deploy/docker-compose.yml --profile quickstart up -d
+docker compose -f deploy/docker-compose.yml --profile starrocks down -v
+docker compose -f deploy/docker-compose.yml --profile starrocks up -d
 
-# Open http://localhost:8080 — configure connections from browser
+# Verify snapshot + CDC
+bash deploy/test-sink.sh starrocks
 
 # Cleanup
-docker compose -f deploy/docker-compose.yml --profile quickstart down -v
+docker compose -f deploy/docker-compose.yml --profile starrocks down -v
 ```
 
 ### PostgreSQL → Snowflake
@@ -244,10 +245,10 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 <details>
 <summary><strong>🐳 Docker deployment</strong></summary>
 
-### Quickstart (batteries included)
+### StarRocks (batteries included)
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile quickstart up -d
+docker compose -f deploy/docker-compose.yml --profile starrocks up -d
 ```
 
 ### Production (bring your own databases)
@@ -270,7 +271,7 @@ docker compose -f deploy/docker-compose.yml up -d
 ### Stop
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile quickstart down
+docker compose -f deploy/docker-compose.yml --profile starrocks down
 ```
 
 </details>

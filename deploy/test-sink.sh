@@ -8,7 +8,7 @@
 #
 # Examples:
 #   deploy/test-sink.sh pg-target     # Test PostgreSQL target
-#   deploy/test-sink.sh quickstart    # Test StarRocks target (future)
+#   deploy/test-sink.sh starrocks     # Test StarRocks target
 #
 # Prerequisites:
 #   docker compose -f deploy/docker-compose.yml --profile <profile> down -v
