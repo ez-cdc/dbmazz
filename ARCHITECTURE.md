@@ -164,21 +164,25 @@ src/
 │   └── wal_handler.rs              WAL message processing + dedup
 ├── engine/                          Orchestration
 │   ├── mod.rs                       CdcEngine (setup → CDC → shutdown)
-│   ├── setup/                       Source + sink setup
+│   ├── setup/                       Source setup (sink setup is via Sink::setup())
+│   │   ├── mod.rs                   SetupManager (source-side only)
 │   │   ├── postgres.rs              Replication slot, publication
-│   │   └── starrocks.rs             Table verification, audit columns
+│   │   └── error.rs                 Setup error types
 │   └── snapshot/                    Flink CDC concurrent snapshot
+│       ├── mod.rs                   Snapshot coordinator
 │       ├── worker.rs                Chunk processing + sink write
 │       ├── chunker.rs               PK-range chunking
-│       └── state_store.rs           dbmazz_snapshot_state table
+│       ├── state_store.rs           dbmazz_snapshot_state table
+│       └── utils.rs                 Snapshot utilities
 ├── connectors/
 │   └── sinks/
 │       ├── mod.rs                   create_sink() factory
 │       ├── starrocks/               StarRocks sink
 │       │   ├── mod.rs               StarRocksSink (JSON → Stream Load HTTP)
+│       │   ├── config.rs            StarRocksSinkConfig
+│       │   ├── setup.rs             Table verification, audit columns
 │       │   ├── stream_load.rs       HTTP Stream Load client
-│       │   ├── types.rs             PG → StarRocks type mapping
-│       │   └── config.rs            StarRocksSinkConfig
+│       │   └── types.rs             PG → StarRocks type mapping
 │       ├── postgres/                PostgreSQL sink
 │       │   ├── mod.rs               PostgresSink (COPY → raw table → MERGE)
 │       │   ├── raw_table.rs         COPY writer for raw staging table
@@ -197,8 +201,10 @@ src/
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
 │           └── types.rs             PG → Snowflake type mapping
 ├── grpc/                            gRPC server
+│   ├── mod.rs                       gRPC server startup
 │   ├── state.rs                     SharedState (metrics, dedup, control)
-│   └── services.rs                  Health, Control, Status, Metrics
+│   ├── services.rs                  Health, Control, Status, Metrics
+│   └── cpu_metrics.rs               CPU usage metrics collection
 ├── state_store.rs                   LSN checkpoint persistence
 └── utils.rs                         SQL validation, type helpers
 ```
