@@ -176,6 +176,9 @@ impl SnowflakeSinkConfig {
     }
 
     /// Returns the sanitized job name for use in SQL identifiers.
+    /// Uppercased to match Snowflake's unquoted identifier convention and to
+    /// stay consistent with the JOB_NAME VARCHAR value stored in _METADATA
+    /// (which is case-sensitive when compared in WHERE clauses).
     pub fn safe_job_name(&self) -> String {
         self.job_name
             .chars()
@@ -186,7 +189,8 @@ impl SnowflakeSinkConfig {
                     '_'
                 }
             })
-            .collect()
+            .collect::<String>()
+            .to_uppercase()
     }
 }
 
@@ -265,6 +269,6 @@ mod tests {
             soft_delete: true,
         };
 
-        assert_eq!(config.safe_job_name(), "my_slot_name");
+        assert_eq!(config.safe_job_name(), "MY_SLOT_NAME");
     }
 }

@@ -39,7 +39,11 @@ pub fn generate_merge(
     let type_mapper = TypeMapper::new();
     let table_upper = source_schema.name.to_uppercase();
     let dst_table = format!("{}.{}.\"{}\"", database, target_schema, table_upper);
-    let dst_qualified = format!("{}.{}", target_schema, source_schema.name);
+    // _DST_TABLE in the raw table is the source-side qualified name (e.g. "public.orders")
+    // emitted by TableRef::qualified_name() in parquet_writer. Use the source schema,
+    // NOT the Snowflake target schema, because Snowflake VARCHAR comparisons are
+    // case-sensitive and source schema is typically lowercase.
+    let dst_qualified = format!("{}.{}", source_schema.schema, source_schema.name);
 
     // Build column extraction expressions from VARIANT: _DATA:"col"::TYPE AS "COL"
     let col_extracts: Vec<String> = source_schema
@@ -303,6 +307,9 @@ mod tests {
         assert!(sql.contains("MERGE INTO MY_DB.PUBLIC.\"ORDERS\" AS TARGET"));
         assert!(sql.contains("ROW_NUMBER() OVER"));
         assert!(sql.contains("_BATCH_ID = 1"));
+        // _DST_TABLE must match what parquet_writer stores (source schema, not target):
+        // TableRef::qualified_name() emits "public.orders" — lowercase, PG schema.
+        assert!(sql.contains("_DST_TABLE = 'public.orders'"));
         assert!(sql.contains("TARGET.\"ID\" = SOURCE.\"ID\""));
         assert!(sql.contains("WHEN NOT MATCHED AND SOURCE._RECORD_TYPE != 2 THEN"));
         assert!(sql.contains("WHEN MATCHED AND SOURCE._RECORD_TYPE = 2 THEN"));
