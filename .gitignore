@@ -26,5 +26,9 @@ coverage/
 .plans/
 session-logs/
 
+# Deploy credentials
+deploy/.env
+deploy/.env.snowflake
+
 # Misc
 *.old
