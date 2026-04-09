@@ -4,7 +4,7 @@
 
 Rust CDC (Change Data Capture) daemon. Reads PostgreSQL WAL (Write-Ahead Log) via logical replication and streams changes to any supported sink. Each instance handles one replication job.
 
-Supported sinks: StarRocks (stable), PostgreSQL (in development).
+Supported sinks: StarRocks, PostgreSQL, Snowflake.
 
 ## Architecture
 
@@ -21,7 +21,8 @@ dbmazz (single binary, tokio async runtime)
 │   └── Checkpoint feedback (LSN confirmation)
 ├── Sink trait (6 methods — see ARCHITECTURE.md)
 │   ├── StarRocksSink: JSON → Stream Load HTTP API
-│   └── (future: PostgresSink, SnowflakeSink, etc.)
+│   ├── PostgresSink: COPY → raw table → MERGE
+│   └── SnowflakeSink: Parquet → PUT (stage) → COPY INTO → MERGE
 ├── Snapshot (Flink CDC concurrent snapshot, uses same write_batch)
 └── gRPC server
     ├── Health, Control, Status, Metrics services
@@ -42,6 +43,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and d
 - `src/connectors/sinks/` - Sink implementations
   - `mod.rs` - `create_sink()` factory
   - `starrocks/` - StarRocks: Stream Load HTTP API
+  - `postgres/` - PostgreSQL: COPY → raw table → MERGE normalizer
+  - `snowflake/` - Snowflake: Parquet → PUT (stage) → COPY INTO → MERGE normalizer
 - `src/engine/` - Orchestration (setup → CDC → snapshot → shutdown)
   - `snapshot/` - Flink CDC concurrent snapshot (PK-range chunking, watermarks, dedup)
   - `setup/` - Source + sink setup (conditional by SinkType)
@@ -53,7 +56,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and d
 ## Feature Flags
 
 - `--features http-api` - Enables HTTP API + web UI on port 8080 (setup wizard, dashboard, REST endpoints)
-- `--features demo` - Enables demo mode with sample data generation
 
 ## Snapshot / Backfill
 
@@ -77,9 +79,8 @@ Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
 
 3. Add match arm in create_sink() (src/connectors/sinks/mod.rs)
 
-4. Add match arm in SetupManager (src/engine/setup/mod.rs)
-
 Done. CDC and snapshot work automatically via write_batch().
+Sink-specific setup goes in Sink::setup(), not in SetupManager.
 ```
 
 ## Sink Trait
@@ -104,7 +105,7 @@ trait Sink: Send + Sync {
 | `SOURCE_URL` | — | PostgreSQL connection string |
 | `SOURCE_TYPE` | `postgres` | Source connector type |
 | `SINK_URL` | — | Sink connection URL |
-| `SINK_TYPE` | `starrocks` | Sink connector type (starrocks) |
+| `SINK_TYPE` | `starrocks` | Sink connector type (starrocks, postgres, snowflake) |
 | `SINK_DATABASE` | — | Target database name |
 | `FLUSH_SIZE` | `10000` | Max events per batch |
 | `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
