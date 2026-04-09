@@ -3,6 +3,9 @@ name = "dbmazz"
 version = "0.1.0"
 edition = "2021"
 license = "Elastic-2.0"
+# Minimum Supported Rust Version.
+# 1.91.1 is required by aws-smithy-async 1.2.14 (transitive dep of aws-sigv4).
+rust-version = "1.91.1"
 
 [features]
 default = []
