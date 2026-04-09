@@ -44,6 +44,40 @@ const DEFAULT_FLUSH_THRESHOLD_FILES: usize = 20;
 /// Default byte accumulation threshold (100 MB).
 const DEFAULT_FLUSH_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
+/// Parse a single i64 value from a Snowflake query result (e.g. SELECT SEQ.NEXTVAL).
+/// The rowset format is `[[ "value" ]]` with numeric values encoded as strings.
+fn parse_nextval(result: &self::client::QueryResult) -> Result<i64> {
+    let data = result
+        .data
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Empty sequence result"))?;
+    let rows = data
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Sequence result is not an array"))?;
+    let row = rows
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Sequence result has no rows"))?;
+    let row_arr = row
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Sequence row is not an array"))?;
+    let value = row_arr
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Sequence row is empty"))?;
+
+    // Snowflake returns numeric values as either strings or numbers
+    if let Some(s) = value.as_str() {
+        s.parse::<i64>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse sequence value '{}': {}", s, e))
+    } else if let Some(n) = value.as_i64() {
+        Ok(n)
+    } else {
+        Err(anyhow::anyhow!(
+            "Unexpected sequence value type: {:?}",
+            value
+        ))
+    }
+}
+
 /// Snowflake sink connector implementing the Sink trait.
 pub struct SnowflakeSink {
     config: SnowflakeSinkConfig,
@@ -90,8 +124,14 @@ impl SnowflakeSink {
             staged_files: Vec::new(),
             staged_bytes: 0,
             staged_records: 0,
-            flush_threshold_files: DEFAULT_FLUSH_THRESHOLD_FILES,
-            flush_threshold_bytes: DEFAULT_FLUSH_THRESHOLD_BYTES,
+            flush_threshold_files: std::env::var("SINK_SNOWFLAKE_FLUSH_FILES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_FLUSH_THRESHOLD_FILES),
+            flush_threshold_bytes: std::env::var("SINK_SNOWFLAKE_FLUSH_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_FLUSH_THRESHOLD_BYTES),
             source_schemas: Vec::new(),
         })
     }
@@ -121,6 +161,13 @@ impl SnowflakeSink {
     }
 
     /// Flushes all accumulated staged files to the raw table via COPY INTO.
+    ///
+    /// This operation assigns a globally unique batch_id from the Snowflake sequence
+    /// (shared between Primary and all SnapshotWorker instances) and:
+    ///   1. Loads staged Parquet files into the raw table via COPY INTO, overriding
+    ///      the Parquet's local `_batch_id` with the global value.
+    ///   2. Atomically advances `SYNC_BATCH_ID` in the metadata table so the
+    ///      normalizer picks up the new batch.
     async fn flush_staged_files(&mut self) -> Result<()> {
         if self.staged_files.is_empty() {
             return Ok(());
@@ -134,7 +181,21 @@ impl SnowflakeSink {
         let db = &self.config.database;
         let job = self.config.safe_job_name();
 
-        // COPY INTO loads ALL staged files at once (Snowflake parallelizes internally)
+        // 1. Get a globally unique batch_id from the Snowflake sequence.
+        // This value is shared across Primary + all SnapshotWorker instances.
+        let seq_result = client
+            .execute(&format!(
+                "SELECT {db}._DBMAZZ.SEQ_BATCH_{job}.NEXTVAL AS NEW_BATCH_ID"
+            ))
+            .await
+            .context("Failed to get next batch_id from sequence")?;
+
+        let global_batch_id = parse_nextval(&seq_result)
+            .context("Failed to parse sequence NEXTVAL result")?;
+
+        // 2. COPY INTO loads ALL staged files at once. The Parquet's own _batch_id
+        // column is ignored — we override it with the global_batch_id so the raw
+        // table entries match the metadata's SYNC_BATCH_ID.
         let copy_sql = format!(
             r#"COPY INTO {db}._DBMAZZ._RAW_{job}
             FROM (
@@ -144,7 +205,7 @@ impl SnowflakeSink {
                     PARSE_JSON($1:_data::VARCHAR),
                     $1:_record_type::NUMBER(3,0),
                     TRY_PARSE_JSON($1:_match_data::VARCHAR),
-                    $1:_batch_id::NUMBER(20,0),
+                    {global_batch_id}::NUMBER(20,0),
                     $1:_toast_columns::VARCHAR
                 FROM @{db}._DBMAZZ.STAGE_{job}
             )
@@ -157,17 +218,29 @@ impl SnowflakeSink {
             .await
             .context("COPY INTO raw table failed")?;
 
+        // 3. Atomically advance SYNC_BATCH_ID so the normalizer sees the new batch.
+        // GREATEST ensures concurrent flushes never regress the value.
+        client
+            .execute(&format!(
+                "UPDATE {db}._DBMAZZ._METADATA \
+                 SET SYNC_BATCH_ID = GREATEST(SYNC_BATCH_ID, {global_batch_id}) \
+                 WHERE JOB_NAME = '{job}'"
+            ))
+            .await
+            .context("Failed to update metadata SYNC_BATCH_ID")?;
+
         info!(
-            "COPY INTO: {} files, {} records, {} bytes → raw table",
+            "COPY INTO: {} files, {} records, {} bytes → raw table (batch_id={})",
             self.staged_files.len(),
             self.staged_records,
-            self.staged_bytes
+            self.staged_bytes,
+            global_batch_id
         );
 
-        // Notify normalizer with the current batch_id
+        // Notify normalizer (Primary only) — SnapshotWorker instances rely on
+        // the normalizer's polling loop to pick up new SYNC_BATCH_ID values.
         if let Some(ref tx) = self.normalize_tx {
-            let batch_id = self.batch_counter.load(Ordering::Relaxed);
-            let _ = tx.try_send(batch_id);
+            let _ = tx.try_send(global_batch_id);
         }
 
         self.staged_files.clear();
@@ -292,7 +365,9 @@ impl Sink for SnowflakeSink {
         }
 
         let file_size = parquet_bytes.len() as u64;
-        let file_name = format!("batch_{}.parquet", batch_id);
+        // Use UUID to avoid filename collisions when multiple concurrent sink
+        // instances (Primary + SnapshotWorkers) upload to the same stage.
+        let file_name = format!("batch_{}_{}.parquet", batch_id, uuid::Uuid::new_v4());
 
         // Upload to stage via PUT protocol
         let stage_manager = self
