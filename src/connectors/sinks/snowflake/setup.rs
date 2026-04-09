@@ -94,6 +94,21 @@ pub async fn run_setup(
         .context("Failed to initialize metadata row")?;
     info!("  [OK] Metadata table ready");
 
+    // 5b. Create batch ID sequence (globally unique across Primary + SnapshotWorkers)
+    // Used by flush_staged_files to atomically assign batch_ids that the normalizer
+    // reads from the metadata table to find pending batches.
+    client
+        .execute(&format!(
+            "CREATE SEQUENCE IF NOT EXISTS {}.{}.SEQ_BATCH_{} START = 1 INCREMENT = 1",
+            database, INTERNAL_SCHEMA, safe_job
+        ))
+        .await
+        .context("Failed to create batch sequence")?;
+    info!(
+        "  [OK] Sequence {}.{}.SEQ_BATCH_{} ready",
+        database, INTERNAL_SCHEMA, safe_job
+    );
+
     // 6. Create target schema if not default
     if target_schema.to_uppercase() != "PUBLIC" {
         client

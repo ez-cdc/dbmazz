@@ -135,7 +135,7 @@ impl StageManager {
         }
     }
 
-    /// Upload to S3 using temporary STS credentials.
+    /// Upload to S3 using temporary STS credentials signed with AWS Signature V4.
     async fn upload_s3(
         &self,
         info: &StageInfo,
@@ -145,6 +145,14 @@ impl StageManager {
         secret_key: &str,
         token: &str,
     ) -> Result<()> {
+        use aws_credential_types::Credentials;
+        use aws_sigv4::http_request::{
+            sign, SignableBody, SignableRequest, SigningSettings,
+        };
+        use aws_sigv4::sign::v4;
+        use sha2::{Digest, Sha256};
+        use std::time::SystemTime;
+
         // Build S3 URL: https://bucket.s3.region.amazonaws.com/path/filename
         let parts: Vec<&str> = info.location.splitn(2, '/').collect();
         let bucket = parts[0];
@@ -165,22 +173,85 @@ impl StageManager {
 
         let url = format!("{}/{}", endpoint, key);
 
-        // Use AWS SigV4 signing via reqwest with manual headers
-        // For simplicity, use the pre-signed approach with STS credentials
-        let resp = self
-            .client
-            .http_client()
-            .put(&url)
-            .header("x-amz-security-token", token)
-            .header(CONTENT_TYPE, "application/octet-stream")
+        // Compute SHA256 of body — S3 requires this header on signed requests
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        let body_sha256 = hex::encode(hasher.finalize());
+
+        // Headers to include in the signed canonical request.
+        // The signer will add Authorization, x-amz-date, and x-amz-security-token
+        // automatically via signing_instructions.
+        let signed_headers: Vec<(String, String)> = vec![
+            (
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            ),
+            ("x-amz-content-sha256".to_string(), body_sha256.clone()),
+            (
+                "x-amz-server-side-encryption".to_string(),
+                "aws:kms".to_string(),
+            ),
+        ];
+
+        // Build AWS SigV4 credentials (temp STS credentials from Snowflake)
+        let credentials = Credentials::new(
+            key_id,
+            secret_key,
+            Some(token.to_string()),
+            None, // No expiry info from Snowflake — STS tokens are short-lived anyway
+            "snowflake",
+        );
+        let identity = credentials.into();
+
+        // Build signing params for s3/<region>
+        let signing_settings = SigningSettings::default();
+        let signing_params: aws_sigv4::http_request::SigningParams = v4::SigningParams::builder()
+            .identity(&identity)
+            .region(region)
+            .name("s3")
+            .time(SystemTime::now())
+            .settings(signing_settings)
+            .build()
+            .context("Failed to build SigV4 signing params")?
+            .into();
+
+        // Create a signable request
+        let header_iter = signed_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()));
+        let signable_request = SignableRequest::new(
+            "PUT",
+            &url,
+            header_iter,
+            SignableBody::Bytes(&data),
+        )
+        .context("Failed to create signable request")?;
+
+        // Sign the request — returns instructions (headers to add) + signature
+        let signing_output =
+            sign(signable_request, &signing_params).context("Failed to sign S3 request")?;
+        let (signing_instructions, _signature) = signing_output.into_parts();
+
+        // Build reqwest request with both our headers and the signer's headers
+        let mut req_builder = self.client.http_client().put(&url);
+
+        // Add our original headers (content-type, x-amz-content-sha256, SSE)
+        for (name, value) in &signed_headers {
+            req_builder = req_builder.header(name, value);
+        }
+
+        // Add the signer's headers (Authorization, x-amz-date, x-amz-security-token)
+        let (instruction_headers, _params) = signing_instructions.into_parts();
+        for header in instruction_headers {
+            req_builder = req_builder.header(header.name(), header.value());
+        }
+
+        let resp = req_builder
             .header(CONTENT_LENGTH, data.len().to_string())
-            .header("x-amz-server-side-encryption", "aws:kms")
-            // AWS SDK-style auth header with STS credentials
-            .basic_auth(key_id, Some(secret_key))
             .body(data)
             .send()
             .await
-            .context("S3 upload failed")?;
+            .context("S3 upload HTTP request failed")?;
 
         if !resp.status().is_success() {
             let status = resp.status();

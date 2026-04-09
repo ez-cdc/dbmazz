@@ -279,7 +279,12 @@ impl Config {
         let sink_type_str = env::var("SINK_TYPE").unwrap_or_else(|_| "starrocks".to_string());
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
-        let sink_url = required_env("SINK_URL")?;
+        // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
+        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
+        let sink_url = match sink_type {
+            SinkType::Snowflake => optional_env("SINK_URL", ""),
+            _ => required_env("SINK_URL")?,
+        };
 
         let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
 

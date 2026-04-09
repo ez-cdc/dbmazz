@@ -66,6 +66,13 @@ pem = "3"
 sha2 = "0.10"
 base64 = "0.22"
 
+# AWS SigV4 signing (Snowflake S3 stage uploads)
+aws-sigv4 = "1.2"
+aws-credential-types = "1.2"
+
+# UUID generation (Snowflake stage file naming)
+uuid = { version = "1", features = ["v4"] }
+
 axum = { version = "0.7", features = ["json"], optional = true }
 tower-http = { version = "0.5", features = ["cors"], optional = true }
 
