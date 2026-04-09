@@ -18,6 +18,7 @@ back to hard errors in non-interactive mode.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -186,7 +187,15 @@ def _main_menu() -> None:
 
 
 def _compose_menu() -> None:
-    """Submenu for compose operations (up, down, logs, status)."""
+    """Submenu for compose operations (up, down, logs, status).
+
+    Sink selection is context-aware:
+      - `up` offers all profiles (any can be started)
+      - `down`, `logs`, `status` offer only profiles whose stack is
+        currently running. If no stacks are running, those actions
+        short-circuit with a clear message instead of dropping the user
+        into an empty selector.
+    """
     action = prompts.select(
         "Compose action:",
         choices=[
@@ -200,8 +209,15 @@ def _compose_menu() -> None:
     if action in (None, "back"):
         raise _BackToMenu()
 
+    # `up` works against any profile; the others only make sense against a
+    # stack that's actually running.
+    needs_running_stack = action in ("down", "logs", "status")
+
     try:
-        sink = _prompt_sink_or_back()
+        if needs_running_stack:
+            sink = _prompt_running_sink_or_back(action)
+        else:
+            sink = _prompt_sink_or_back()
     except _BackToMenu:
         return  # back from sink selector → re-show the compose menu (caller loops)
 
@@ -215,12 +231,66 @@ def _compose_menu() -> None:
         status(sink=sink)
 
 
+def _prompt_running_sink_or_back(action_name: str) -> str:
+    """Sink selector restricted to profiles whose compose stack is running.
+
+    Shells out to `docker compose ps` (via compose.is_running) for each
+    profile and builds the selector from the result. If no stacks are
+    running, prints a helpful message and raises _BackToMenu so the
+    caller returns to the compose menu.
+    """
+    # Probe each profile — this costs one `docker compose ps` per profile,
+    # which is ~50 ms each locally. Fast enough for menu UX.
+    running: list[ProfileSpec] = []
+    try:
+        for profile in list_profiles():
+            if compose.is_running(profile.compose_profile):
+                running.append(profile)
+    except compose.ComposeError as e:
+        console.print()
+        console.print(Text(f"  Error querying docker: {e}", style="error"))
+        console.print()
+        raise _BackToMenu()
+
+    if not running:
+        console.print()
+        console.print(Text(
+            f"  No stacks are currently running — nothing to {action_name}.",
+            style="warning",
+        ))
+        console.print(Text(
+            "  Start one with `ez-cdc up <sink>` first.",
+            style="muted",
+        ))
+        console.print()
+        raise _BackToMenu()
+
+    choices = [
+        {"name": p.name, "value": p.name, "description": p.description}
+        for p in running
+    ]
+    choices.append({"name": "← Back", "value": "__back__", "description": ""})
+
+    result = prompts.select(
+        f"Which running stack would you like to {action_name}?",
+        choices=choices,
+        default=running[0].name,
+    )
+    if result is None or result == "__back__":
+        raise _BackToMenu()
+    return result
+
+
 # ── Sink resolution helper ───────────────────────────────────────────────────
 
 def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
     """Resolve a sink name to a ProfileSpec, prompting if interactive and missing.
 
-    In interactive mode, if the user cancels the sink selector (Esc / Ctrl+C /
+    If the resolved profile requires an env file (e.g., snowflake needs
+    e2e/.env.snowflake) and the file doesn't exist, the user is prompted
+    to either supply a path or enter the credentials interactively.
+
+    In interactive mode, if the user cancels any sub-prompt (Esc / Ctrl+C /
     picks "Back"), this raises _BackToMenu instead of terminating the program.
     The main menu loop catches it and re-shows the top-level menu.
     """
@@ -235,10 +305,228 @@ def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
             raise typer.Exit(3)
 
     try:
-        return get_profile(sink)
+        profile = get_profile(sink)
     except KeyError as e:
         console.print(Text(str(e), style="error"))
         raise typer.Exit(3)
+
+    _ensure_env_file_if_needed(profile)
+    return profile
+
+
+def _ensure_env_file_if_needed(profile: ProfileSpec) -> None:
+    """For profiles that require an env file, ensure it exists.
+
+    If the file is missing and we're in interactive mode, prompt the user
+    to either point at an existing file elsewhere, enter credentials
+    interactively (with hidden password input), or go back.
+
+    Interactive input is the onboarding-friendly path: Snowflake trial users
+    don't have to know where to put a dotfile or how to copy the example.
+    """
+    if profile.requires_env_file is None:
+        return
+
+    target_path = profile.requires_env_file
+    if target_path.exists():
+        return  # all good
+
+    # Missing — in non-interactive mode, this is a hard error.
+    if not is_interactive():
+        console.print(Text(
+            f"Error: profile '{profile.name}' requires {target_path} which does not exist.\n"
+            f"  Copy {target_path}.example and fill it in, or run `ez-cdc` interactively "
+            f"to enter credentials.",
+            style="error",
+        ))
+        raise typer.Exit(2)
+
+    # Interactive flow.
+    console.print()
+    console.print(Text(
+        f"  Profile '{profile.name}' requires credentials, but {target_path} was not found.",
+        style="warning",
+    ))
+    console.print()
+
+    choice = prompts.select(
+        "How would you like to provide credentials?",
+        choices=[
+            {"name": "Enter them now",     "value": "input",
+             "description": "Interactive prompts (password hidden)"},
+            {"name": "Load from a file",   "value": "file",
+             "description": "Provide a path to an existing env file"},
+            {"name": "← Back",              "value": "back", "description": ""},
+        ],
+        default="input",
+    )
+
+    if choice in (None, "back"):
+        raise _BackToMenu()
+
+    if choice == "file":
+        _load_env_from_path(target_path)
+    elif choice == "input":
+        _prompt_env_interactive(profile, target_path)
+
+
+def _load_env_from_path(target_path: Path) -> None:
+    """Prompt the user for a path to an env file and copy it to target_path."""
+    raw = prompts.text(
+        f"Path to the env file (will be copied to {target_path}):",
+        default="",
+    )
+    if not raw:
+        raise _BackToMenu()
+
+    src = Path(raw).expanduser().resolve()
+    if not src.exists():
+        console.print(Text(f"Error: {src} does not exist", style="error"))
+        raise _BackToMenu()
+    if not src.is_file():
+        console.print(Text(f"Error: {src} is not a file", style="error"))
+        raise _BackToMenu()
+
+    try:
+        content = src.read_text()
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content)
+        try:
+            target_path.chmod(0o600)
+        except OSError:
+            pass
+    except OSError as e:
+        console.print(Text(f"Error: failed to copy {src} → {target_path}: {e}", style="error"))
+        raise _BackToMenu()
+
+    console.print(Text(f"  ✓ Credentials copied to {target_path}", style="success"))
+
+
+def _prompt_env_interactive(profile: ProfileSpec, target_path: Path) -> None:
+    """Prompt the user for Snowflake credentials interactively.
+
+    Currently Snowflake is the only profile that needs an env file, so the
+    field set is hard-coded here. If more sinks start requiring credentials,
+    this should become per-backend metadata.
+    """
+    if profile.name != "snowflake":
+        console.print(Text(
+            f"Interactive credential entry is only wired for snowflake (got {profile.name})",
+            style="error",
+        ))
+        raise _BackToMenu()
+
+    console.print()
+    console.print(Text("  Enter your Snowflake credentials:", style="info"))
+    console.print(Text("  (press Ctrl+C at any prompt to go back)", style="muted"))
+    console.print()
+
+    try:
+        account   = _required_text("Snowflake account", placeholder="xy12345.us-east-1")
+        user      = _required_text("User")
+        pw        = _required_password("Password")
+        database  = _required_text("Database")
+        schema    = prompts.text("Schema", default="PUBLIC") or "PUBLIC"
+        warehouse = _required_text("Warehouse", placeholder="COMPUTE_WH")
+        role      = prompts.text("Role (optional, press Enter to skip)", default="") or ""
+        soft_delete = prompts.confirm("Use soft delete?", default=False)
+    except _BackToMenu:
+        raise
+    except KeyboardInterrupt:
+        raise _BackToMenu()
+
+    # Always inject into the current process environment so the run can
+    # proceed immediately — even if the user opts not to save the file.
+    os.environ["SINK_SNOWFLAKE_ACCOUNT"]   = account
+    os.environ["SINK_USER"]                = user
+    os.environ["SINK_PASSWORD"]            = pw
+    os.environ["SINK_DATABASE"]            = database
+    os.environ["SINK_SCHEMA"]              = schema
+    os.environ["SINK_SNOWFLAKE_WAREHOUSE"] = warehouse
+    if role:
+        os.environ["SINK_SNOWFLAKE_ROLE"] = role
+    os.environ["SINK_SNOWFLAKE_SOFT_DELETE"] = "true" if soft_delete else "false"
+
+    # Offer to persist to disk for next time.
+    save = prompts.confirm(
+        f"Save these credentials to {target_path} for next time?",
+        default=True,
+    )
+
+    if save:
+        _write_snowflake_env_file(
+            target_path,
+            account=account, user=user, password=pw,
+            database=database, schema=schema, warehouse=warehouse,
+            role=role, soft_delete=soft_delete,
+        )
+        console.print(Text(f"  ✓ Saved to {target_path} (permissions 0600)", style="success"))
+    else:
+        console.print(Text(
+            "  ⚠ Credentials not saved — they will be lost when this process exits.",
+            style="warning",
+        ))
+    console.print()
+
+
+def _required_text(label: str, placeholder: str = "") -> str:
+    """Text prompt that re-asks until the user provides a non-empty value.
+
+    Empty answer or Ctrl+C is treated as "go back".
+    """
+    msg = f"{label}:"
+    if placeholder:
+        msg = f"{label} (e.g. {placeholder}):"
+    value = prompts.text(msg, default="")
+    if value is None or value.strip() == "":
+        raise _BackToMenu()
+    return value.strip()
+
+
+def _required_password(label: str) -> str:
+    """Password prompt (hidden) that requires a non-empty value."""
+    value = prompts.password(f"{label}:")
+    if value is None or value == "":
+        raise _BackToMenu()
+    return value
+
+
+def _write_snowflake_env_file(
+    target_path: Path,
+    *,
+    account: str,
+    user: str,
+    password: str,
+    database: str,
+    schema: str,
+    warehouse: str,
+    role: str,
+    soft_delete: bool,
+) -> None:
+    """Write a .env.snowflake file with the given credentials."""
+    lines = [
+        "# ez-cdc Snowflake credentials — generated interactively",
+        "# Do not commit this file. It is gitignored.",
+        "",
+        f"SINK_SNOWFLAKE_ACCOUNT={account}",
+        f"SINK_USER={user}",
+        f"SINK_PASSWORD={password}",
+        f"SINK_DATABASE={database}",
+        f"SINK_SCHEMA={schema}",
+        f"SINK_SNOWFLAKE_WAREHOUSE={warehouse}",
+    ]
+    if role:
+        lines.append(f"SINK_SNOWFLAKE_ROLE={role}")
+    lines.append(f"SINK_SNOWFLAKE_SOFT_DELETE={'true' if soft_delete else 'false'}")
+    lines.append("")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text("\n".join(lines))
+    try:
+        target_path.chmod(0o600)
+    except OSError:
+        # Non-POSIX filesystem or permission issue — not fatal.
+        pass
 
 
 def _prompt_sink_or_back() -> str:
