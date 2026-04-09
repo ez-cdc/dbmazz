@@ -4,7 +4,8 @@ ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 WORKDIR /app
 COPY . .
 ARG CARGO_FEATURES=""
-RUN cargo build --release --features "${CARGO_FEATURES}"
+RUN cargo build --release --features "${CARGO_FEATURES}" \
+ && strip /app/target/release/dbmazz
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y libssl3 libcurl4 ca-certificates && rm -rf /var/lib/apt/lists/*
