@@ -55,39 +55,66 @@ Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets 
 
 ## 🧪 Test a sink end-to-end
 
-Each sink has a docker-compose profile that spins up source DB + target DB + dbmazz with snapshot enabled. Two scripts handle validation:
+Each sink has a docker-compose profile that spins up source DB + target + dbmazz with snapshot enabled. Two scripts handle validation:
 
 - **`deploy/test-sink.sh`** — verifies snapshot + CDC correctness (INSERT, UPDATE, DELETE). Pass/fail.
 - **`deploy/load-test.py`** — generates sustained load and shows replication metrics in a live terminal dashboard.
 
+| Profile | Source | Target | Requirements |
+|---------|--------|--------|--------------|
+| `quickstart` | PostgreSQL | StarRocks | Docker only |
+| `pg-target` | PostgreSQL | PostgreSQL | Docker only |
+| `snowflake` | PostgreSQL | Snowflake (cloud) | Snowflake account + [`snowsql`](https://docs.snowflake.com/en/user-guide/snowsql-install-config) |
+
+### PostgreSQL → PostgreSQL
+
 ```bash
-# 1. Start fresh (builds dbmazz + both databases with seed data)
+# Start (builds dbmazz + source PG + target PG with seed data)
 docker compose -f deploy/docker-compose.yml --profile pg-target down -v
 docker compose -f deploy/docker-compose.yml --profile pg-target up -d
 
-# 2. Verify snapshot → CDC transition + INSERT/UPDATE/DELETE
+# Verify snapshot + CDC
 bash deploy/test-sink.sh pg-target
 
-# 3. Load test — generates traffic + shows throughput, lag, row counts
+# Load test (optional — requires: pip install psycopg2-binary rich)
 python3 deploy/load-test.py pg-target --rate 1000 --duration 60
-```
 
-| Profile | Source | Target | Dashboard |
-|---------|--------|--------|-----------|
-| `quickstart` | PostgreSQL | StarRocks | [localhost:8080](http://localhost:8080) |
-| `pg-target` | PostgreSQL | PostgreSQL | [localhost:8080](http://localhost:8080) |
-| `snowflake` | PostgreSQL | Snowflake (cloud) | [localhost:8080](http://localhost:8080) |
-
-The `snowflake` profile connects to an external Snowflake account (no Docker container). Copy `deploy/.env.snowflake.example` to `deploy/.env.snowflake` and fill in your credentials.
-
-```bash
 # Cleanup
 docker compose -f deploy/docker-compose.yml --profile pg-target down -v
 ```
 
-> **Requirements for test-sink.sh snowflake:** [`snowsql`](https://docs.snowflake.com/en/user-guide/snowsql-install-config) + a Snowflake account
->
-> **Requirements for load-test.py:** `pip install psycopg2-binary rich`
+### PostgreSQL → StarRocks
+
+```bash
+# Start (StarRocks takes ~60s to initialize on first run)
+docker compose -f deploy/docker-compose.yml --profile quickstart down -v
+docker compose -f deploy/docker-compose.yml --profile quickstart up -d
+
+# Open http://localhost:8080 — configure connections from browser
+
+# Cleanup
+docker compose -f deploy/docker-compose.yml --profile quickstart down -v
+```
+
+### PostgreSQL → Snowflake
+
+Snowflake is cloud-only — no Docker container. The profile runs source PG + dbmazz locally and connects to your Snowflake account. Free 30-day trial at [signup.snowflake.com](https://signup.snowflake.com).
+
+```bash
+# 1. Configure credentials (one-time)
+cp deploy/.env.snowflake.example deploy/.env.snowflake
+# Edit deploy/.env.snowflake with your account, warehouse, user, password
+
+# 2. Start (builds dbmazz + source PG, connects to Snowflake cloud)
+docker compose -f deploy/docker-compose.yml --profile snowflake down -v
+docker compose -f deploy/docker-compose.yml --profile snowflake up -d
+
+# 3. Verify snapshot + CDC (requires snowsql CLI)
+bash deploy/test-sink.sh snowflake
+
+# 4. Cleanup
+docker compose -f deploy/docker-compose.yml --profile snowflake down -v
+```
 
 > Adding a new sink? Add a profile to `deploy/docker-compose.yml` + a test function to `deploy/test-sink.sh`. See the [sink connector template](src/connectors/sinks/_template/README.md).
 
