@@ -1,5 +1,5 @@
--- dbmazz Quickstart: E-commerce Schema + Seed Data
--- Used by docker-compose.production.yml --profile quickstart
+-- dbmazz: E-commerce Schema + Seed Data
+-- Used by docker-compose.yml (all test profiles)
 
 -- Tables
 CREATE TABLE IF NOT EXISTS orders (

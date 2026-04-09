@@ -4,8 +4,8 @@
 #
 # Profiles:
 #
-#   quickstart — PG source + StarRocks target + web UI (configure from browser):
-#     docker compose --profile quickstart up -d
+#   starrocks — PG source + StarRocks target + web UI:
+#     docker compose --profile starrocks up -d
 #     Open http://localhost:8080
 #
 #   pg-target — PG source + PG target + web UI:
@@ -31,7 +31,7 @@ services:
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16
-    profiles: ["quickstart", "pg-target"]
+    profiles: ["starrocks", "pg-target", "snowflake"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -58,11 +58,11 @@ services:
       - dbmazz
 
   # ---------------------------------------------------------------------------
-  # Profile: quickstart — StarRocks target + web UI
+  # Profile: starrocks — PG source + StarRocks target + web UI
   # ---------------------------------------------------------------------------
   starrocks:
     image: starrocks/allin1-ubuntu:latest
-    profiles: ["quickstart"]
+    profiles: ["starrocks"]
     ports:
       - "8030:8030"
       - "9030:9030"
@@ -79,7 +79,7 @@ services:
 
   starrocks-init:
     image: mysql:8.0
-    profiles: ["quickstart"]
+    profiles: ["starrocks"]
     volumes:
       - ./init/starrocks-init.sh:/init.sh:ro
     entrypoint: ["/bin/sh", "/init.sh"]
@@ -93,26 +93,41 @@ services:
     networks:
       - dbmazz
 
-  # dbmazz for quickstart — web UI, configure from browser
-  dbmazz:
+  # dbmazz for starrocks — preconfigured + dashboard UI on :8080
+  dbmazz-starrocks:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
       args:
         CARGO_FEATURES: "http-api"
-    profiles: ["quickstart"]
+    profiles: ["starrocks"]
     ports:
-      - "${HTTP_API_PORT:-8080}:${HTTP_API_PORT:-8080}"
-      - "${GRPC_PORT:-50051}:${GRPC_PORT:-50051}"
-    env_file:
-      - path: .env
-        required: false
+      - "8080:8080"
+      - "50051:50051"
     environment:
-      HTTP_API_PORT: "${HTTP_API_PORT:-8080}"
-      GRPC_PORT: "${GRPC_PORT:-50051}"
-      FLUSH_SIZE: "${FLUSH_SIZE:-2000}"
-      FLUSH_INTERVAL_MS: "${FLUSH_INTERVAL_MS:-2000}"
-      RUST_LOG: "${RUST_LOG:-info}"
+      # Source
+      SOURCE_URL: "postgres://postgres:postgres@postgres:5432/dbmazz?replication=database"
+      SOURCE_SLOT_NAME: "dbmazz_slot"
+      SOURCE_PUBLICATION_NAME: "dbmazz_pub"
+      TABLES: "orders,order_items"
+      # Sink
+      SINK_TYPE: "starrocks"
+      SINK_URL: "http://starrocks:8030"
+      SINK_PORT: "9030"
+      SINK_DATABASE: "dbmazz"
+      SINK_USER: "root"
+      SINK_PASSWORD: ""
+      # Pipeline
+      FLUSH_SIZE: "2000"
+      FLUSH_INTERVAL_MS: "2000"
+      # Snapshot
+      DO_SNAPSHOT: "true"
+      SNAPSHOT_CHUNK_SIZE: "10000"
+      SNAPSHOT_PARALLEL_WORKERS: "2"
+      # UI + logging
+      HTTP_API_PORT: "8080"
+      GRPC_PORT: "50051"
+      RUST_LOG: "info"
     depends_on:
       postgres:
         condition: service_healthy
@@ -120,7 +135,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${HTTP_API_PORT:-8080}/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -204,9 +219,62 @@ services:
       - dbmazz
 
   # ---------------------------------------------------------------------------
+  # Profile: snowflake — PG source + Snowflake cloud target
+  # Requires: deploy/.env.snowflake with Snowflake credentials
+  #
+  # Setup:
+  #   cp deploy/.env.snowflake.example deploy/.env.snowflake
+  #   # Fill in your Snowflake credentials
+  #   docker compose --profile snowflake up -d
+  # ---------------------------------------------------------------------------
+  dbmazz-snowflake:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CARGO_FEATURES: "http-api"
+    profiles: ["snowflake"]
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    env_file:
+      - path: .env.snowflake
+        required: true
+    environment:
+      # Source (hardcoded — same PG as other profiles)
+      SOURCE_URL: "postgres://postgres:postgres@postgres:5432/dbmazz?replication=database"
+      SOURCE_SLOT_NAME: "dbmazz_slot"
+      SOURCE_PUBLICATION_NAME: "dbmazz_pub"
+      TABLES: "orders,order_items"
+      # Sink
+      SINK_TYPE: "snowflake"
+      # Pipeline
+      FLUSH_SIZE: "${FLUSH_SIZE:-500}"
+      FLUSH_INTERVAL_MS: "${FLUSH_INTERVAL_MS:-2000}"
+      # Snapshot
+      DO_SNAPSHOT: "true"
+      SNAPSHOT_CHUNK_SIZE: "10000"
+      SNAPSHOT_PARALLEL_WORKERS: "2"
+      # UI + logging
+      HTTP_API_PORT: "8080"
+      GRPC_PORT: "50051"
+      RUST_LOG: "${RUST_LOG:-info}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - dbmazz
+
+  # ---------------------------------------------------------------------------
   # Future profiles: add target + dbmazz service per sink type
   # ---------------------------------------------------------------------------
-  # Profile: snowflake
   # Profile: mongodb
   # Profile: s3
 

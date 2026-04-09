@@ -1,6 +1,6 @@
 #!/bin/sh
 # Wait for StarRocks to be fully ready, then create database and tables.
-# Used by docker-compose.production.yml --profile quickstart
+# Used by docker-compose.yml --profile starrocks
 
 set -e
 

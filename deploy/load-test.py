@@ -5,7 +5,7 @@ dbmazz Load Test — unified traffic generator + replication monitor.
 Usage:
     deploy/load-test.py pg-target                    # default: 500 eps, 60s
     deploy/load-test.py pg-target --rate 3000 --duration 120
-    deploy/load-test.py quickstart --rate 1000
+    deploy/load-test.py starrocks --rate 1000
 
 Requires: pip install psycopg2-binary rich requests
 """
@@ -52,7 +52,7 @@ PROFILES = {
         "dbmazz_api": "http://localhost:8080",
         "description": "PostgreSQL -> PostgreSQL",
     },
-    "quickstart": {
+    "starrocks": {
         "source_dsn": "postgres://postgres:postgres@localhost:15432/dbmazz",
         "target_dsn": None,  # StarRocks — count via dbmazz API
         "target_type": "starrocks",
@@ -454,7 +454,7 @@ def main():
         epilog="Examples:\n"
                "  deploy/load-test.py pg-target\n"
                "  deploy/load-test.py pg-target --rate 3000 --duration 120\n"
-               "  deploy/load-test.py quickstart --rate 1000\n",
+               "  deploy/load-test.py starrocks --rate 1000\n",
     )
     parser.add_argument("profile", choices=PROFILES.keys(), help="docker-compose profile")
     parser.add_argument("--rate", type=int, default=500, help="target events/sec (default: 500)")
