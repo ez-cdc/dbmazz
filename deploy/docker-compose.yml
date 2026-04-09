@@ -31,7 +31,7 @@ services:
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16
-    profiles: ["quickstart", "pg-target"]
+    profiles: ["quickstart", "pg-target", "snowflake"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -204,9 +204,62 @@ services:
       - dbmazz
 
   # ---------------------------------------------------------------------------
+  # Profile: snowflake — PG source + Snowflake cloud target
+  # Requires: deploy/.env.snowflake with Snowflake credentials
+  #
+  # Setup:
+  #   cp deploy/.env.snowflake.example deploy/.env.snowflake
+  #   # Fill in your Snowflake credentials
+  #   docker compose --profile snowflake up -d
+  # ---------------------------------------------------------------------------
+  dbmazz-snowflake:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CARGO_FEATURES: "http-api"
+    profiles: ["snowflake"]
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    env_file:
+      - path: .env.snowflake
+        required: true
+    environment:
+      # Source (hardcoded — same PG as other profiles)
+      SOURCE_URL: "postgres://postgres:postgres@postgres:5432/dbmazz?replication=database"
+      SOURCE_SLOT_NAME: "dbmazz_slot"
+      SOURCE_PUBLICATION_NAME: "dbmazz_pub"
+      TABLES: "orders,order_items"
+      # Sink
+      SINK_TYPE: "snowflake"
+      # Pipeline
+      FLUSH_SIZE: "${FLUSH_SIZE:-500}"
+      FLUSH_INTERVAL_MS: "${FLUSH_INTERVAL_MS:-2000}"
+      # Snapshot
+      DO_SNAPSHOT: "true"
+      SNAPSHOT_CHUNK_SIZE: "10000"
+      SNAPSHOT_PARALLEL_WORKERS: "2"
+      # UI + logging
+      HTTP_API_PORT: "8080"
+      GRPC_PORT: "50051"
+      RUST_LOG: "${RUST_LOG:-info}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - dbmazz
+
+  # ---------------------------------------------------------------------------
   # Future profiles: add target + dbmazz service per sink type
   # ---------------------------------------------------------------------------
-  # Profile: snowflake
   # Profile: mongodb
   # Profile: s3
 

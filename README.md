@@ -76,12 +76,17 @@ python3 deploy/load-test.py pg-target --rate 1000 --duration 60
 |---------|--------|--------|-----------|
 | `quickstart` | PostgreSQL | StarRocks | [localhost:8080](http://localhost:8080) |
 | `pg-target` | PostgreSQL | PostgreSQL | [localhost:8080](http://localhost:8080) |
+| `snowflake` | PostgreSQL | Snowflake (cloud) | [localhost:8080](http://localhost:8080) |
+
+The `snowflake` profile connects to an external Snowflake account (no Docker container). Copy `deploy/.env.snowflake.example` to `deploy/.env.snowflake` and fill in your credentials.
 
 ```bash
 # Cleanup
 docker compose -f deploy/docker-compose.yml --profile pg-target down -v
 ```
 
+> **Requirements for test-sink.sh snowflake:** [`snowsql`](https://docs.snowflake.com/en/user-guide/snowsql-install-config) + a Snowflake account
+>
 > **Requirements for load-test.py:** `pip install psycopg2-binary rich`
 
 > Adding a new sink? Add a profile to `deploy/docker-compose.yml` + a test function to `deploy/test-sink.sh`. See the [sink connector template](src/connectors/sinks/_template/README.md).
