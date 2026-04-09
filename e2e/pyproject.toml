@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ez-cdc-e2e"
+version = "0.1.0"
+description = "EZ-CDC end-to-end test harness — interactive CLI for verify, load, and quickstart"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Elastic-2.0" }
+authors = [
+    { name = "EZ-CDC", email = "dev@ez-cdc.com" },
+]
+dependencies = [
+    # CLI framework + display
+    "typer>=0.12.0",              # subcommands, auto-help, bundles rich + shellingham
+    "rich>=13.7.0",               # colors, live dashboards, panels, spinners
+    "questionary>=2.0.1",         # interactive prompts (select, confirm, text)
+
+    # HTTP client for dbmazz daemon
+    "httpx>=0.27.0",
+
+    # Database drivers
+    "psycopg2-binary>=2.9.9",             # PostgreSQL (source + pg-target sink)
+    "mysql-connector-python>=9.0.0",      # StarRocks (wire-compatible with MySQL)
+    "snowflake-connector-python>=3.7.0",  # Snowflake (official driver)
+]
+
+[project.scripts]
+ez-cdc = "ez_cdc_e2e.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ez_cdc_e2e = ["py.typed"]
