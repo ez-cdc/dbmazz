@@ -8,6 +8,8 @@ RUN cargo build --release --features "${CARGO_FEATURES}" \
  && strip /app/target/release/dbmazz
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y libssl3 libcurl4 ca-certificates && rm -rf /var/lib/apt/lists/*
+# curl is needed by the compose healthcheck (`curl -f http://localhost:8080/healthz`).
+# libcurl4 is the runtime lib that dbmazz itself links against for Stream Load.
+RUN apt-get update && apt-get install -y libssl3 libcurl4 curl ca-certificates && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/dbmazz /usr/local/bin/dbmazz
 ENTRYPOINT ["dbmazz"]
