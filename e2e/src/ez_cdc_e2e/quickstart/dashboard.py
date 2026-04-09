@@ -33,6 +33,7 @@ from rich.text import Text
 from ..backends.base import TargetBackend
 from ..compose import logs as compose_logs
 from ..dbmazz import DaemonStatus, DbmazzClient, DbmazzError
+from ..load.generator import TrafficGenerator
 from ..profiles import ProfileSpec
 from ..tui.keys import KeyReader
 
@@ -113,6 +114,13 @@ class TableCounts:
 class QuickstartDashboard:
     """Interactive live dashboard.
 
+    Starts a background `TrafficGenerator` for the lifetime of the dashboard
+    so the user sees actual CDC activity (events/sec, changing counts,
+    non-flat throughput) instead of a static "zero" display. The generator
+    produces a realistic low-rate e-commerce workload (~15 eps of INSERTs,
+    UPDATEs, and DELETEs) against the source PostgreSQL. It starts when
+    run() is called and stops on exit via the finally block.
+
     The caller is responsible for:
       - having already called compose.up() and dbmazz.wait_for_stage("cdc")
       - connecting the source, target, and dbmazz clients
@@ -126,12 +134,14 @@ class QuickstartDashboard:
         target: TargetBackend,
         console: Console,
         source_counts_fn,  # callable[[], dict[str, int]] — avoids coupling to SourceClient
+        traffic_rate_eps: float = 15.0,
     ) -> None:
         self.profile = profile
         self.dbmazz = dbmazz
         self.target = target
         self.console = console
         self.source_counts_fn = source_counts_fn
+        self.traffic_rate_eps = traffic_rate_eps
 
         self.start_time = time.time()
         self.throughput_history: list[float] = []
@@ -139,32 +149,49 @@ class QuickstartDashboard:
         self.status_message: Optional[str] = None
         self.status_message_ttl: float = 0.0
 
+        # Background workload generator — started in run(), stopped in finally.
+        self.traffic_generator: Optional[TrafficGenerator] = None
+
     # ── main loop ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         """Run the dashboard until the user exits (q or Ctrl+C)."""
-        with KeyReader() as keys:
-            with Live(
-                self._render_loading(),
-                console=self.console,
-                refresh_per_second=2,
-                screen=True,
-                transient=True,
-            ) as live:
-                last_render = 0.0
-                while not self.should_exit:
-                    # Handle any queued keypresses first (snappier input).
-                    self._drain_keys(keys, live)
-                    if self.should_exit:
-                        break
+        # Start the background traffic generator so the dashboard shows
+        # real activity instead of a frozen "zero" display.
+        self.traffic_generator = TrafficGenerator(
+            source_dsn=self.profile.source_dsn,
+            rate_eps=self.traffic_rate_eps,
+        )
+        self.traffic_generator.start()
 
-                    # Render at ~2 Hz (tick every 500ms).
-                    now = time.time()
-                    if now - last_render >= 0.5:
-                        live.update(self._render_frame())
-                        last_render = now
+        try:
+            with KeyReader() as keys:
+                with Live(
+                    self._render_loading(),
+                    console=self.console,
+                    refresh_per_second=2,
+                    screen=True,
+                    transient=True,
+                ) as live:
+                    last_render = 0.0
+                    while not self.should_exit:
+                        # Handle any queued keypresses first (snappier input).
+                        self._drain_keys(keys, live)
+                        if self.should_exit:
+                            break
 
-                    time.sleep(0.05)
+                        # Render at ~2 Hz (tick every 500ms).
+                        now = time.time()
+                        if now - last_render >= 0.5:
+                            live.update(self._render_frame())
+                            last_render = now
+
+                        time.sleep(0.05)
+        finally:
+            # Stop the traffic generator before returning. Use a short timeout
+            # so exit is snappy even if the source is hanging.
+            if self.traffic_generator is not None:
+                self.traffic_generator.stop(timeout=2.0)
 
     # ── key handling ─────────────────────────────────────────────────────────
 
@@ -306,7 +333,7 @@ class QuickstartDashboard:
         )
 
     def _render_header(self, status: DaemonStatus) -> RenderableType:
-        """Stage indicator + lag + LSN."""
+        """Stage indicator + lag + LSN + traffic generator status."""
         lines: list[RenderableType] = [Text("")]
 
         stage_line = Text()
@@ -322,6 +349,26 @@ class QuickstartDashboard:
         lsn_line.append("confirmed LSN  ", style="metric.label")
         lsn_line.append(status.confirmed_lsn, style="metric.number")
         lines.append(lsn_line)
+
+        # Traffic generator indicator — tells the user WHY the numbers
+        # are moving (otherwise the dashboard just looks busy for no
+        # obvious reason on a fresh stack).
+        if self.traffic_generator is not None and self.traffic_generator.is_running():
+            gen_stats = self.traffic_generator.stats
+            gen_line = Text()
+            gen_line.append("  ")
+            gen_line.append("● ", style="info")
+            gen_line.append("traffic  ", style="metric.label")
+            gen_line.append(
+                f"generating ~{self.traffic_rate_eps:.0f} ops/s",
+                style="metric.number",
+            )
+            gen_line.append(
+                f"   ({gen_stats.inserts} ins, {gen_stats.updates} upd, "
+                f"{gen_stats.deletes} del)",
+                style="muted",
+            )
+            lines.append(gen_line)
 
         lines.append(Text(""))
         return Group(*lines)
