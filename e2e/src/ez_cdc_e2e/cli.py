@@ -117,8 +117,21 @@ def main(
         raise typer.Exit(0)
 
 
+# Sentinel raised by `_resolve_sink` and similar helpers when the user cancels
+# an interactive prompt (Esc / Ctrl+C / chose "Back"). The main menu catches
+# this and returns to the top-level menu instead of exiting the program.
+class _BackToMenu(Exception):
+    """Signal: user wants to go back to the previous menu, not exit."""
+
+
 def _main_menu() -> None:
-    """Interactive main menu: banner A + top-level choice."""
+    """Interactive main menu: banner A + top-level choice, loops until Exit.
+
+    The menu loops so users can run multiple subcommands in one session.
+    Any subcommand that raises _BackToMenu (because the user cancelled a
+    sub-prompt with Esc / Ctrl+C) returns to this loop instead of exiting
+    the program.
+    """
     _show_banner_a()
 
     if not is_interactive():
@@ -128,28 +141,48 @@ def _main_menu() -> None:
         ))
         raise typer.Exit(3)
 
-    choice = prompts.select(
-        "What would you like to do?",
-        choices=[
-            {"name": "Quickstart",   "value": "quickstart", "description": "Try dbmazz with a sink"},
-            {"name": "Verify",       "value": "verify",     "description": "Run e2e validation tests"},
-            {"name": "Load test",    "value": "load",       "description": "Generate traffic + monitor"},
-            {"name": "Compose",      "value": "compose",    "description": "Manage docker stack"},
-            {"name": "Exit",         "value": "exit",       "description": ""},
-        ],
-        default="quickstart",
-    )
+    while True:
+        choice = prompts.select(
+            "What would you like to do?",
+            choices=[
+                {"name": "Quickstart", "value": "quickstart", "description": "Try dbmazz with a sink"},
+                {"name": "Verify",     "value": "verify",     "description": "Run e2e validation tests"},
+                {"name": "Load test",  "value": "load",       "description": "Generate traffic + monitor"},
+                {"name": "Compose",    "value": "compose",    "description": "Manage docker stack"},
+                {"name": "Exit",       "value": "exit",       "description": ""},
+            ],
+            default="quickstart",
+        )
 
-    if choice is None or choice == "exit":
-        return
-    if choice == "quickstart":
-        quickstart(sink=None)
-    elif choice == "verify":
-        verify(sink=None)
-    elif choice == "load":
-        console.print(Text("Load test is coming in PR 3 — not yet implemented.", style="warning"))
-    elif choice == "compose":
-        _compose_menu()
+        # Cancel (Esc/Ctrl+C) or explicit Exit → leave the program.
+        if choice is None or choice == "exit":
+            return
+
+        try:
+            if choice == "quickstart":
+                quickstart(sink=None)
+            elif choice == "verify":
+                verify(sink=None)
+            elif choice == "load":
+                console.print(Text(
+                    "Load test is coming in PR 3 — not yet implemented.",
+                    style="warning",
+                ))
+            elif choice == "compose":
+                _compose_menu()
+        except _BackToMenu:
+            # User cancelled a sub-prompt — fall through to the next loop iteration.
+            pass
+        except typer.Exit as e:
+            # Some subcommand decided to exit. Exit code 130 means the user
+            # cancelled (Ctrl+C); we treat that as "back to menu" in interactive
+            # mode. Any other exit code is a real termination.
+            if e.exit_code == 130:
+                pass
+            else:
+                raise
+
+        console.print()  # spacing before showing the menu again
 
 
 def _compose_menu() -> None:
@@ -161,15 +194,16 @@ def _compose_menu() -> None:
             {"name": "down",   "value": "down",   "description": "Stop and destroy a stack"},
             {"name": "logs",   "value": "logs",   "description": "Tail logs"},
             {"name": "status", "value": "status", "description": "Fetch current status"},
-            {"name": "back",   "value": "back",   "description": ""},
+            {"name": "← Back", "value": "back",   "description": ""},
         ],
     )
     if action in (None, "back"):
-        return
+        raise _BackToMenu()
 
-    sink = _prompt_sink()
-    if sink is None:
-        return
+    try:
+        sink = _prompt_sink_or_back()
+    except _BackToMenu:
+        return  # back from sink selector → re-show the compose menu (caller loops)
 
     if action == "up":
         up(sink=sink)
@@ -184,12 +218,15 @@ def _compose_menu() -> None:
 # ── Sink resolution helper ───────────────────────────────────────────────────
 
 def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
-    """Resolve a sink name to a ProfileSpec, prompting if interactive and missing."""
+    """Resolve a sink name to a ProfileSpec, prompting if interactive and missing.
+
+    In interactive mode, if the user cancels the sink selector (Esc / Ctrl+C /
+    picks "Back"), this raises _BackToMenu instead of terminating the program.
+    The main menu loop catches it and re-shows the top-level menu.
+    """
     if sink is None:
         if is_interactive():
-            sink = _prompt_sink()
-            if sink is None:
-                raise typer.Exit(130)
+            sink = _prompt_sink_or_back()
         else:
             console.print(Text(
                 "Error: --sink is required in non-interactive mode.",
@@ -204,21 +241,38 @@ def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
         raise typer.Exit(3)
 
 
-def _prompt_sink() -> Optional[str]:
-    """Interactive sink selection via questionary."""
+def _prompt_sink_or_back() -> str:
+    """Interactive sink selection with an explicit "← Back" option.
+
+    Raises _BackToMenu if the user cancels (Esc/Ctrl+C) or picks "Back".
+    Returns the sink name on a real selection.
+    """
     choices = [
-        {
-            "name": p.name,
-            "value": p.name,
-            "description": p.description,
-        }
+        {"name": p.name, "value": p.name, "description": p.description}
         for p in list_profiles()
     ]
-    return prompts.select(
+    choices.append({"name": "← Back", "value": "__back__", "description": ""})
+
+    result = prompts.select(
         "Which sink would you like to use?",
         choices=choices,
         default="starrocks",
     )
+    if result is None or result == "__back__":
+        raise _BackToMenu()
+    return result
+
+
+def _prompt_sink() -> Optional[str]:
+    """Backwards-compatible sink prompt that returns None on cancel.
+
+    Kept for callers that don't participate in the _BackToMenu protocol.
+    New code should use _prompt_sink_or_back().
+    """
+    try:
+        return _prompt_sink_or_back()
+    except _BackToMenu:
+        return None
 
 
 # ── Subcommand: quickstart ───────────────────────────────────────────────────
