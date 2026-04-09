@@ -2,8 +2,8 @@
 /target/
 **/target/
 **/*.rs.bk
-Cargo.lock
-**/*.rs.bk
+# Note: Cargo.lock is committed for binary crates (reproducible builds).
+# Only gitignore Cargo.lock in library crates.
 
 # Byproducts
 *.log
