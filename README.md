@@ -414,7 +414,7 @@ dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, converts ev
 
 The sink is fully responsible for its loading strategy (Stream Load, COPY, S3 staging, etc.). The engine and pipeline are sink-agnostic.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and how to add new sinks.
+See [docs/architecture.md](docs/architecture.md) for the full data flow, module map, and how to add new sinks.
 
 </details>
 
