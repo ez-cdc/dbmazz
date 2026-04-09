@@ -104,6 +104,7 @@ impl std::fmt::Debug for SourceConfig {
 pub enum SinkType {
     StarRocks,
     Postgres,
+    Snowflake,
 }
 
 impl SinkType {
@@ -111,8 +112,9 @@ impl SinkType {
         match s.to_lowercase().as_str() {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
+            "snowflake" => Ok(SinkType::Snowflake),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
                 other
             ),
         }
@@ -124,6 +126,7 @@ impl std::fmt::Display for SinkType {
         match self {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
+            SinkType::Snowflake => write!(f, "snowflake"),
         }
     }
 }
@@ -154,6 +157,7 @@ pub struct SinkConfig {
 pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
+    Snowflake,
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -275,7 +279,12 @@ impl Config {
         let sink_type_str = env::var("SINK_TYPE").unwrap_or_else(|_| "starrocks".to_string());
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
-        let sink_url = required_env("SINK_URL")?;
+        // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
+        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
+        let sink_url = match sink_type {
+            SinkType::Snowflake => optional_env("SINK_URL", ""),
+            _ => required_env("SINK_URL")?,
+        };
 
         let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
 
@@ -292,6 +301,7 @@ impl Config {
                 schema: optional_env("SINK_SCHEMA", "public"),
                 job_name: slot_name.clone(),
             }),
+            SinkType::Snowflake => SinkSpecificConfig::Snowflake,
         };
 
         let sink = SinkConfig {
@@ -388,6 +398,9 @@ impl Config {
                     "Sink: PostgreSQL (db: {}, schema: {})",
                     self.sink.database, schema
                 );
+            }
+            SinkType::Snowflake => {
+                info!("Sink: Snowflake (db: {})", self.sink.database);
             }
         }
 
@@ -525,6 +538,14 @@ mod tests {
         assert_eq!(
             SinkType::from_str("STARROCKS").unwrap(),
             SinkType::StarRocks
+        );
+        assert_eq!(
+            SinkType::from_str("snowflake").unwrap(),
+            SinkType::Snowflake
+        );
+        assert_eq!(
+            SinkType::from_str("SNOWFLAKE").unwrap(),
+            SinkType::Snowflake
         );
         assert!(SinkType::from_str("clickhouse").is_err());
     }

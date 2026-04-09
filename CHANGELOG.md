@@ -5,6 +5,17 @@ All notable changes to dbmazz will be documented here.
 ## [Unreleased]
 
 ### Added
+- **Snowflake Sink Connector**: Two-phase ELT replication to Snowflake via HTTPS
+  - Parquet files for type-safe bulk loading (Arrow + Parquet crates)
+  - PUT protocol for stage upload (S3/GCS/Azure via Snowflake temp credentials)
+  - COPY INTO with PARSE_JSON → VARIANT (parsed once, not per-MERGE)
+  - Background normalizer with MERGE (ROW_NUMBER dedup, VARIANT extraction, TOAST handling)
+  - File accumulation for snapshot optimization (20 files per COPY INTO)
+  - Configurable soft delete (`SINK_SNOWFLAKE_SOFT_DELETE`) or hard DELETE
+  - Key-pair JWT auth (preferred) or username/password fallback
+  - TRANSIENT schema for raw table (no fail-safe, cheaper storage)
+  - Schema evolution via ALTER TABLE ADD COLUMN
+  - 29 unit tests covering types, Parquet, MERGE SQL, stage parsing, config
 - **Automatic PostgreSQL Setup**: Zero configuration, `dbmazz` configures everything automatically
   - Verifies that tables exist
   - Configures `REPLICA IDENTITY FULL` automatically
