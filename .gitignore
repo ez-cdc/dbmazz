@@ -26,9 +26,14 @@ coverage/
 .plans/
 session-logs/
 
-# Deploy credentials
-deploy/.env
-deploy/.env.snowflake
+# e2e credentials
+e2e/.env
+e2e/.env.snowflake
+
+# Python build artifacts (e2e/ is installed with pip install -e)
+e2e/src/**/__pycache__/
+e2e/src/**/*.egg-info/
+e2e/**/*.pyc
 
 # Misc
 *.old

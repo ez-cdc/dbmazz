@@ -232,18 +232,20 @@ slot, publication).
 ### Testing (3 steps)
 
 ```
-1. Add a profile to deploy/docker-compose.yml:
+1. Add a profile to e2e/compose.yml:
    - Target database service (with healthcheck)
    - dbmazz-my-sink service (with SINK_TYPE + connection env vars)
 
-2. Add test_my_sink() to deploy/test-sink.sh:
-   - Verify snapshot replicated seed data
-   - Verify CDC INSERT, UPDATE, DELETE
+2. Add a TargetBackend subclass in e2e/src/ez_cdc_e2e/backends/my_sink.py
+   and register the profile in e2e/src/ez_cdc_e2e/profiles.py.
 
 3. Run:
-   docker compose --profile my-sink up -d
-   deploy/test-sink.sh my-sink
+   ez-cdc verify my-sink
 ```
+
+See [`e2e/README.md`](../e2e/README.md) and
+[`contributing-connectors.md`](contributing-connectors.md) for the
+full checklist.
 
 ## Concurrency Model
 

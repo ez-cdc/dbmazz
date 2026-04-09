@@ -1,6 +1,57 @@
+# dbmazz .dockerignore
+#
+# The dbmazz binary build only needs the Rust sources and Cargo.{toml,lock}.
+# Excluding everything else keeps the Docker build context small AND
+# prevents unrelated file changes (e2e harness, docs, plans, editor
+# state) from invalidating the cached `cargo build --release` layer.
+#
+# The cache chain looks like:
+#   1. Dockerfile `COPY . .` is invalidated iff any file in the context changes
+#   2. `cargo build --release` is invalidated iff its inputs changed
+#
+# Without a tight dockerignore, touching e2e/src/ez_cdc_e2e/verify/tier1.py
+# (a Python file totally unrelated to the Rust build) invalidates `COPY . .`
+# and triggers a full recompile, which takes ~5 minutes. With this dockerignore,
+# e2e/ is excluded from the context, so Python edits don't trigger a rebuild.
+
+# Build artifacts — never send these to the daemon
 target/
-.git/
-examples/
+**/target/
+**/*.rs.bk
+
+# e2e test harness (Python, installed separately with `pip install -e e2e/`)
+e2e/
+
+# Documentation (markdown, images) — not needed to build the binary
 docs/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
 assets/
-*.md
+examples/
+
+# IDE / editor state
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.bak
+
+# Ephemeral / session state
+.plans/
+session-logs/
+.claude/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# OS
+.DS_Store
+
+# Env files
+.env
+.env.*

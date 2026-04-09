@@ -727,31 +727,67 @@ mod tests {
 }
 ```
 
-### Integration Tests
+### End-to-End Tests (required for sink connectors)
 
-Create integration tests in `tests/integration_tests.rs` (or similar):
+All sink connectors are validated by the `ez-cdc` CLI test harness in
+`e2e/`. Unlike unit tests, the e2e suite runs against real databases in
+Docker (or a real Snowflake account, for that sink) and verifies
+behavior end-to-end: snapshot correctness, CDC INSERT/UPDATE/DELETE,
+TOAST handling, schema consistency, and more.
 
-```rust
-#[cfg(feature = "integration-tests")]
-mod integration {
-    use dbmazz::connectors::sources::create_source;
+To add e2e coverage for a new sink:
 
-    #[tokio::test]
-    async fn test_mynewsource_end_to_end() {
-        // Test with real database connection
-    }
-}
-```
+1. **Add a TargetBackend** in `e2e/src/ez_cdc_e2e/backends/my_sink.py`:
 
-Run with: `cargo test --features integration-tests`
+   ```python
+   from .base import BackendCapabilities, ColumnInfo, TargetBackend
 
-### Manual Testing
+   class MySinkTarget(TargetBackend):
+       @property
+       def name(self) -> str:
+           return "my-sink"
 
-1. Test with the demo environment (adapt `examples/` if needed)
-2. Verify all CDC operations: INSERT, UPDATE, DELETE
-3. Test schema evolution
-4. Test error handling and recovery
-5. Measure performance characteristics
+       @property
+       def capabilities(self) -> BackendCapabilities:
+           return BackendCapabilities(
+               supports_hard_delete=True,
+               supports_schema_evolution=True,
+               has_metadata_table=True,
+               post_cdc_settle_seconds=1.0,
+               # ... see backends/base.py for all fields
+           )
+
+       def expected_audit_columns(self) -> list[str]:
+           return ["dbmazz_op_type", "dbmazz_synced_at"]
+
+       # Implement the rest of the abstract methods (see base.py)
+   ```
+
+2. **Register the profile** in `e2e/src/ez_cdc_e2e/profiles.py`:
+
+   ```python
+   PROFILES["my-sink"] = ProfileSpec(
+       name="my-sink",
+       compose_profile="my-sink",
+       description="PostgreSQL → MySink",
+       source_dsn=_COMMON_SOURCE_DSN,
+       dbmazz_http_url=_COMMON_DBMAZZ_URL,
+       tables=_COMMON_TABLES,
+       backend_import="ez_cdc_e2e.backends.my_sink:MySinkTarget",
+   )
+   ```
+
+3. **Add a compose service** in `e2e/compose.yml` under `profiles: ["my-sink"]`.
+
+4. **Run the suite**: `ez-cdc verify my-sink`. The runner automatically
+   exercises all Tier 1 validations against your backend — you don't
+   write any test functions yourself, the framework provides them.
+
+   Every sink passes the same set of checks, so adding one is ~1 class
+   (~150 lines) and zero test code.
+
+See [`e2e/README.md`](../e2e/README.md) for the full list of validations
+currently in Tier 1, Tier 2, and the nightly roadmap.
 
 ## Documentation Requirements
 
@@ -773,15 +809,11 @@ Each connector must include a comprehensive `README.md` with:
 
 ### Example README Template
 
-See `src/connectors/sources/_template/README.md` and `src/connectors/sinks/_template/README.md` for complete templates.
+See `src/connectors/sinks/_template/README.md` for the sink connector template.
 
 ### Main README Updates
 
-Update `/Users/dariomazzitelli/repos/db_mazz_project/dbmazz/README.md` to list the new connector:
-
-- Add to "Supported Sources" or "Supported Sinks"
-- Update the architecture diagram if needed
-- Link to the connector's README
+Update the top-level `README.md` "Supported databases" table to list the new connector.
 
 ## Examples to Follow
 
