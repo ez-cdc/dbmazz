@@ -27,14 +27,11 @@ postgres-protocol = { git = "https://github.com/MaterializeInc/rust-postgres", b
 postgres-types = { git = "https://github.com/MaterializeInc/rust-postgres", branch = "master", features = ["derive", "with-chrono-0_4", "with-serde_json-1"] }
 reqwest = { version = "0.11.24", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1.0.197", features = ["derive"] }
-sonic-rs = "0.3"
 anyhow = "1.0.81"
 chrono = { version = "0.4.35", features = ["serde"] }
 dotenvy = "0.15.7"
 bytes = "1.5.0"
 futures = "0.3.30"
-log = "0.4.21"
-env_logger = "0.11.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hex = "0.4.3"
@@ -49,9 +46,7 @@ tonic-reflection = "0.12"
 mysql_async = "0.34"
 curl = { version = "0.4", features = ["static-curl"] }
 serde_json = "1.0"
-sysinfo = "0.30"
 libc = "0.2"
-parking_lot = "0.12"
 url = "2.5"
 # Force vendored OpenSSL for musl cross-compilation
 openssl-sys = { version = "0.9", features = ["vendored"] }
