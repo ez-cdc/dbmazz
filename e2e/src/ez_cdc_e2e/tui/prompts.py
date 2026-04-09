@@ -11,18 +11,22 @@ from typing import Optional
 import questionary
 from questionary import Style
 
-from .theme import PRIMARY_400, GRAY_400, GRAY_500, SUCCESS
+from .theme import PRIMARY_400, GRAY_400, GRAY_500
 
 
 # Questionary style matching the EZ-CDC brand. Colors are taken directly from
 # the rich theme so the prompts visually match the rest of the CLI output.
+#
+# All "chosen" styles use the brand blue (PRIMARY_400) — using green (SUCCESS)
+# is reserved for pass results in the verify output. Mixing them confuses the
+# user into thinking the default choice is already "correct".
 EZ_CDC_PROMPT_STYLE = Style([
     ("qmark",       f"fg:{PRIMARY_400} bold"),   # the ? marker
     ("question",    "bold"),                      # question text
-    ("answer",      f"fg:{SUCCESS} bold"),        # user's answer
+    ("answer",      f"fg:{PRIMARY_400} bold"),    # user's answer (after confirm)
     ("pointer",     f"fg:{PRIMARY_400} bold"),    # ❯ indicator
     ("highlighted", f"fg:{PRIMARY_400} bold"),    # currently-hovered choice
-    ("selected",    f"fg:{SUCCESS}"),             # selected item
+    ("selected",    f"fg:{PRIMARY_400}"),         # selected item (multiselect)
     ("separator",   f"fg:{GRAY_500}"),            # separator lines
     ("instruction", f"fg:{GRAY_400}"),            # "(use ↑↓ to navigate)"
     ("text",        ""),                          # plain text
@@ -89,6 +93,18 @@ def text(message: str, default: str = "") -> Optional[str]:
         return questionary.text(
             message,
             default=default,
+            style=EZ_CDC_PROMPT_STYLE,
+            qmark="?",
+        ).ask()
+    except KeyboardInterrupt:
+        return None
+
+
+def password(message: str) -> Optional[str]:
+    """Show a password input prompt (characters hidden). Returns None if cancelled."""
+    try:
+        return questionary.password(
+            message,
             style=EZ_CDC_PROMPT_STYLE,
             qmark="?",
         ).ask()
