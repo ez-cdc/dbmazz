@@ -1,238 +1,261 @@
-# dbmazz Architecture
+# Architecture
 
-High-performance CDC: PostgreSQL → StarRocks.
+## Overview
 
----
-
-## Flow Diagram
+dbmazz is a CDC (Change Data Capture) daemon written in Rust. It reads the PostgreSQL Write-Ahead Log (WAL) via logical replication and streams changes to any supported sink. Each instance handles one replication job.
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  PostgreSQL │────▶│   Source    │────▶│   Parser    │────▶│  Pipeline   │
-│     WAL     │     │  (postgres) │     │   (SIMD)    │     │  (batching) │
-└─────────────┘     └─────────────┘     └─────────────┘     └──────┬──────┘
-                                                                   │
-                    ┌─────────────┐     ┌─────────────┐            │
-                    │   Schema    │◀────│   Sink      │◀───────────┘
-                    │    Cache    │     │ (StarRocks) │
-                    └─────────────┘     └──────┬──────┘
-                                               │
-                    ┌─────────────┐            │
-                    │ State Store │◀───────────┘
-                    │ (checkpoint)│
-                    └─────────────┘
-
-┌─────────────┐     ┌─────────────┐
-│    gRPC     │◀───▶│   Engine    │  (lifecycle orchestrator)
-│   Server    │     │             │
-└─────────────┘     └─────────────┘
+PostgreSQL (source)             dbmazz                          Sink (target)
+┌──────────────┐             ┌────────────────────┐          ┌──────────────┐
+│ WAL          │   logical   │ WAL Handler        │          │ StarRocks    │
+│ (INSERT,     │  replication│   │                │          │ PostgreSQL   │
+│  UPDATE,     │ ──────────▶ │   ▼                │          │ Snowflake    │
+│  DELETE)     │  (pgoutput) │ source/converter   │          │ (+ future)   │
+│              │             │   │                │          │              │
+│              │             │   ▼                │          │              │
+│              │             │ Pipeline           │  write   │              │
+│              │             │   │ batch + flush   │──batch──▶│              │
+│              │             │   ▼                │          │              │
+│              │             │ Checkpoint (LSN)   │          │              │
+│              │ ◀───────────│   confirm to PG    │          │              │
+└──────────────┘             └────────────────────┘          └──────────────┘
+                                   ~5 MB RAM
+                                   <1s latency
 ```
 
----
+## Data Flow — Step by Step
 
-## Modules
-
-| File/Folder | Responsibility |
-|-----------------|-----------------|
-| `main.rs` | Minimalist entry point (< 30 lines) |
-| `config.rs` | Centralized env var loading |
-| **`engine/mod.rs`** | **CDC lifecycle orchestrator (INIT → SETUP → CDC)** |
-| **`engine/setup/mod.rs`** | **Main automatic setup manager** |
-| **`engine/setup/postgres.rs`** | **PostgreSQL setup (REPLICA IDENTITY, Publication, Slot)** |
-| **`engine/setup/starrocks.rs`** | **StarRocks setup (validation + audit columns)** |
-| **`engine/setup/error.rs`** | **Descriptive error types for control plane** |
-| `source/postgres.rs` | Connection and WAL stream reading |
-| `source/parser.rs` | Zero-copy parser with SIMD for `pgoutput` |
-| `sink/starrocks.rs` | Stream Load logic to StarRocks |
-| `sink/curl_loader.rs` | HTTP client with libcurl (100-continue) |
-| `pipeline/mod.rs` | Batching, backpressure, flush logic |
-| `pipeline/schema_cache.rs` | O(1) schema cache + schema evolution |
-| `grpc/services.rs` | 4 services: Health, Control, Status, Metrics |
-| `grpc/state.rs` | SharedState with atomics for metrics |
-| `replication/wal_handler.rs` | Parsing of WAL messages (XLogData, KeepAlive) |
-| `state_store.rs` | Checkpoint persistence in PostgreSQL |
-
----
-
-## Where to Place New Code
-
-| Type of change | Location |
-|----------------|-----------|
-| New source (MySQL, MongoDB) | `src/source/<name>.rs` + implement trait |
-| New sink (ClickHouse, Kafka) | `src/sink/<name>.rs` + implement `Sink` trait |
-| **Setup validation** | `src/engine/setup/postgres.rs` or `src/engine/setup/starrocks.rs` |
-| **New setup error type** | `src/engine/setup/error.rs` → enum `SetupError` |
-| **Engine logic** | `src/engine/mod.rs` (lifecycle phase) |
-| New environment variable | Field in `src/config.rs` → struct `Config` |
-| New gRPC service | `src/grpc/services.rs` + `src/proto/dbmazz.proto` |
-| Parsing helper | Function in `src/source/parser.rs` |
-| Data transformation | `src/pipeline/` (new file if complex) |
-| WAL logic | `src/replication/wal_handler.rs` |
-| Persistent state | `src/state_store.rs` |
-
----
-
-## Data Flow
-
-1. **WAL Reader** (`source/postgres.rs`)
-   - Connects to PostgreSQL with `replication=database`
-   - Reads logical replication stream
-
-2. **Parser** (`source/parser.rs`)
-   - Parses `pgoutput` protocol (Begin, Commit, Relation, Insert, Update, Delete)
-   - Zero-copy with `bytes::Bytes`
-   - SIMD for UTF-8 validation
-
-3. **Pipeline** (`pipeline/mod.rs`)
-   - Accumulates events in batches
-   - Flush by size (`FLUSH_SIZE`) or time (`FLUSH_INTERVAL_MS`)
-   - Backpressure via channel capacity
-
-4. **Schema Cache** (`pipeline/schema_cache.rs`)
-   - O(1) schema cache by `relation_id`
-   - Detects new columns → schema evolution
-
-5. **Sink** (`sink/starrocks.rs`)
-   - Converts to JSON with `sonic-rs`
-   - Stream Load via HTTP with `curl`
-   - Partial Update for TOAST columns
-
-6. **Checkpoint** (`state_store.rs`)
-   - Persists LSN in `dbmazz_checkpoints` table
-   - Confirms to PostgreSQL with `StandbyStatusUpdate`
-
----
-
-## Automatic Setup Flow
-
-The `engine/setup/` module handles automatic configuration in the `SETUP` stage:
-
-### 1. PostgreSQL Setup (`engine/setup/postgres.rs`)
+### 1. Setup Phase
 
 ```
-Verify Tables Exist
-    ↓
-Configure REPLICA IDENTITY FULL
-    ↓
-Create/Verify Publication
-    ↓
-Add Missing Tables to Publication
-    ↓
-Create/Verify Replication Slot
-    ↓
-✅ PostgreSQL Ready
+Engine::run()
+  ├── Start gRPC server (health checks must respond immediately)
+  ├── Connect to source PostgreSQL
+  │     ├── Verify tables exist
+  │     ├── Set REPLICA IDENTITY FULL
+  │     ├── Create publication (dbmazz_pub)
+  │     └── Create replication slot (dbmazz_slot)
+  ├── Connect to sink
+  │     └── validate_connection() + sink-specific setup
+  ├── Load checkpoint (last confirmed LSN)
+  ├── Start replication stream from checkpoint LSN
+  └── Initialize Pipeline
 ```
 
-**Idempotency**: Detects existing resources (recovery mode) and continues without errors.
+### 2. CDC Phase (main loop)
 
-### 2. StarRocks Setup (`engine/setup/starrocks.rs`)
+The engine reads WAL messages and processes them through three stages:
 
+**Stage A — WAL Handler** (`replication/wal_handler.rs`)
 ```
-Verify Connectivity
-    ↓
-Verify Tables Exist
-    ↓
-Get Existing Columns
-    ↓
-Add Missing Audit Columns:
-  - dbmazz_op_type
-  - dbmazz_is_deleted
-  - dbmazz_synced_at
-  - dbmazz_cdc_version
-    ↓
-✅ StarRocks Ready
+pgoutput bytes
+  ├── Parse: PgOutputParser → CdcMessage (PG-specific)
+  ├── Update SchemaCache (on Relation messages)
+  ├── Snapshot dedup: should_emit() check (if snapshot active)
+  └── Convert: CdcMessage → CdcRecord (generic, via source/converter.rs)
 ```
 
-### 3. Error Handling (`engine/setup/error.rs`)
-
-If any step fails:
-- Descriptive error saved in `SharedState`
-- Health Check returns `NOT_SERVING` with `errorDetail`
-- gRPC server keeps running for control plane queries
-
-**Example**:
-```rust
-SetupError::PgTableNotFound { table: "orders" }
-  ↓
-errorDetail: "Table 'orders' not found in PostgreSQL. Verify the table exists..."
+**Stage B — Pipeline** (`pipeline/mod.rs`)
+```
+PipelineEvent { lsn, record: CdcRecord }
+  ├── Accumulate records into batch (Vec<CdcRecord>)
+  ├── Flush when: batch.len() >= FLUSH_SIZE OR timeout >= FLUSH_INTERVAL_MS
+  ├── Call sink.write_batch(records)
+  ├── On success: send LSN to feedback channel
+  └── On failure: set state to Stopped, halt pipeline
 ```
 
----
+**Stage C — Checkpoint** (`engine/mod.rs`)
+```
+feedback_rx receives confirmed LSN
+  ├── Save checkpoint to StateStore (PostgreSQL table)
+  ├── Update SharedState.confirmed_lsn
+  └── Send StandbyStatusUpdate to PostgreSQL
+      (PG can now discard WAL up to this LSN)
+```
 
-## Design Principles
+**Critical invariant**: checkpoint is saved BEFORE confirming to PostgreSQL. If we confirm first and crash, the WAL is gone but we haven't persisted — permanent data loss.
 
-### Zero-copy
+### 3. Snapshot Phase (concurrent with CDC)
+
+Runs in parallel with the WAL consumer. Uses the Flink CDC concurrent snapshot algorithm:
+
+```
+For each table:
+  chunk_table() → [chunk(0, 50000), chunk(50000, 100000), ...]
+
+For each chunk (N workers in parallel):
+  1. Emit low-watermark (LW) via pg_logical_emit_message
+  2. SELECT * FROM table WHERE pk >= start AND pk < end
+  3. Emit high-watermark (HW) → captures LSN
+  4. sink.write_batch(rows as CdcRecord::Insert)
+  5. Mark chunk complete in dbmazz_snapshot_state
+  6. Register (start_pk, end_pk, hw_lsn) in SharedState
+
+WAL consumer deduplication:
+  For each Insert/Update event during snapshot:
+    if event.pk is in a completed chunk AND event.lsn <= chunk.hw_lsn:
+      → suppress (already loaded by snapshot)
+    else:
+      → emit normally
+```
+
+Progress is tracked in PostgreSQL (`dbmazz_snapshot_state` table), so interrupted snapshots resume from the last completed chunk.
+
+## Key Types
+
+### CdcRecord (the generic boundary)
+
+Everything upstream of CdcRecord is PostgreSQL-specific. Everything downstream is generic.
 
 ```rust
-// ✅ Use bytes::Bytes for slices without copying
-let val = data.split_to(len);  // Zero-copy slice
-```
+enum CdcRecord {
+    Insert { table, columns: Vec<ColumnValue>, position },
+    Update { table, old_columns, new_columns, position },
+    Delete { table, columns, position },
+    SchemaChange { table, columns: Vec<ColumnDef>, position },
+    Begin { xid },
+    Commit { xid, position, commit_timestamp_us },
+    Heartbeat { position },
+}
 
-### SIMD Optimizations
-
-- `memchr`: byte search O(n/32)
-- `simdutf8`: UTF-8 validation with AVX2
-- `sonic-rs`: SIMD JSON parsing
-- Bitmap `u64` for TOAST: POPCNT, CTZ
-
-### Async Everything
-
-```rust
-// All I/O is async with tokio
-async fn send_batch(&self, rows: Vec<Row>) -> Result<()>
-```
-
-### Trait-based Extensibility
-
-```rust
-// New sinks implement the trait
-#[async_trait]
-pub trait Sink: Send + Sync {
-    async fn push_batch(&mut self, batch: &[CdcMessage], ...) -> Result<()>;
-    async fn apply_schema_delta(&self, delta: &SchemaDelta) -> Result<()>;
+enum Value {
+    Null, Bool, Int64, Float64, String, Bytes,
+    Json, Timestamp, Decimal, Uuid, Unchanged,
 }
 ```
 
-### Configuration via Env Vars
+`Value::Unchanged` represents TOAST columns that weren't modified (PostgreSQL doesn't include them in the WAL for partial updates).
+
+### Sink trait
 
 ```rust
-// Everything configurable, nothing hardcoded
-pub struct Config {
-    pub database_url: String,      // DATABASE_URL
-    pub flush_size: usize,         // FLUSH_SIZE
-    pub flush_interval_ms: u64,    // FLUSH_INTERVAL_MS
-    // ...
+trait Sink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> SinkCapabilities;
+    async fn validate_connection(&self) -> Result<()>;
+    async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> { Ok(()) }
+    async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
+    async fn close(&mut self) -> Result<()>;
 }
 ```
 
----
+6 methods, 1 with default. Modeled after Kafka Connect (start + put + flush + stop). The sink is fully responsible for its loading strategy — the engine doesn't know about Stream Load, COPY protocol, S3 staging, etc.
 
-## Directory Structure
+## Module Map
 
 ```
 src/
-├── main.rs              # Entry point (delegation to engine)
-├── config.rs            # Config::from_env()
-├── engine.rs            # CdcEngine (orchestrator)
-├── state_store.rs       # Checkpoints
-├── source/              # Data sources
-│   ├── mod.rs
-│   ├── postgres.rs      # PostgreSQL replication
-│   └── parser.rs        # pgoutput parser
-├── sink/                # Destinations
-│   ├── mod.rs           # Sink trait
-│   ├── starrocks.rs     # StarRocks Stream Load
-│   └── curl_loader.rs   # HTTP client
-├── pipeline/            # Processing
-│   ├── mod.rs           # Batching + flush
-│   └── schema_cache.rs  # Schema cache + evolution
-├── grpc/                # Control API
-│   ├── mod.rs           # Server setup
-│   ├── services.rs      # 4 services
-│   └── state.rs         # SharedState
-├── replication/         # WAL handling
-│   ├── mod.rs
-│   └── wal_handler.rs
-└── proto/               # Protobuf
-    └── dbmazz.proto
+├── main.rs                          Entry point
+├── config.rs                        Environment variable loading
+├── core/                            Generic abstractions (sink-agnostic)
+│   ├── record.rs                    CdcRecord, Value, ColumnValue, TableRef
+│   ├── traits.rs                    Sink trait, SinkCapabilities, SourceTableSchema
+│   ├── position.rs                  SourcePosition (LSN, offset)
+│   └── error.rs                     Error types
+├── source/                          Source layer (PostgreSQL-specific)
+│   ├── converter.rs                 CdcMessage → CdcRecord conversion
+│   ├── parser.rs                    pgoutput protocol parser
+│   └── postgres.rs                  Replication connection management
+├── pipeline/                        Generic batching + dispatch
+│   ├── mod.rs                       Pipeline loop (batch → sink.write_batch)
+│   └── schema_cache.rs             Table schema tracking
+├── replication/
+│   └── wal_handler.rs              WAL message processing + dedup
+├── engine/                          Orchestration
+│   ├── mod.rs                       CdcEngine (setup → CDC → shutdown)
+│   ├── setup/                       Source setup (sink setup is via Sink::setup())
+│   │   ├── mod.rs                   SetupManager (source-side only)
+│   │   ├── postgres.rs              Replication slot, publication
+│   │   └── error.rs                 Setup error types
+│   └── snapshot/                    Flink CDC concurrent snapshot
+│       ├── mod.rs                   Snapshot coordinator
+│       ├── worker.rs                Chunk processing + sink write
+│       ├── chunker.rs               PK-range chunking
+│       ├── state_store.rs           dbmazz_snapshot_state table
+│       └── utils.rs                 Snapshot utilities
+├── connectors/
+│   └── sinks/
+│       ├── mod.rs                   create_sink() factory
+│       ├── starrocks/               StarRocks sink
+│       │   ├── mod.rs               StarRocksSink (JSON → Stream Load HTTP)
+│       │   ├── config.rs            StarRocksSinkConfig
+│       │   ├── setup.rs             Table verification, audit columns
+│       │   ├── stream_load.rs       HTTP Stream Load client
+│       │   └── types.rs             PG → StarRocks type mapping
+│       ├── postgres/                PostgreSQL sink
+│       │   ├── mod.rs               PostgresSink (COPY → raw table → MERGE)
+│       │   ├── raw_table.rs         COPY writer for raw staging table
+│       │   ├── normalizer.rs        Async MERGE loop (raw table → target)
+│       │   ├── merge_generator.rs   Dynamic MERGE SQL generation
+│       │   ├── setup.rs             DDL: raw table, metadata, target tables
+│       │   └── types.rs             PG → PG type mapping
+│       └── snowflake/               Snowflake sink
+│           ├── mod.rs               SnowflakeSink (Parquet → PUT → COPY INTO → MERGE)
+│           ├── client.rs            HTTP client (password + JWT auth, SQL execution)
+│           ├── config.rs            SnowflakeSinkConfig
+│           ├── parquet_writer.rs    CdcRecord → Arrow → Parquet (in-memory)
+│           ├── stage.rs             PUT protocol + S3/GCS/Azure upload
+│           ├── setup.rs             DDL: TRANSIENT schema, stage, raw table, targets
+│           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
+│           ├── normalizer.rs        Async MERGE loop (raw table → target)
+│           └── types.rs             PG → Snowflake type mapping
+├── grpc/                            gRPC server
+│   ├── mod.rs                       gRPC server startup
+│   ├── state.rs                     SharedState (metrics, dedup, control)
+│   ├── services.rs                  Health, Control, Status, Metrics
+│   └── cpu_metrics.rs               CPU usage metrics collection
+├── state_store.rs                   LSN checkpoint persistence
+└── utils.rs                         SQL validation, type helpers
 ```
+
+## Adding a New Sink
+
+### Code (3 steps)
+
+```
+1. Create src/connectors/sinks/my_sink/
+   ├── mod.rs      Implement Sink trait (6 methods, including setup())
+   └── config.rs   MySinkConfig
+
+2. Add SinkType::MySink to src/config.rs
+
+3. Add match arm in create_sink() (src/connectors/sinks/mod.rs)
+
+CDC and snapshot work automatically via write_batch().
+Sink-specific setup (table creation, audit columns, etc.) goes in
+the Sink::setup() trait method — the engine calls it after source
+setup. SetupManager handles source-side setup only (replication
+slot, publication).
+```
+
+### Testing (3 steps)
+
+```
+1. Add a profile to deploy/docker-compose.yml:
+   - Target database service (with healthcheck)
+   - dbmazz-my-sink service (with SINK_TYPE + connection env vars)
+
+2. Add test_my_sink() to deploy/test-sink.sh:
+   - Verify snapshot replicated seed data
+   - Verify CDC INSERT, UPDATE, DELETE
+
+3. Run:
+   docker compose --profile my-sink up -d
+   deploy/test-sink.sh my-sink
+```
+
+## Concurrency Model
+
+- **tokio async runtime** — single-threaded by default, multi-threaded for snapshot workers
+- **Pipeline**: single task, receives from WAL handler via mpsc channel
+- **Snapshot**: N parallel workers (semaphore-bounded), each with its own PG connection and sink instance
+- **gRPC server**: spawned as background task
+- **SharedState**: `Arc` with atomics for counters, `RwLock` for schema/dedup state
+
+## Checkpointing & Recovery
+
+- LSN checkpoints stored in PostgreSQL (`dbmazz_checkpoints` table in the source DB)
+- Checkpoint saved BEFORE confirming to PostgreSQL (critical for at-least-once delivery)
+- On restart: load last checkpoint, start replication from that LSN
+- Snapshot progress in `dbmazz_snapshot_state` — completed chunks are skipped on resume

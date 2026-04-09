@@ -19,7 +19,7 @@ dbmazz (single binary, tokio async runtime)
 │   ├── Batching (FLUSH_SIZE / FLUSH_INTERVAL_MS)
 │   ├── Calls sink.write_batch(Vec<CdcRecord>)
 │   └── Checkpoint feedback (LSN confirmation)
-├── Sink trait (6 methods — see ARCHITECTURE.md)
+├── Sink trait (6 methods — see docs/architecture.md)
 │   ├── StarRocksSink: JSON → Stream Load HTTP API
 │   ├── PostgresSink: COPY → raw table → MERGE
 │   └── SnowflakeSink: Parquet → PUT (stage) → COPY INTO → MERGE
@@ -29,7 +29,7 @@ dbmazz (single binary, tokio async runtime)
     └── SharedState (metrics, dedup, control signals)
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full data flow, module map, and design decisions.
+See [docs/architecture.md](docs/architecture.md) for the full data flow, module map, and design decisions.
 
 ## Key Directories
 
