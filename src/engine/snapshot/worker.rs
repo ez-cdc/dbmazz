@@ -301,6 +301,17 @@ pub async fn run_snapshot(
         }
     }
 
+    // Flush and close all sinks — this triggers COPY INTO for any remaining
+    // staged Parquet files that didn't hit the accumulation threshold.
+    // Without this, small snapshots (< 20 files or < 100MB) never load.
+    let mut pool = sink_pool.lock().await;
+    for sink in pool.iter_mut() {
+        if let Err(e) = sink.close().await {
+            error!("Failed to close snapshot sink: {:#}", e);
+        }
+    }
+    drop(pool);
+
     // Update final progress
     let (final_total, final_done) = state_store::chunk_counts(&client, &slot_name).await?;
     let final_rows = state_store::total_rows_synced(&client, &slot_name).await?;
