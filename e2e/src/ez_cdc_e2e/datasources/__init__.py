@@ -1,7 +1,7 @@
 """Datasource configuration package.
 
 A datasource is a named, reusable database connection definition (source or
-sink) loaded from `e2e/datasources.yaml`. Datasources are the unit of
+sink) loaded from `e2e/ez-cdc.yaml`. Datasources are the unit of
 selection for all flows: quickstart, verify, load, etc. operate on
 `(source, sink)` pairs identified by name.
 

@@ -277,7 +277,7 @@ def _probe_datasources_status() -> dict:
       ok:        bool — True if at least one source AND one sink exist
     """
     try:
-        store = DatasourceStore(DEFAULT_DATASOURCES_PATH)
+        store = DatasourceStore(DEFAULT_CONFIG_PATH)
         store.load(allow_missing=True)
     except DatasourceError:
         return {"n_sources": 0, "n_sinks": 0, "sources": [], "sinks": [], "ok": False}
@@ -409,23 +409,23 @@ def _datasources_menu() -> None:
 
         try:
             if action == "list":
-                ds_cmds.list_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+                ds_cmds.list_cmd(datasources=DEFAULT_CONFIG_PATH)
             elif action == "add":
-                ds_cmds.add_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+                ds_cmds.add_cmd(datasources=DEFAULT_CONFIG_PATH)
             elif action == "show":
                 name = _prompt_pick_any_datasource("show")
                 if name:
-                    ds_cmds.show_cmd(name=name, reveal=False, datasources=DEFAULT_DATASOURCES_PATH)
+                    ds_cmds.show_cmd(name=name, reveal=False, datasources=DEFAULT_CONFIG_PATH)
             elif action == "test":
                 name = _prompt_pick_any_datasource("test")
                 if name:
-                    ds_cmds.test_cmd(name=name, datasources=DEFAULT_DATASOURCES_PATH)
+                    ds_cmds.test_cmd(name=name, datasources=DEFAULT_CONFIG_PATH)
             elif action == "remove":
                 name = _prompt_pick_any_datasource("remove")
                 if name:
-                    ds_cmds.remove_cmd(name=name, yes=False, datasources=DEFAULT_DATASOURCES_PATH)
+                    ds_cmds.remove_cmd(name=name, yes=False, datasources=DEFAULT_CONFIG_PATH)
             elif action == "init":
-                ds_cmds.init_demos_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+                ds_cmds.init_demos_cmd(datasources=DEFAULT_CONFIG_PATH)
         except typer.Exit:
             # Subcommand decided to exit — swallow it so the menu loops.
             pass
@@ -578,9 +578,9 @@ def _pick_running_pair_or_back(action_name: str) -> Optional[tuple[str, str]]:
 
 # ── Datasource pair resolution ──────────────────────────────────────────────
 
-# Default datasources file location (configurable per-flow with --datasources).
+# Default config file location (configurable per-flow with --config).
 from .paths import E2E_DIR  # noqa: E402
-DEFAULT_DATASOURCES_PATH = E2E_DIR / "datasources.yaml"
+DEFAULT_CONFIG_PATH = E2E_DIR / "ez-cdc.yaml"
 
 # Legacy profile names from PR 1 mapped to (source_name, sink_name) pairs of
 # the bundled demo datasources. Lets old CI scripts that did
@@ -594,14 +594,14 @@ LEGACY_PROFILE_PAIRS: dict[str, tuple[str, str]] = {
 
 
 def _load_store_for_flow(
-    datasources_path: Path = DEFAULT_DATASOURCES_PATH,
+    config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> DatasourceStore:
     """Load the datasources store for a flow command.
 
     On parse errors, prints a friendly message and exits with code 2.
     On a missing file, returns an empty store (the gate decides what to do).
     """
-    store = DatasourceStore(datasources_path)
+    store = DatasourceStore(config_path)
     try:
         store.load(allow_missing=True)
     except DatasourceError as e:
@@ -646,7 +646,7 @@ def _ensure_datasources_or_setup(store: DatasourceStore) -> None:
              "description": "Adds demo-pg + demo-starrocks + demo-pg-target (no config needed)"},
             {"name": "Configure them now (interactive wizard)", "value": "wizard",
              "description": "Runs `ez-cdc datasource add` for source then sink"},
-            {"name": "Edit datasources.yaml manually", "value": "manual",
+            {"name": "Edit ez-cdc.yaml manually", "value": "manual",
              "description": "Show me the schema and let me edit"},
             {"name": "← Back", "value": "back", "description": ""},
         ],
@@ -683,7 +683,7 @@ def _ensure_datasources_or_setup(store: DatasourceStore) -> None:
             style="info",
         ))
         console.print(Text(
-            "  See e2e/datasources.example.yaml for the schema "
+            "  See e2e/ez-cdc.example.yaml for the schema "
             "(or `ez-cdc datasource init-demos` to bootstrap).",
             style="muted",
         ))
@@ -716,7 +716,7 @@ def _resolve_pair(
     source_name: Optional[str],
     sink_name: Optional[str],
     *,
-    datasources_path: Path = DEFAULT_DATASOURCES_PATH,
+    config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> tuple[str, SourceSpec, str, SinkSpec, Path, Path]:
     """Resolve a (source, sink) pair from positional arg / flags / interactive picker.
 
@@ -733,7 +733,7 @@ def _resolve_pair(
       3. Else, in interactive mode, prompt with selectors. In non-interactive
          mode, error out clearly.
     """
-    store = _load_store_for_flow(datasources_path)
+    store = _load_store_for_flow(config_path)
 
     # Legacy profile name handling — auto-import demos if needed.
     if positional and positional in LEGACY_PROFILE_PAIRS:
@@ -853,7 +853,7 @@ def _short_summary(spec) -> str:
 
 # (The old `_ensure_env_file_if_needed` family of helpers from PR 1 was
 # removed in PR4-7. Credentials now live in datasource specs (loaded from
-# datasources.yaml with ${VAR} interpolation), and the `add` wizard
+# ez-cdc.yaml with ${VAR} interpolation), and the `add` wizard
 # collects them via interactive prompts that write directly to the spec.
 # There is no longer a separate .env.snowflake file managed by the CLI.)
 

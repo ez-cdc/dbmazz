@@ -1,4 +1,4 @@
-"""Pydantic schema for `e2e/datasources.yaml`.
+"""Pydantic schema for `e2e/ez-cdc.yaml`.
 
 A datasources file has two top-level sections:
 
@@ -318,7 +318,7 @@ SinkSpec = Annotated[
 # ── Top-level container ──────────────────────────────────────────────────────
 
 class DatasourcesFile(BaseModel):
-    """Top-level structure of `e2e/datasources.yaml`.
+    """Top-level structure of `e2e/ez-cdc.yaml`.
 
     Loaded by `loader.load_datasources()`. Both `sources` and `sinks` are
     dicts keyed by datasource name. Validation ensures names are unique within

@@ -26,13 +26,13 @@ coverage/
 .plans/
 session-logs/
 
-# e2e credentials and user-managed datasources file
-# datasources.yaml may contain real user credentials (e.g. Snowflake) and
+# e2e config file (datasources + pipeline settings)
+# ez-cdc.yaml may contain real user credentials (e.g. Snowflake) and
 # is created/edited by `ez-cdc datasource ...`. NEVER commit it.
 e2e/.env
 e2e/.env.snowflake
-e2e/datasources.yaml
-e2e/datasources.yaml.bak
+e2e/ez-cdc.yaml
+e2e/ez-cdc.yaml.bak
 
 # Generated docker compose files (per source/sink pair, written by
 # compose_builder). Each cache dir contains a rendered .env with the

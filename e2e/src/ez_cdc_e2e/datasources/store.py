@@ -1,6 +1,6 @@
 """Persistence layer for the datasources YAML file.
 
-DatasourceStore wraps a single `e2e/datasources.yaml` file and provides:
+DatasourceStore wraps a single `e2e/ez-cdc.yaml` file and provides:
 
   - load() / reload() — read from disk and validate
   - save() — atomic write back to disk (write to temp + rename)
@@ -244,9 +244,9 @@ class DatasourceStore:
 
         # Render with a header comment for context.
         header = (
-            "# ez-cdc datasources file\n"
-            "# Defines source and sink databases. Managed by `ez-cdc datasource ...`\n"
-            "# or edited manually. See e2e/datasources.example.yaml for the schema.\n"
+            "# ez-cdc configuration file\n"
+            "# Datasources + pipeline settings. Managed by `ez-cdc datasource ...`\n"
+            "# or edited manually. See e2e/ez-cdc.example.yaml for the schema.\n"
             "# Credentials may use ${VAR} interpolation; see ez-cdc docs.\n"
             "\n"
         )

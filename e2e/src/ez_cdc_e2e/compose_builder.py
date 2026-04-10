@@ -429,7 +429,7 @@ def _build_env_file(source: SourceSpec, sink: SinkSpec, settings: PipelineSettin
 
     lines += [
         "",
-        "# Pipeline / snapshot / logging (from datasources.yaml settings:)",
+        "# Pipeline / snapshot / logging (from ez-cdc.yaml settings:)",
     ]
     lines += settings.to_env_lines()
     lines += [

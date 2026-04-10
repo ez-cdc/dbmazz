@@ -16,7 +16,7 @@ Metadata: `_DBMAZZ._METADATA` (in the configured database).
 
 Credentials are read from os.environ by SnowflakeTarget.__init__().
 The caller (instantiate.py) populates the env from a SnowflakeSinkSpec
-loaded from datasources.yaml — there is no `.env.snowflake` file
+loaded from ez-cdc.yaml — there is no `.env.snowflake` file
 involved, the YAML is the single source of truth.
 """
 
@@ -44,7 +44,7 @@ class SnowflakeTarget(TargetBackend):
         SINK_SNOWFLAKE_SOFT_DELETE (default "true").
 
         These env vars are populated by `instantiate_backend_from_spec()`
-        from the SnowflakeSinkSpec in datasources.yaml. SnowflakeTarget
+        from the SnowflakeSinkSpec in ez-cdc.yaml. SnowflakeTarget
         itself doesn't know or care about YAML — it's a thin wrapper
         around the snowflake-connector-python driver.
         """
@@ -388,7 +388,7 @@ def _require_env(key: str) -> str:
     if not val:
         raise RuntimeError(
             f"{key} is required for the Snowflake backend. "
-            f"Add a Snowflake sink to your datasources.yaml via "
+            f"Add a Snowflake sink to your ez-cdc.yaml via"
             f"`ez-cdc datasource add` → sink → snowflake."
         )
     return val

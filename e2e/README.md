@@ -55,7 +55,7 @@ yes to clean up, no to leave it running for further inspection.
 
 ## Datasources
 
-All source/sink configurations live in `e2e/datasources.yaml`. Each
+All source/sink configurations live in `e2e/ez-cdc.yaml`. Each
 datasource has a name, a type (source or sink), and connection details.
 
 ### Bundled demos (Docker-managed)
@@ -274,7 +274,7 @@ columns. Widen the terminal or use `--no-banner`.
   `stripe-cli`, `poetry`, `gh cli` for similar patterns.
 
 - **Datasources as first-class entities.** All connection configs live in
-  `e2e/datasources.yaml` — a single file for all sources and sinks,
+  `e2e/ez-cdc.yaml` — a single file for all sources, sinks, and pipeline settings,
   managed via `ez-cdc datasource` subcommands. Docker compose files are
   generated programmatically per (source, sink) pair and cached at
   `e2e/.cache/compose/`.

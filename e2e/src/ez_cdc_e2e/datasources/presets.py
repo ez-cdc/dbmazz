@@ -24,7 +24,7 @@ credentials and cloud connectivity, so a "no-config quickstart" can't
 ship a working snowflake datasource. Users who want Snowflake should run
 `ez-cdc datasource add` and pick "snowflake" in the wizard, which will
 prompt for their account credentials interactively. Or they can copy
-the example block from datasources.example.yaml and edit by hand.
+the example block from ez-cdc.example.yaml and edit by hand.
 """
 
 from __future__ import annotations

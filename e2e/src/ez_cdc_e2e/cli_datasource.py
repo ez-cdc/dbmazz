@@ -50,7 +50,7 @@ from .tui.theme import EZ_CDC_THEME
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-DEFAULT_DATASOURCES_PATH = E2E_DIR / "datasources.yaml"
+DEFAULT_CONFIG_PATH = E2E_DIR / "ez-cdc.yaml"
 
 # Field names that contain credentials and should be redacted by default.
 _SENSITIVE_KEYS = {"password", "private_key_path"}
@@ -65,7 +65,7 @@ console = Console(theme=EZ_CDC_THEME)
 
 datasource_app = typer.Typer(
     name="datasource",
-    help="Manage source/sink datasources stored in datasources.yaml.",
+    help="Manage source/sink datasources and pipeline settings in ez-cdc.yaml.",
     no_args_is_help=True,
 )
 
@@ -124,7 +124,7 @@ def _spec_to_dict(spec: SourceSpec | SinkSpec, *, reveal: bool = False) -> dict[
 # ── Store loader (with consistent error handling) ────────────────────────────
 
 def _load_store(
-    path: Path = DEFAULT_DATASOURCES_PATH,
+    path: Path = DEFAULT_CONFIG_PATH,
     *,
     must_exist: bool = False,
 ) -> DatasourceStore:
@@ -158,12 +158,12 @@ def _load_store(
 
 @datasource_app.command("list", help="Show all configured datasources in a table.")
 def list_cmd(
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
-        help="Path to the datasources YAML file.",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
+        help="Path to the ez-cdc config YAML file.",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=False)
+    store = _load_store(config, must_exist=False)
 
     if store.is_empty():
         console.print()
@@ -184,7 +184,7 @@ def list_cmd(
 
     # Build a rich table
     table = Table(
-        title=Text(f"Datasources in {datasources}", style="brand"),
+        title=Text(f"Datasources in {config}", style="brand"),
         title_justify="left",
         show_header=True,
         header_style="panel.header",
@@ -271,11 +271,11 @@ def show_cmd(
         False, "--reveal",
         help="Show passwords and other sensitive fields in plaintext (default: redacted).",
     ),
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=True)
+    store = _load_store(config, must_exist=True)
 
     # Find the datasource (could be source or sink)
     spec: SourceSpec | SinkSpec
@@ -288,7 +288,7 @@ def show_cmd(
         role = "sink"
     else:
         console.print(Text(
-            f"Error: datasource {name!r} not found in {datasources}",
+            f"Error: datasource {name!r} not found in {config}",
             style="error",
         ))
         sources = store.list_sources()
@@ -332,15 +332,15 @@ def remove_cmd(
         False, "--yes", "-y",
         help="Skip the confirmation prompt.",
     ),
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=True)
+    store = _load_store(config, must_exist=True)
 
     if not store.exists(name):
         console.print(Text(
-            f"Error: datasource {name!r} not found in {datasources}",
+            f"Error: datasource {name!r} not found in {config}",
             style="error",
         ))
         raise typer.Exit(2)
@@ -369,11 +369,11 @@ def remove_cmd(
 @datasource_app.command("test", help="Test connectivity to a datasource (user-managed only).")
 def test_cmd(
     name: str = typer.Argument(..., help="Datasource name."),
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=True)
+    store = _load_store(config, must_exist=True)
 
     if not store.exists(name):
         console.print(Text(
@@ -513,11 +513,11 @@ def _test_snowflake_sink(spec: SnowflakeSinkSpec) -> None:
     help="Create the bundled demo datasources (demo-pg, demo-starrocks, demo-pg-target).",
 )
 def init_demos_cmd(
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=False)
+    store = _load_store(config, must_exist=False)
 
     added_sources, added_sinks = merge_demos_into(store)
 
@@ -542,7 +542,7 @@ def init_demos_cmd(
 
     console.print()
     console.print(Text(
-        f"  ✓ Created {len(added_sources) + len(added_sinks)} demo datasource(s) in {datasources}",
+        f"  ✓ Created {len(added_sources) + len(added_sinks)} demo datasource(s) in {config}",
         style="success",
     ))
     if added_sources:
@@ -563,8 +563,8 @@ def init_demos_cmd(
 
 @datasource_app.command("add", help="Add a new datasource interactively.")
 def add_cmd(
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
     # The wizard implementation lives in datasources/wizard.py — added in
@@ -587,13 +587,13 @@ def add_cmd(
             style="muted",
         ))
         console.print(Text(
-            f"    2. Edit {datasources} manually using the schema in datasources.example.yaml",
+            f"    2. Edit {config} manually using the schema in ez-cdc.example.yaml",
             style="muted",
         ))
         console.print()
         return
 
-    store = _load_store(datasources, must_exist=False)
+    store = _load_store(config, must_exist=False)
     run_add_wizard(store, console)
 
 
@@ -616,11 +616,11 @@ def settings_cmd(
         False, "--edit", "-e",
         help="Interactively edit settings (without this flag, just shows current values).",
     ),
-    datasources: Path = typer.Option(
-        DEFAULT_DATASOURCES_PATH, "--datasources",
+    config: Path = typer.Option(
+        DEFAULT_CONFIG_PATH, "--config",
     ),
 ) -> None:
-    store = _load_store(datasources, must_exist=False)
+    store = _load_store(config, must_exist=False)
     settings = store.data.settings
 
     if not edit:
