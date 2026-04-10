@@ -219,6 +219,10 @@ def _main_menu() -> None:
         )
 
         if choice is None or choice == "exit":
+            # Final padding before returning to the shell prompt — without
+            # this the user's `$` ends up flush against the menu's last line.
+            console.print()
+            console.print()
             return
 
         try:
@@ -250,7 +254,10 @@ def _main_menu() -> None:
             else:
                 raise
 
-        console.print()  # spacing before showing the menu again
+        # Two blank lines before showing the menu again so the next iteration
+        # has visual breathing room from whatever the previous action printed.
+        console.print()
+        console.print()
 
 
 def _probe_datasources_status() -> dict:
@@ -1040,6 +1047,7 @@ def verify(
         no_up=no_up,
         rebuild=rebuild,
     )
+    _final_padding()
     raise typer.Exit(exit_code)
 
 
@@ -1188,7 +1196,7 @@ def _verify_all(
         style = "pass" if code == 0 else "fail"
         console.print(Text(f"  {sym}  {src_name} → {sk_name}", style=style))
     console.print(Text("━" * 60, style="rule"))
-    console.print()
+    _final_padding()
 
     raise typer.Exit(1 if any_failed else 0)
 
@@ -1219,6 +1227,7 @@ def up(
         console.print(Text(f"Failed to start compose: {e}", style="error"))
         raise typer.Exit(2)
     console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
+    _final_padding()
 
 
 # ── Subcommand: down ─────────────────────────────────────────────────────────
@@ -1244,6 +1253,7 @@ def down(
         console.print(Text(f"Failed to stop compose: {e}", style="error"))
         raise typer.Exit(2)
     console.print(format_step_ok(f"Stopping compose: {src_name} → {sk_name}"))
+    _final_padding()
 
 
 # ── Subcommand: logs ─────────────────────────────────────────────────────────
@@ -1266,6 +1276,7 @@ def logs(
     except ComposeError as e:
         console.print(Text(f"Failed to tail logs: {e}", style="error"))
         raise typer.Exit(2)
+    _final_padding()
 
 
 # ── Subcommand: status ───────────────────────────────────────────────────────
@@ -1309,7 +1320,7 @@ def status(
         ))
     if s.error_detail:
         console.print(Text(f"  ERROR              {s.error_detail}", style="error"))
-    console.print()
+    _final_padding()
 
 
 # ── Subcommand: load (placeholder for PR 3) ──────────────────────────────────
@@ -1365,4 +1376,16 @@ def _print_thanks() -> None:
     t.append("  Thanks for trying EZ-CDC.   →   ", style="muted")
     t.append("https://ez-cdc.com", style="brand")
     console.print(t)
+    console.print()
+    console.print()
+
+
+def _final_padding() -> None:
+    """Print two blank lines so the terminal prompt has air below the output.
+
+    Call this at the end of any subcommand that exits directly (verify,
+    up, down, logs, status, datasource ...) so the user's shell `$`
+    doesn't end up flush against the last line of the CLI's output.
+    """
+    console.print()
     console.print()
