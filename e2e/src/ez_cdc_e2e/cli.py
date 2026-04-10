@@ -139,12 +139,20 @@ class _BackToMenu(Exception):
 
 
 def _main_menu() -> None:
-    """Interactive main menu: banner A + top-level choice, loops until Exit.
+    """Interactive main menu: banner A + context-aware top-level choice loop.
 
-    The menu loops so users can run multiple subcommands in one session.
-    Any subcommand that raises _BackToMenu (because the user cancelled a
-    sub-prompt with Esc / Ctrl+C) returns to this loop instead of exiting
-    the program.
+    The menu detects on every iteration:
+      - How many datasources are configured (sources / sinks)
+      - Which (source, sink) pairs have currently-running stacks
+
+    The status line at the top of the menu surfaces this state so the user
+    sees what's available without having to navigate. When a stack is
+    running, an "Open running stack" entry appears at the top of the
+    choices for one-click reconnection.
+
+    Loops so users can run multiple subcommands in one session. Any
+    subcommand that raises _BackToMenu (Esc/Ctrl+C in a sub-prompt)
+    returns here instead of exiting the program.
     """
     _show_banner_a()
 
@@ -156,47 +164,247 @@ def _main_menu() -> None:
         raise typer.Exit(3)
 
     while True:
+        # Re-probe state on each iteration so the menu reflects current reality.
+        ds_status = _probe_datasources_status()
+        running_pair = _probe_first_running_pair(ds_status)
+
+        _print_menu_status(ds_status, running_pair)
+
+        # Build choices dynamically so the most relevant action is on top.
+        choices: list[dict] = []
+
+        if running_pair is not None:
+            src_name, sk_name = running_pair
+            choices.append({
+                "name": f"Open running stack: {src_name} → {sk_name}",
+                "value": "__open_running__",
+                "description": "Reconnect the dashboard to the live stack",
+            })
+
+        choices += [
+            {"name": "Quickstart",
+             "value": "quickstart",
+             "description": "Launch a source/sink pair and watch replication"},
+            {"name": "Verify",
+             "value": "verify",
+             "description": "Run e2e validation tests"},
+            {"name": "Load test",
+             "value": "load",
+             "description": "Generate traffic + monitor (PR 3)"},
+            {"name": "Datasources",
+             "value": "datasources",
+             "description": "List / add / remove source and sink configs"},
+            {"name": "Stacks",
+             "value": "compose",
+             "description": "Manage docker stacks (up/down/logs/status)"},
+            {"name": "Exit", "value": "exit", "description": ""},
+        ]
+
+        # Default to "open running" if a stack is up, else quickstart.
+        default = "__open_running__" if running_pair is not None else "quickstart"
+
         choice = prompts.select(
             "What would you like to do?",
-            choices=[
-                {"name": "Quickstart", "value": "quickstart", "description": "Try dbmazz with a sink"},
-                {"name": "Verify",     "value": "verify",     "description": "Run e2e validation tests"},
-                {"name": "Load test",  "value": "load",       "description": "Generate traffic + monitor"},
-                {"name": "Compose",    "value": "compose",    "description": "Manage docker stack"},
-                {"name": "Exit",       "value": "exit",       "description": ""},
-            ],
-            default="quickstart",
+            choices=choices,
+            default=default,
         )
 
-        # Cancel (Esc/Ctrl+C) or explicit Exit → leave the program.
         if choice is None or choice == "exit":
             return
 
         try:
-            if choice == "quickstart":
-                quickstart(sink=None)
+            if choice == "__open_running__" and running_pair is not None:
+                src_name, sk_name = running_pair
+                quickstart(profile=None, source=src_name, sink=sk_name, keep_up=False, rebuild=False)
+            elif choice == "quickstart":
+                quickstart(profile=None, source=None, sink=None, keep_up=False, rebuild=False)
             elif choice == "verify":
-                verify(sink=None)
+                verify(
+                    profile=None, source=None, sink=None,
+                    quick=False, all_pairs=False, skip=None,
+                    json_report=None, keep_up=False, no_up=False, rebuild=False,
+                )
             elif choice == "load":
                 console.print(Text(
                     "Load test is coming in PR 3 — not yet implemented.",
                     style="warning",
                 ))
+            elif choice == "datasources":
+                _datasources_menu()
             elif choice == "compose":
                 _compose_menu()
         except _BackToMenu:
-            # User cancelled a sub-prompt — fall through to the next loop iteration.
             pass
         except typer.Exit as e:
-            # Some subcommand decided to exit. Exit code 130 means the user
-            # cancelled (Ctrl+C); we treat that as "back to menu" in interactive
-            # mode. Any other exit code is a real termination.
             if e.exit_code == 130:
                 pass
             else:
                 raise
 
         console.print()  # spacing before showing the menu again
+
+
+def _probe_datasources_status() -> dict:
+    """Snapshot the current datasources state for the menu status line.
+
+    Returns a dict with:
+      n_sources: int
+      n_sinks:   int
+      sources:   list[str]
+      sinks:     list[str]
+      ok:        bool — True if at least one source AND one sink exist
+    """
+    try:
+        store = DatasourceStore(DEFAULT_DATASOURCES_PATH)
+        store.load(allow_missing=True)
+    except DatasourceError:
+        return {"n_sources": 0, "n_sinks": 0, "sources": [], "sinks": [], "ok": False}
+
+    sources = store.list_sources()
+    sinks = store.list_sinks()
+    return {
+        "n_sources": len(sources),
+        "n_sinks": len(sinks),
+        "sources": sources,
+        "sinks": sinks,
+        "ok": bool(sources and sinks),
+    }
+
+
+def _probe_first_running_pair(ds_status: dict) -> Optional[tuple[str, str]]:
+    """Return the first (source, sink) pair that has a running compose stack.
+
+    Iterates over the cartesian product of sources × sinks and checks each
+    cache_dir/compose.yml. Returns None if nothing is running. The "first"
+    is well-defined because the source and sink lists are sorted.
+
+    Skipped silently if docker isn't reachable — the menu just won't show
+    the "Open running stack" entry.
+    """
+    if not ds_status["sources"] or not ds_status["sinks"]:
+        return None
+    try:
+        for src_name in ds_status["sources"]:
+            for sk_name in ds_status["sinks"]:
+                cache = cache_dir_for(src_name, sk_name)
+                cf = cache / "compose.yml"
+                if compose.is_running(cf):
+                    return (src_name, sk_name)
+    except ComposeError:
+        return None
+    return None
+
+
+def _print_menu_status(ds_status: dict, running_pair: Optional[tuple[str, str]]) -> None:
+    """Print a one-line status banner above the menu prompt."""
+    parts: list[Text] = []
+
+    if ds_status["ok"]:
+        parts.append(Text(
+            f"  ✓ {ds_status['n_sources']} source(s), {ds_status['n_sinks']} sink(s) configured",
+            style="success",
+        ))
+    elif ds_status["n_sources"] == 0 and ds_status["n_sinks"] == 0:
+        parts.append(Text(
+            "  ⚠ No datasources configured yet — start with Datasources or Quickstart.",
+            style="warning",
+        ))
+    else:
+        # Have one but not both
+        parts.append(Text(
+            f"  ⚠ {ds_status['n_sources']} source(s), {ds_status['n_sinks']} sink(s) — "
+            "you need at least one of each before any flow can run.",
+            style="warning",
+        ))
+
+    if running_pair is not None:
+        src_name, sk_name = running_pair
+        parts.append(Text(
+            f"  ● 1+ stack running ({src_name} → {sk_name})",
+            style="info",
+        ))
+
+    console.print()
+    for line in parts:
+        console.print(line)
+    console.print()
+
+
+def _datasources_menu() -> None:
+    """Submenu for `ez-cdc datasource` operations.
+
+    Provides interactive access to list/show/add/remove/test/init-demos
+    without having to remember the exact subcommand names.
+    """
+    while True:
+        action = prompts.select(
+            "Datasource action:",
+            choices=[
+                {"name": "List all",        "value": "list",       "description": "Show every configured source and sink"},
+                {"name": "Add new",         "value": "add",        "description": "Interactive wizard"},
+                {"name": "Show details",    "value": "show",       "description": "Inspect one datasource"},
+                {"name": "Test connection", "value": "test",       "description": "Verify a user-provided datasource is reachable"},
+                {"name": "Remove",          "value": "remove",     "description": "Delete a datasource"},
+                {"name": "Init bundled demos", "value": "init",    "description": "Add demo-pg, demo-starrocks, demo-pg-target"},
+                {"name": "← Back",          "value": "back",       "description": ""},
+            ],
+        )
+        if action in (None, "back"):
+            return
+
+        # Lazy import the subcommand functions from cli_datasource.py.
+        from . import cli_datasource as ds_cmds
+
+        try:
+            if action == "list":
+                ds_cmds.list_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+            elif action == "add":
+                ds_cmds.add_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+            elif action == "show":
+                name = _prompt_pick_any_datasource("show")
+                if name:
+                    ds_cmds.show_cmd(name=name, reveal=False, datasources=DEFAULT_DATASOURCES_PATH)
+            elif action == "test":
+                name = _prompt_pick_any_datasource("test")
+                if name:
+                    ds_cmds.test_cmd(name=name, datasources=DEFAULT_DATASOURCES_PATH)
+            elif action == "remove":
+                name = _prompt_pick_any_datasource("remove")
+                if name:
+                    ds_cmds.remove_cmd(name=name, yes=False, datasources=DEFAULT_DATASOURCES_PATH)
+            elif action == "init":
+                ds_cmds.init_demos_cmd(datasources=DEFAULT_DATASOURCES_PATH)
+        except typer.Exit:
+            # Subcommand decided to exit — swallow it so the menu loops.
+            pass
+        except _BackToMenu:
+            pass
+
+
+def _prompt_pick_any_datasource(verb: str) -> Optional[str]:
+    """Pick any datasource (source or sink) by name. Returns None on cancel."""
+    store = _load_store_for_flow()
+    if store.is_empty():
+        console.print(Text(
+            f"  No datasources configured. Nothing to {verb}.",
+            style="warning",
+        ))
+        return None
+
+    choices = []
+    for name in store.list_sources():
+        choices.append({"name": f"{name}  (source)", "value": name, "description": ""})
+    for name in store.list_sinks():
+        choices.append({"name": f"{name}  (sink)", "value": name, "description": ""})
+    choices.append({"name": "← Back", "value": "__back__", "description": ""})
+
+    result = prompts.select(
+        f"Which datasource do you want to {verb}?",
+        choices=choices,
+    )
+    if result is None or result == "__back__":
+        return None
+    return result
 
 
 def _compose_menu() -> None:
