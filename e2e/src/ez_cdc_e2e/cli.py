@@ -51,6 +51,7 @@ from .source.postgres import PostgresSource
 from .tui import prompts
 from .tui.banner import render_banner_a, render_banner_d
 from .tui.report import (
+    final_padding,
     format_step,
     format_step_ok,
     format_totals,
@@ -1380,12 +1381,8 @@ def _print_thanks() -> None:
     console.print()
 
 
+# _final_padding is a thin alias for tui.report.final_padding so existing
+# call sites in this file keep working. New code should call
+# `final_padding(console)` directly.
 def _final_padding() -> None:
-    """Print two blank lines so the terminal prompt has air below the output.
-
-    Call this at the end of any subcommand that exits directly (verify,
-    up, down, logs, status, datasource ...) so the user's shell `$`
-    doesn't end up flush against the last line of the CLI's output.
-    """
-    console.print()
-    console.print()
+    final_padding(console)

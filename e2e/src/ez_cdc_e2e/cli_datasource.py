@@ -43,6 +43,7 @@ from .datasources.schema import (
 from .datasources.store import DatasourceStore
 from .paths import E2E_DIR
 from .tui import prompts
+from .tui.report import final_padding
 from .tui.theme import EZ_CDC_THEME
 
 
@@ -226,7 +227,7 @@ def list_cmd(
         f"  {len(store.list_sources())} source(s), {len(store.list_sinks())} sink(s)",
         style="muted",
     ))
-    console.print()
+    final_padding(console)
 
 
 def _summarize_source(spec: SourceSpec) -> str:
@@ -320,7 +321,7 @@ def show_cmd(
             "  (passwords are redacted; use --reveal to show them)",
             style="muted",
         ))
-    console.print()
+    final_padding(console)
 
 
 @datasource_app.command("remove", help="Remove a datasource by name.")
@@ -361,6 +362,7 @@ def remove_cmd(
         raise typer.Exit(2)
 
     console.print(Text(f"  ✓ Removed {name!r}", style="success"))
+    final_padding(console)
 
 
 @datasource_app.command("test", help="Test connectivity to a datasource (user-managed only).")
@@ -422,7 +424,7 @@ def test_cmd(
         raise typer.Exit(1)
 
     console.print(Text("  ✓ Connection successful", style="success"))
-    console.print()
+    final_padding(console)
 
 
 # ── Per-type connection tests ───────────────────────────────────────────────
@@ -553,7 +555,7 @@ def init_demos_cmd(
         "  Run `ez-cdc quickstart` to try them.",
         style="info",
     ))
-    console.print()
+    final_padding(console)
 
 
 # ── add (delegates to wizard, implemented in PR4-5) ─────────────────────────

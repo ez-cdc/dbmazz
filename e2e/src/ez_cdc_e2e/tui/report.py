@@ -188,6 +188,18 @@ def print_report_summary(console: Console, report: VerifyReport) -> None:
     console.print(format_totals(report))
 
 
+def final_padding(console: Console) -> None:
+    """Print two blank lines so the terminal prompt has air below the output.
+
+    Call this at the end of any subcommand that exits directly so the
+    user's shell `$` doesn't end up flush against the last line of the
+    CLI's output. Lives in tui.report so both cli.py and cli_datasource.py
+    can import without creating a circular dependency.
+    """
+    console.print()
+    console.print()
+
+
 def report_to_json(report: VerifyReport) -> dict:
     """Serialize a VerifyReport to a JSON-friendly dict (for --json-report)."""
     return {
