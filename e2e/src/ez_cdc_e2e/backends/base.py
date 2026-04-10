@@ -188,6 +188,22 @@ class TargetBackend(ABC):
     ) -> dict[str, Any] | None:
         """Return an entire row as a dict, or None if not found."""
 
+    # ── cleanup ──────────────────────────────────────────────────────────────
+
+    @abstractmethod
+    def clean(self, tables: list[str]) -> list[str]:
+        """Remove all dbmazz artifacts from the target so the next verify starts clean.
+
+        For each table in `tables`:
+          - TRUNCATE the table (remove all rows)
+          - DROP all audit columns (_dbmazz_*, dbmazz_*)
+
+        Also drops the internal dbmazz schema/metadata if present
+        (_DBMAZZ schema for Snowflake/Postgres, metadata table for StarRocks).
+
+        Returns a list of human-readable descriptions of what was cleaned.
+        """
+
     # ── tier 2 helpers (C1, B4) — implemented now, used in PR 2 ──────────────
 
     @abstractmethod

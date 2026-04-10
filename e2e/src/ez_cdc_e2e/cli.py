@@ -468,11 +468,24 @@ def _compose_menu() -> None:
             {"name": "down",   "value": "down",   "description": "Stop and destroy a stack"},
             {"name": "logs",   "value": "logs",   "description": "Tail logs"},
             {"name": "status", "value": "status", "description": "Fetch current status"},
+            {"name": "clean",  "value": "clean",  "description": "Clean target (truncate + drop audit cols)"},
             {"name": "← Back", "value": "back",   "description": ""},
         ],
     )
     if action in (None, "back"):
         raise _BackToMenu()
+
+    if action == "clean":
+        try:
+            store = _load_store_for_flow()
+            _ensure_datasources_or_setup(store)
+            store.reload()
+            source_name = _pick_source_interactive(store)
+            sink_name = _pick_sink_interactive(store)
+        except _BackToMenu:
+            return
+        clean(source=source_name, sink=sink_name, yes=False)
+        return
 
     needs_running_stack = action in ("down", "logs", "status")
 
@@ -1339,6 +1352,72 @@ def status(
         console.print(Text(f"  ERROR              {s.error_detail}", style="error"))
     _final_padding()
 
+
+
+# ── Subcommand: clean ────────────────────────────────────────────────────────
+
+@app.command(help="Clean target database — truncate tables, drop audit columns, remove dbmazz metadata.")
+def clean(
+    profile: Optional[str] = typer.Argument(
+        None,
+        help="Legacy profile name. For explicit pairs use --source/--sink.",
+    ),
+    source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
+    sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the confirmation prompt.",
+    ),
+) -> None:
+    _show_banner_d()
+
+    src_name, src_spec, sk_name, sk_spec, _compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
+
+    tables = list(getattr(src_spec, "tables", []))
+    if not tables:
+        console.print(Text("  No tables configured in the source spec.", style="error"))
+        raise typer.Exit(2)
+
+    console.print()
+    console.print(Text(f"  Target: {sk_name} ({sk_spec.type})", style="info"))
+    console.print(Text(f"  Tables: {', '.join(tables)}", style="info"))
+    console.print(Text(
+        "  This will TRUNCATE all data and DROP audit columns + dbmazz metadata.",
+        style="warning",
+    ))
+    console.print()
+
+    if not yes:
+        from .tui import prompts as _prompts
+        confirmed = _prompts.confirm("  Proceed?", default=False)
+        if not confirmed:
+            console.print(Text("  Cancelled.", style="muted"))
+            _final_padding()
+            return
+
+    try:
+        target = _instantiate_backend_from_spec(sk_spec)
+        target.connect()
+    except Exception as e:
+        console.print(Text(f"  Failed to connect to target: {e}", style="error"))
+        raise typer.Exit(2)
+
+    try:
+        actions = target.clean(tables)
+    except Exception as e:
+        console.print(Text(f"  Clean failed: {e}", style="error"))
+        raise typer.Exit(1)
+    finally:
+        target.close()
+
+    console.print()
+    for action in actions:
+        console.print(Text(f"  ✓ {action}", style="success"))
+    console.print()
+    console.print(Text("  Target is clean — ready for verify.", style="info"))
+    _final_padding()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────

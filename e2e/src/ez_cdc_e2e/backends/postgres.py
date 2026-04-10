@@ -271,3 +271,34 @@ class PostgresTarget(TargetBackend):
         with conn.cursor() as cur:
             cur.execute(sql, (list(expected_pks),))
             return [r[0] for r in cur.fetchall()]
+
+    def clean(self, tables: list[str]) -> list[str]:
+        conn = self._require_conn()
+        actions: list[str] = []
+
+        audit_cols = ["_dbmazz_synced_at", "_dbmazz_op_type"]
+        for table in tables:
+            if not self.table_exists(table):
+                continue
+            with conn.cursor() as cur:
+                cur.execute(f"TRUNCATE TABLE {self._qualified(table)}")
+                actions.append(f"truncated {table}")
+                for col in audit_cols:
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE {self._qualified(table)} "
+                            f"DROP COLUMN IF EXISTS {self._quote(col)}"
+                        )
+                    except Exception:
+                        pass
+                actions.append(f"dropped audit columns from {table}")
+
+        # Drop _dbmazz schema (metadata, raw tables)
+        with conn.cursor() as cur:
+            try:
+                cur.execute(f"DROP SCHEMA IF EXISTS {self._quote(_METADATA_SCHEMA)} CASCADE")
+                actions.append("dropped _dbmazz schema (metadata, raw tables)")
+            except Exception as e:
+                actions.append(f"failed to drop _dbmazz schema: {e}")
+
+        return actions

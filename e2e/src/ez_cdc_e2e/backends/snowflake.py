@@ -384,6 +384,58 @@ class SnowflakeTarget(TargetBackend):
         return [pk for pk in expected_pks if pk not in target_pks]
 
 
+    def clean(self, tables: list[str]) -> list[str]:
+        conn = self._require_conn()
+        actions: list[str] = []
+
+        # 1. For each table: truncate + drop audit columns
+        audit_cols = [
+            "_DBMAZZ_OP_TYPE",
+            "_DBMAZZ_IS_DELETED",
+            "_DBMAZZ_SYNCED_AT",
+            "_DBMAZZ_CDC_VERSION",
+        ]
+        for table in tables:
+            # Check if table exists before touching it
+            if not self.table_exists(table):
+                continue
+            cur = conn.cursor()
+            try:
+                cur.execute(f"TRUNCATE TABLE {self._qualified(table)}")
+                actions.append(f"truncated {table}")
+            except Exception:
+                pass  # table might not have data
+            finally:
+                cur.close()
+
+            # Drop audit columns
+            for col in audit_cols:
+                cur = conn.cursor()
+                try:
+                    cur.execute(
+                        f"ALTER TABLE {self._qualified(table)} DROP COLUMN IF EXISTS {self._quote(col)}"
+                    )
+                except Exception:
+                    pass
+                finally:
+                    cur.close()
+            actions.append(f"dropped audit columns from {table}")
+
+        # 2. Drop _DBMAZZ schema (metadata, raw table, stage, sequence)
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                f"DROP SCHEMA IF EXISTS {self._quote(self.database)}.{self._quote('_DBMAZZ')} CASCADE"
+            )
+            actions.append("dropped _DBMAZZ schema (metadata, raw table, stage)")
+        except Exception as e:
+            actions.append(f"failed to drop _DBMAZZ schema: {e}")
+        finally:
+            cur.close()
+
+        return actions
+
+
 def _require_env(key: str) -> str:
     val = os.environ.get(key)
     if not val:

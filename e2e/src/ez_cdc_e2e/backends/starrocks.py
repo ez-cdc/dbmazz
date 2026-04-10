@@ -346,3 +346,45 @@ class StarRocksTarget(TargetBackend):
         finally:
             cur.close()
         return [pk for pk in expected_pks if pk not in target_pks]
+
+    def clean(self, tables: list[str]) -> list[str]:
+        conn = self._require_conn()
+        actions: list[str] = []
+
+        audit_cols = [
+            "dbmazz_op_type",
+            "dbmazz_is_deleted",
+            "dbmazz_synced_at",
+            "dbmazz_cdc_version",
+        ]
+        for table in tables:
+            if not self.table_exists(table):
+                continue
+            cur = conn.cursor()
+            try:
+                cur.execute(f"TRUNCATE TABLE {self._qualified(table)}")
+                actions.append(f"truncated {table}")
+            finally:
+                cur.close()
+
+            # StarRocks ALTER TABLE DROP COLUMN
+            for col in audit_cols:
+                cur = conn.cursor()
+                try:
+                    # Check if column exists first (StarRocks has no DROP IF EXISTS)
+                    cur.execute(
+                        f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                        f"WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                        (self.database, table, col),
+                    )
+                    if cur.fetchone():
+                        cur.execute(
+                            f"ALTER TABLE {self._qualified(table)} DROP COLUMN {self._quote(col)}"
+                        )
+                except Exception:
+                    pass
+                finally:
+                    cur.close()
+            actions.append(f"dropped audit columns from {table}")
+
+        return actions
