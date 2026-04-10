@@ -59,9 +59,15 @@ def select(
     Returns:
         The `value` of the selected choice, or None if the user cancelled.
     """
+    # Compute the column width for the name based on the longest name in the
+    # current set, so descriptions always line up no matter how long the
+    # names are. Min width 14 to keep short lists from looking cramped.
+    max_name = max((len(c["name"]) for c in choices), default=0)
+    name_width = max(max_name, 14)
+
     questionary_choices = [
         questionary.Choice(
-            title=_format_choice(c),
+            title=_format_choice(c, name_width),
             value=c["value"],
         )
         for c in choices
@@ -74,7 +80,8 @@ def select(
             default=default,
             style=EZ_CDC_PROMPT_STYLE,
             qmark="?",
-            use_indicator=True,
+            pointer="❯",          # brand pointer (overrides questionary's default »)
+            use_indicator=False,  # hide the radio-button ●/○ — pointer alone is enough
             use_shortcuts=False,
         ).ask()
     except KeyboardInterrupt:
@@ -121,11 +128,16 @@ def password(message: str) -> Optional[str]:
         return None
 
 
-def _format_choice(choice: dict) -> str:
-    """Format a choice for display: 'name  description'."""
+def _format_choice(choice: dict, name_width: int = 14) -> str:
+    """Format a choice for display: 'name   description'.
+
+    The name is padded to `name_width` (computed by select() based on the
+    longest name in the choice set) and a fixed 3-space gutter is added
+    before the description so the two columns are visually distinct even
+    when the name happens to fill the column exactly.
+    """
     name = choice["name"]
     description = choice.get("description", "")
     if description:
-        # Pad name to align descriptions in a column.
-        return f"{name:<14}{description}"
+        return f"{name:<{name_width}}   {description}"
     return name
