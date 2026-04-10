@@ -1,0 +1,509 @@
+"""Interactive `datasource add` wizard.
+
+Drives the user through creating a new datasource entry. Used by:
+
+  - `ez-cdc datasource add` (CLI subcommand)
+  - The first-run flow in the main menu when the user picks "Configure
+    datasources now" instead of "Use bundled demos"
+
+Flow:
+
+  1. Ask for a name (validated against the schema's name pattern, checked
+     for collisions in the store).
+  2. Ask for the role (source or sink).
+  3. Ask for the type (postgres / starrocks / snowflake — sinks only).
+  4. Ask whether it's managed (`Run a sample one for me`) or user-provided
+     (`I have my own connection details`). Snowflake is forced to user-only.
+  5. Type-specific connection prompts. For user-provided Postgres sources,
+     this includes a connection test and an interactive table picker via
+     pg_tables.
+  6. Save to the store and persist to disk.
+
+Cancellation handling:
+  Any prompt can be cancelled with Ctrl+C / Esc. We catch _Cancelled
+  and return to the caller without saving. The store is mutated only
+  in the very last step (success), so a mid-wizard cancel never leaves
+  partial state.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+from urllib.parse import urlparse
+
+from rich.console import Console
+from rich.text import Text
+
+from ..tui import prompts
+from .loader import DatasourceError
+from .schema import (
+    PostgresSinkSpec,
+    PostgresSourceSpec,
+    SinkSpec,
+    SnowflakeSinkSpec,
+    SourceSpec,
+    StarRocksSinkSpec,
+    _NAME_PATTERN,
+)
+from .store import DatasourceStore
+
+
+# Sentinel raised by helper prompts when the user cancels. Mirrors the
+# _BackToMenu pattern from cli.py without importing it (avoids cycles).
+class _Cancelled(Exception):
+    pass
+
+
+# ── Public entry point ──────────────────────────────────────────────────────
+
+def run_add_wizard(store: DatasourceStore, console: Console) -> Optional[str]:
+    """Run the interactive add wizard against `store`.
+
+    Returns the name of the created datasource on success, or None if the
+    user cancelled at any point. The store is saved to disk on success.
+    """
+    console.print()
+    console.print(Text(
+        "  Add a new datasource. Press Ctrl+C at any prompt to cancel.",
+        style="info",
+    ))
+    console.print()
+
+    try:
+        name = _prompt_name(store, console)
+        role = _prompt_role()
+        type_ = _prompt_type(role)
+        managed = _prompt_managed(type_)
+
+        if role == "source":
+            spec = _build_source_spec(console, type_, managed)
+            store.add_source(name, spec)
+        else:
+            spec = _build_sink_spec(console, type_, managed)
+            store.add_sink(name, spec)
+
+        store.save()
+
+    except _Cancelled:
+        console.print()
+        console.print(Text("  Cancelled. No datasource was saved.", style="muted"))
+        console.print()
+        return None
+    except DatasourceError as e:
+        console.print()
+        console.print(Text(f"  Error: {e}", style="error"))
+        console.print()
+        return None
+
+    console.print()
+    console.print(Text(
+        f"  ✓ Datasource {name!r} saved to {store.path}",
+        style="success",
+    ))
+    console.print()
+    return name
+
+
+# ── Step 1: name ─────────────────────────────────────────────────────────────
+
+def _prompt_name(store: DatasourceStore, console: Console) -> str:
+    """Prompt for a unique, valid datasource name."""
+    while True:
+        raw = prompts.text(
+            "Name for this datasource (lowercase, hyphens/underscores ok):",
+            default="",
+        )
+        if raw is None:
+            raise _Cancelled()
+
+        name = raw.strip().lower()
+        if not name:
+            continue
+
+        if not _NAME_PATTERN.match(name):
+            console.print(Text(
+                f"  ✗ Invalid name {name!r}. Use lowercase letters, digits, "
+                f"hyphens, or underscores (1-64 chars).",
+                style="error",
+            ))
+            continue
+
+        if store.exists(name):
+            console.print(Text(
+                f"  ✗ Name {name!r} is already used. Pick a different name "
+                f"or remove the existing one first.",
+                style="error",
+            ))
+            continue
+
+        return name
+
+
+# ── Step 2: role ─────────────────────────────────────────────────────────────
+
+def _prompt_role() -> str:
+    role = prompts.select(
+        "What is this datasource for?",
+        choices=[
+            {"name": "Source",   "value": "source",
+             "description": "A database to replicate FROM (CDC source)"},
+            {"name": "Sink",     "value": "sink",
+             "description": "A database to replicate TO (CDC target)"},
+            {"name": "← Cancel", "value": "cancel", "description": ""},
+        ],
+        default="source",
+    )
+    if role in (None, "cancel"):
+        raise _Cancelled()
+    return role
+
+
+# ── Step 3: type ─────────────────────────────────────────────────────────────
+
+def _prompt_type(role: str) -> str:
+    if role == "source":
+        return "postgres"  # only PostgreSQL sources today
+
+    type_ = prompts.select(
+        "What kind of sink?",
+        choices=[
+            {"name": "PostgreSQL", "value": "postgres",  "description": ""},
+            {"name": "StarRocks",  "value": "starrocks", "description": ""},
+            {"name": "Snowflake",  "value": "snowflake",
+             "description": "(cloud-only, requires credentials)"},
+            {"name": "← Cancel",   "value": "cancel",    "description": ""},
+        ],
+        default="postgres",
+    )
+    if type_ in (None, "cancel"):
+        raise _Cancelled()
+    return type_
+
+
+# ── Step 4: managed or user-provided ────────────────────────────────────────
+
+def _prompt_managed(type_: str) -> bool:
+    if type_ == "snowflake":
+        return False  # cloud-only
+
+    answer = prompts.select(
+        "Where will this database run?",
+        choices=[
+            {"name": "Run a sample one for me", "value": "managed",
+             "description": "ez-cdc starts it in a Docker container"},
+            {"name": "I have my own",            "value": "user",
+             "description": "You provide the connection details"},
+            {"name": "← Cancel",                 "value": "cancel", "description": ""},
+        ],
+        default="managed",
+    )
+    if answer in (None, "cancel"):
+        raise _Cancelled()
+    return answer == "managed"
+
+
+# ── Step 5a: source spec ─────────────────────────────────────────────────────
+
+def _build_source_spec(console: Console, type_: str, managed: bool) -> SourceSpec:
+    if type_ != "postgres":
+        raise _Cancelled()
+    if managed:
+        return _build_managed_pg_source(console)
+    return _build_user_pg_source(console)
+
+
+def _build_managed_pg_source(console: Console) -> PostgresSourceSpec:
+    console.print()
+    console.print(Text(
+        "  Managed PostgreSQL source — ez-cdc will start it in a Docker container.",
+        style="info",
+    ))
+    console.print()
+
+    seed = prompts.text(
+        "Seed SQL file in e2e/fixtures/ (default: postgres-seed.sql)",
+        default="postgres-seed.sql",
+    )
+    if seed is None:
+        raise _Cancelled()
+    seed = seed.strip() or "postgres-seed.sql"
+
+    tables_raw = prompts.text(
+        "Tables to replicate (comma-separated):",
+        default="orders,order_items",
+    )
+    if tables_raw is None:
+        raise _Cancelled()
+    tables = [t.strip() for t in tables_raw.split(",") if t.strip()]
+    if not tables:
+        raise DatasourceError("at least one table is required")
+
+    return PostgresSourceSpec(
+        managed=True,
+        seed=seed,
+        tables=tables,
+    )
+
+
+def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
+    console.print()
+    console.print(Text(
+        "  User-provided PostgreSQL source — you'll need:",
+        style="info",
+    ))
+    console.print(Text("    • A connection URL with replication permission", style="muted"))
+    console.print(Text("    • The user must have REPLICATION privilege",      style="muted"))
+    console.print(Text("    • The database must have wal_level=logical",      style="muted"))
+    console.print()
+
+    url = prompts.text(
+        "Connection URL (postgres://user:pass@host:port/dbname):",
+        default="",
+    )
+    if url is None or not url.strip():
+        raise _Cancelled()
+    url = url.strip()
+
+    # Validate URL format
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgres", "postgresql"):
+        raise DatasourceError(
+            f"URL scheme must be postgres:// or postgresql://, got {parsed.scheme!r}"
+        )
+    if not parsed.hostname:
+        raise DatasourceError("URL must include a hostname")
+
+    slot = prompts.text("Replication slot name", default="dbmazz_slot")
+    if slot is None:
+        raise _Cancelled()
+    slot = slot.strip() or "dbmazz_slot"
+
+    pub = prompts.text("Publication name", default="dbmazz_pub")
+    if pub is None:
+        raise _Cancelled()
+    pub = pub.strip() or "dbmazz_pub"
+
+    # Test connection + discover tables
+    console.print()
+    console.print(Text("  → Testing connection...", style="info"))
+    try:
+        discovered_tables = _test_pg_and_discover(url)
+    except Exception as e:
+        console.print(Text(f"  ✗ Connection failed: {e}", style="error"))
+        proceed = prompts.confirm(
+            "Continue anyway and enter table names manually?",
+            default=False,
+        )
+        if not proceed:
+            raise _Cancelled()
+        discovered_tables = []
+    else:
+        console.print(Text(
+            f"  ✓ Connection OK ({len(discovered_tables)} tables visible in public schema)",
+            style="success",
+        ))
+        console.print()
+
+    if discovered_tables:
+        tables = _pick_tables_interactive(discovered_tables)
+    else:
+        tables_raw = prompts.text("Tables to replicate (comma-separated):", default="")
+        if tables_raw is None:
+            raise _Cancelled()
+        tables = [t.strip() for t in tables_raw.split(",") if t.strip()]
+
+    if not tables:
+        raise DatasourceError("at least one table is required")
+
+    return PostgresSourceSpec(
+        managed=False,
+        url=url,
+        replication_slot=slot,
+        publication=pub,
+        tables=tables,
+    )
+
+
+def _test_pg_and_discover(url: str) -> list[str]:
+    """Connect to a PG and return the list of public-schema tables."""
+    import psycopg2
+
+    conn = psycopg2.connect(url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tablename FROM pg_tables "
+                "WHERE schemaname = 'public' "
+                "  AND tablename NOT LIKE 'dbmazz_%' "
+                "  AND tablename NOT LIKE '_dbmazz_%' "
+                "ORDER BY tablename"
+            )
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _pick_tables_interactive(available: list[str]) -> list[str]:
+    """Interactive multiselect over a list of table names.
+
+    questionary.checkbox supports multi-select with space-to-toggle.
+    """
+    import questionary
+    from ..tui.prompts import EZ_CDC_PROMPT_STYLE
+
+    try:
+        result = questionary.checkbox(
+            "Which tables do you want to replicate?",
+            choices=available,
+            style=EZ_CDC_PROMPT_STYLE,
+            qmark="?",
+            instruction="(use ↑↓ to navigate, space to toggle, ↵ to confirm)",
+        ).ask()
+    except KeyboardInterrupt:
+        raise _Cancelled()
+
+    if result is None:
+        raise _Cancelled()
+    return result
+
+
+# ── Step 5b: sink spec ───────────────────────────────────────────────────────
+
+def _build_sink_spec(console: Console, type_: str, managed: bool) -> SinkSpec:
+    if type_ == "postgres":
+        return _build_pg_sink(console, managed)
+    if type_ == "starrocks":
+        return _build_starrocks_sink(console, managed)
+    if type_ == "snowflake":
+        return _build_snowflake_sink(console)
+    raise _Cancelled()
+
+
+def _build_pg_sink(console: Console, managed: bool) -> PostgresSinkSpec:
+    if managed:
+        console.print()
+        console.print(Text(
+            "  Managed PostgreSQL sink — ez-cdc will start it in a Docker container.",
+            style="info",
+        ))
+        console.print()
+        return PostgresSinkSpec(managed=True)
+
+    console.print()
+    console.print(Text("  User-provided PostgreSQL sink.", style="info"))
+    console.print()
+
+    url = prompts.text("Connection URL (postgres://user:pass@host:port/dbname):", default="")
+    if url is None or not url.strip():
+        raise _Cancelled()
+    url = url.strip()
+
+    database = prompts.text("Target database name:", default="")
+    if database is None or not database.strip():
+        raise _Cancelled()
+    database = database.strip()
+
+    schema = prompts.text("Target schema (default: public):", default="public")
+    if schema is None:
+        raise _Cancelled()
+    schema = schema.strip() or "public"
+
+    return PostgresSinkSpec(
+        managed=False,
+        url=url,
+        database=database,
+        **{"schema": schema},  # alias to schema_
+    )
+
+
+def _build_starrocks_sink(console: Console, managed: bool) -> StarRocksSinkSpec:
+    if managed:
+        console.print()
+        console.print(Text(
+            "  Managed StarRocks sink — ez-cdc will start it (~60s on first run).",
+            style="info",
+        ))
+        console.print()
+        return StarRocksSinkSpec(managed=True)
+
+    console.print()
+    console.print(Text("  User-provided StarRocks sink.", style="info"))
+    console.print()
+
+    url = prompts.text("FE HTTP URL (e.g., http://starrocks.local:8030):", default="")
+    if url is None or not url.strip():
+        raise _Cancelled()
+    url = url.strip()
+
+    database = prompts.text("Target database name:", default="")
+    if database is None or not database.strip():
+        raise _Cancelled()
+    database = database.strip()
+
+    user = prompts.text("User:", default="root")
+    if user is None:
+        raise _Cancelled()
+    user = user.strip() or "root"
+
+    password = prompts.password("Password (leave empty if none):") or ""
+
+    return StarRocksSinkSpec(
+        managed=False,
+        url=url,
+        database=database,
+        user=user,
+        password=password,
+    )
+
+
+def _build_snowflake_sink(console: Console) -> SnowflakeSinkSpec:
+    console.print()
+    console.print(Text(
+        "  Snowflake sink (cloud-only — credentials required).",
+        style="info",
+    ))
+    console.print()
+
+    account = prompts.text("Account identifier (e.g., xy12345.us-east-1):", default="")
+    if account is None or not account.strip():
+        raise _Cancelled()
+
+    user = prompts.text("User:", default="")
+    if user is None or not user.strip():
+        raise _Cancelled()
+
+    password = prompts.password("Password:")
+    if password is None or not password:
+        raise _Cancelled()
+
+    database = prompts.text("Database:", default="")
+    if database is None or not database.strip():
+        raise _Cancelled()
+
+    schema = prompts.text("Schema (default: PUBLIC):", default="PUBLIC")
+    if schema is None:
+        raise _Cancelled()
+    schema = schema.strip() or "PUBLIC"
+
+    warehouse = prompts.text("Warehouse:", default="")
+    if warehouse is None or not warehouse.strip():
+        raise _Cancelled()
+
+    role_raw = prompts.text("Role (optional, press Enter to skip):", default="")
+    role = role_raw.strip() if role_raw else None
+
+    soft_delete = prompts.confirm("Use soft delete?", default=True)
+    if soft_delete is None:
+        raise _Cancelled()
+
+    return SnowflakeSinkSpec(
+        managed=False,
+        account=account.strip(),
+        user=user.strip(),
+        password=password,
+        database=database.strip(),
+        warehouse=warehouse.strip(),
+        role=role,
+        soft_delete=soft_delete,
+        **{"schema": schema},
+    )
