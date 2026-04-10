@@ -905,17 +905,21 @@ def quickstart(
     console.print(Text("Stack is live. Opening dashboard...", style="success"))
     console.print()
 
-    # Decide whether to enable the traffic generator: only for managed sources
-    # (we don't generate fake traffic against the user's real DB).
-    enable_traffic = bool(getattr(src_spec, "managed", False))
-
+    # The traffic generator is **always created** but **always starts paused**
+    # (rule from PR4 design discussion: never auto-generate writes — the user
+    # opts in explicitly via the `[t]` keybinding). This applies to both
+    # managed sources (demos) and user-managed sources (BYOD). For BYOD, the
+    # user is responsible for the consequences of pressing `[t]` against their
+    # real database — the dashboard surfaces a warning in the header so it's
+    # not a silent surprise.
     dashboard = QuickstartDashboard(
         profile=_make_profile_shim(src_name, sk_name, src_spec),
         dbmazz=dbmazz_client,
         target=target,
         console=console,
         source_counts_fn=lambda: {t: source_client.count_rows(t) for t in src_spec.tables},
-        traffic_rate_eps=15.0 if enable_traffic else 0.0,
+        traffic_rate_eps=15.0,
+        source_is_managed=bool(getattr(src_spec, "managed", False)),
     )
     try:
         dashboard.run()

@@ -136,13 +136,27 @@ class QuickstartDashboard:
         console: Console,
         source_counts_fn,  # callable[[], dict[str, int]] — avoids coupling to SourceClient
         traffic_rate_eps: float = 15.0,
+        source_is_managed: bool = True,
     ) -> None:
+        """
+        Args:
+            traffic_rate_eps: rate in ops/sec for the background traffic
+                generator. The generator is **always created** but **always
+                starts paused** — the user opts in by pressing `[t]`.
+                Universal rule: never auto-generate writes against any
+                source, managed or BYOD. Only opt-in.
+            source_is_managed: True for demo sources, False for user-managed
+                (BYOD). Used to surface a clearer warning in the header for
+                BYOD when traffic is enabled, since pressing `[t]` against
+                a real production database has real consequences.
+        """
         self.profile = profile
         self.dbmazz = dbmazz
         self.target = target
         self.console = console
         self.source_counts_fn = source_counts_fn
         self.traffic_rate_eps = traffic_rate_eps
+        self.source_is_managed = source_is_managed
 
         self.start_time = time.time()
         self.throughput_history: list[float] = []
@@ -150,19 +164,24 @@ class QuickstartDashboard:
         self.status_message: Optional[str] = None
         self.status_message_ttl: float = 0.0
 
-        # Background workload generator — started in run(), stopped in finally.
+        # Background workload generator. Always created, always starts paused.
+        # The user activates it explicitly with `[t]`.
         self.traffic_generator: Optional[TrafficGenerator] = None
 
     # ── main loop ────────────────────────────────────────────────────────────
 
     def run(self) -> None:
         """Run the dashboard until the user exits (q or Ctrl+C)."""
-        # Start the background traffic generator so the dashboard shows
-        # real activity instead of a frozen "zero" display.
+        # Always create the traffic generator, always start it paused.
+        # Rule from PR4 design: never auto-generate writes — opt-in only via [t].
+        # The generator thread is alive (so [t] can flip the pause flag
+        # without starting a new thread) but produces nothing until the
+        # user activates it.
         self.traffic_generator = TrafficGenerator(
             source_dsn=self.profile.source_dsn,
             rate_eps=self.traffic_rate_eps,
         )
+        self.traffic_generator.pause()
         self.traffic_generator.start()
 
         try:
@@ -366,19 +385,37 @@ class QuickstartDashboard:
         lsn_line.append(status.confirmed_lsn, style="metric.number")
         lines.append(lsn_line)
 
-        # Traffic generator indicator — tells the user WHY the numbers
-        # are moving (otherwise the dashboard just looks busy for no
-        # obvious reason on a fresh stack). Shows a different glyph +
-        # color when paused so the state is visually obvious.
+        # Traffic generator indicator. The generator is always created but
+        # always starts paused — the user opts in via [t]. Shows three states:
+        #   - paused (initial)         "◌ traffic  paused — press [t] to start"
+        #   - paused (after activity)  "◌ traffic  paused (N ins, N upd, N del)"
+        #   - running                  "● traffic  generating ~15 ops/s (...)"
+        #
+        # When the source is BYOD (user-managed), the paused state shows an
+        # extra warning so the user understands that pressing [t] writes
+        # against their real database.
         if self.traffic_generator is not None and self.traffic_generator.is_running():
             gen_stats = self.traffic_generator.stats
             gen_paused = self.traffic_generator.is_paused
+            has_activity = gen_stats.total > 0
+
             gen_line = Text()
             gen_line.append("  ")
             if gen_paused:
                 gen_line.append("◌ ", style="warning")
                 gen_line.append("traffic  ", style="metric.label")
                 gen_line.append("paused", style="warning")
+                if not has_activity:
+                    # First-time hint — only when no traffic has been
+                    # generated yet, so we don't keep nagging after the
+                    # user has been toggling on/off intentionally.
+                    if self.source_is_managed:
+                        gen_line.append("  — press [t] to start", style="muted")
+                    else:
+                        gen_line.append(
+                            "  — press [t] to start  ⚠ writes to YOUR database",
+                            style="warning",
+                        )
             else:
                 gen_line.append("● ", style="info")
                 gen_line.append("traffic  ", style="metric.label")
@@ -386,11 +423,12 @@ class QuickstartDashboard:
                     f"generating ~{self.traffic_rate_eps:.0f} ops/s",
                     style="metric.number",
                 )
-            gen_line.append(
-                f"   ({gen_stats.inserts} ins, {gen_stats.updates} upd, "
-                f"{gen_stats.deletes} del)",
-                style="muted",
-            )
+            if has_activity:
+                gen_line.append(
+                    f"   ({gen_stats.inserts} ins, {gen_stats.updates} upd, "
+                    f"{gen_stats.deletes} del)",
+                    style="muted",
+                )
             lines.append(gen_line)
 
         lines.append(Text(""))
