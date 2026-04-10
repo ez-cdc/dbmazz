@@ -26,14 +26,24 @@ coverage/
 .plans/
 session-logs/
 
-# e2e credentials
+# e2e credentials and user-managed datasources file
+# datasources.yaml may contain real user credentials (e.g. Snowflake) and
+# is created/edited by `ez-cdc datasource ...`. NEVER commit it.
 e2e/.env
 e2e/.env.snowflake
+e2e/datasources.yaml
+e2e/datasources.yaml.bak
+
+# Generated docker compose files (per source/sink pair, written by
+# compose_builder). Each cache dir contains a rendered .env with the
+# real credentials of the source/sink combo — NEVER commit them.
+e2e/.cache/
 
 # Python build artifacts (e2e/ is installed with pip install -e)
 e2e/src/**/__pycache__/
 e2e/src/**/*.egg-info/
 e2e/**/*.pyc
+e2e/build/
 
 # Misc
 *.old

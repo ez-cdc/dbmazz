@@ -89,6 +89,8 @@ def instantiate_backend_from_spec(spec: SinkSpec) -> TargetBackend:
     if isinstance(spec, SnowflakeSinkSpec):
         # SnowflakeTarget reads creds from os.environ. Push the spec's
         # values into the env so the existing class works unchanged.
+        # The YAML is the source of truth — there is no .env file anywhere
+        # in the loop, just spec → os.environ → SnowflakeTarget.
         os.environ["SINK_SNOWFLAKE_ACCOUNT"]   = spec.account
         os.environ["SINK_USER"]                = spec.user
         os.environ["SINK_PASSWORD"]            = spec.password
@@ -98,6 +100,6 @@ def instantiate_backend_from_spec(spec: SinkSpec) -> TargetBackend:
         if spec.role:
             os.environ["SINK_SNOWFLAKE_ROLE"] = spec.role
         os.environ["SINK_SNOWFLAKE_SOFT_DELETE"] = "true" if spec.soft_delete else "false"
-        return SnowflakeTarget(env_file=None)
+        return SnowflakeTarget()
 
     raise ValueError(f"unsupported sink spec type: {type(spec).__name__}")

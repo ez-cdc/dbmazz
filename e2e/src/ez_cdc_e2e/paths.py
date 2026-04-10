@@ -34,8 +34,6 @@ REPO_ROOT = E2E_DIR.parent
 
 COMPOSE_FILE = E2E_DIR / "compose.yml"
 FIXTURES_DIR = E2E_DIR / "fixtures"
-ENV_SNOWFLAKE_FILE = E2E_DIR / ".env.snowflake"
-ENV_SNOWFLAKE_EXAMPLE = E2E_DIR / ".env.snowflake.example"
 
 POSTGRES_SEED_SQL = FIXTURES_DIR / "postgres-seed.sql"
 TYPES_FIXTURE_SQL = FIXTURES_DIR / "types.sql"  # created in PR 2

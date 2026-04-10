@@ -14,16 +14,15 @@ Audit columns (from src/connectors/sinks/snowflake/setup.rs):
 
 Metadata: `_DBMAZZ._METADATA` (in the configured database).
 
-Credentials come from e2e/.env.snowflake (copy .env.snowflake.example).
-Authentication: username + password (key-pair JWT is also supported by
-the driver but we stick to user/pass for simplicity here since the
-dev compose profile uses the same).
+Credentials are read from os.environ by SnowflakeTarget.__init__().
+The caller (instantiate.py) populates the env from a SnowflakeSinkSpec
+loaded from datasources.yaml — there is no `.env.snowflake` file
+involved, the YAML is the single source of truth.
 """
 
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any, Optional
 
 import snowflake.connector
@@ -32,45 +31,23 @@ from snowflake.connector import SnowflakeConnection
 from .base import BackendCapabilities, ColumnInfo, TargetBackend
 
 
-def _load_env_file(path: Path) -> None:
-    """Parse a .env file and inject its variables into os.environ.
-
-    Existing env vars take precedence (setdefault), so the user can override
-    the file from their shell. Minimal parser: no variable substitution, no
-    multi-line values. Good enough for .env.snowflake.
-    """
-    if not path.exists():
-        return
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        # Strip surrounding quotes if balanced
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-            value = value[1:-1]
-        os.environ.setdefault(key, value)
-
-
 _INTERNAL_SCHEMA = "_DBMAZZ"
 _METADATA_TABLE = "_METADATA"
 
 
 class SnowflakeTarget(TargetBackend):
-    def __init__(self, env_file: Optional[Path] = None) -> None:
-        """Initialize from environment variables (optionally loaded from a file).
+    def __init__(self) -> None:
+        """Initialize from os.environ.
 
         Reads: SINK_SNOWFLAKE_ACCOUNT, SINK_USER, SINK_PASSWORD, SINK_DATABASE,
         SINK_SCHEMA (default PUBLIC), SINK_SNOWFLAKE_WAREHOUSE, SINK_SNOWFLAKE_ROLE,
         SINK_SNOWFLAKE_SOFT_DELETE (default "true").
-        """
-        if env_file is not None:
-            _load_env_file(env_file)
 
+        These env vars are populated by `instantiate_backend_from_spec()`
+        from the SnowflakeSinkSpec in datasources.yaml. SnowflakeTarget
+        itself doesn't know or care about YAML — it's a thin wrapper
+        around the snowflake-connector-python driver.
+        """
         self.account = _require_env("SINK_SNOWFLAKE_ACCOUNT")
         self.user = _require_env("SINK_USER")
         self.password = _require_env("SINK_PASSWORD")
@@ -411,6 +388,7 @@ def _require_env(key: str) -> str:
     if not val:
         raise RuntimeError(
             f"{key} is required for the Snowflake backend. "
-            f"Set it in e2e/.env.snowflake (copy .env.snowflake.example)."
+            f"Add a Snowflake sink to your datasources.yaml via "
+            f"`ez-cdc datasource add` → sink → snowflake."
         )
     return val
