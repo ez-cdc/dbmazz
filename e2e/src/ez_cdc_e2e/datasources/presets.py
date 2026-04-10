@@ -3,28 +3,24 @@
 Provides ready-to-use datasources that work out of the box without any
 credentials from the user. Used by:
 
-  - `ez-cdc datasource init-demos` (CLI subcommand)
-  - The "Use bundled demo datasources" option in the first-run menu
+  - ``ez-cdc datasource init-demos`` (CLI subcommand)
+  - The "Init config" option in the first-run menu
 
 The bundled demos are intentionally minimal:
 
-  - demo-pg          — managed PostgreSQL source with the orders+order_items
-                       seed (the same schema PR 1 uses for fixtures)
-  - demo-starrocks   — managed StarRocks sink
-  - demo-pg-target   — managed PostgreSQL sink
+  - demo-pg          — PostgreSQL source on localhost:15432 with
+                       the orders+order_items seed
+  - demo-starrocks   — StarRocks sink on localhost:18030 / 19030
+  - demo-pg-target   — PostgreSQL sink on localhost:25432
 
-These three datasources cover the same surface as the old `starrocks` and
-`pg-target` profiles. They form the matrix:
-
-  demo-pg → demo-starrocks    (= old starrocks profile)
-  demo-pg → demo-pg-target    (= old pg-target profile)
+All demos carry explicit connection details that match the Docker
+containers created by ``ez-cdc up``.  The compose builder detects
+these well-known localhost ports and creates the appropriate containers.
 
 **Snowflake is NOT included in the demos.** Snowflake requires real
 credentials and cloud connectivity, so a "no-config quickstart" can't
-ship a working snowflake datasource. Users who want Snowflake should run
-`ez-cdc datasource add` and pick "snowflake" in the wizard, which will
-prompt for their account credentials interactively. Or they can copy
-the example block from ez-cdc.example.yaml and edit by hand.
+ship a working snowflake datasource. Users should run
+``ez-cdc datasource add`` or edit ez-cdc.yaml manually.
 """
 
 from __future__ import annotations
@@ -44,28 +40,29 @@ def build_demo_datasources() -> DatasourcesFile:
     persisting it via DatasourceStore.save() or merging it into an
     existing store.
 
-    All demos are `managed: true`, meaning ez-cdc spins them up in Docker
-    containers when a flow needs them. None require user credentials.
+    All demos use localhost URLs with well-known ports that match the
+    Docker containers created by ``ez-cdc up``.
     """
     return DatasourcesFile(
         sources={
             "demo-pg": PostgresSourceSpec(
-                managed=True,
+                url="postgres://postgres:postgres@localhost:15432/dbmazz",
                 seed="postgres-seed.sql",
                 tables=["orders", "order_items"],
-                # slot/publication names use the defaults: dbmazz_slot, dbmazz_pub
             ),
         },
         sinks={
             "demo-starrocks": StarRocksSinkSpec(
-                managed=True,
-                # connection details are filled in by the compose builder
-                # at runtime when this sink is selected — managed sinks
-                # don't need them in the spec
+                url="http://localhost:18030",
+                mysql_port=19030,
+                database="dbmazz",
+                user="root",
+                password="",
             ),
             "demo-pg-target": PostgresSinkSpec(
-                managed=True,
-                # database name and schema also filled by compose builder
+                url="postgres://postgres:postgres@localhost:25432/dbmazz_target",
+                database="dbmazz_target",
+                schema="public",
             ),
         },
     )

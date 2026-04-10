@@ -1,12 +1,13 @@
 """Programmatic docker-compose YAML generation for a (source, sink) pair.
 
 Replaces the static `e2e/compose.yml` with a dynamically generated file
-per source/sink combination. This unlocks the BYOD matrix:
+per source/sink combination. The compose builder infers which Docker
+containers to create based on well-known localhost ports in spec URLs:
 
-  managed source + managed sink   → both containers + dbmazz
-  managed source + user sink      → source container + dbmazz with env vars
-  user source    + managed sink   → sink container + dbmazz with env vars
-  user source    + user sink      → only dbmazz container (pure BYOD)
+  localhost:15432 source → source-pg container + dbmazz
+  localhost:18030 sink   → sink-starrocks container + dbmazz
+  localhost:25432 sink   → sink-pg container + dbmazz
+  remote URLs            → only dbmazz container (pure BYOD)
 
 Files written per pair (under `e2e/.cache/compose/<source>__<sink>__<hash>/`):
 
@@ -44,6 +45,47 @@ from .datasources.schema import (
     StarRocksSinkSpec,
 )
 from .paths import E2E_DIR, FIXTURES_DIR
+
+
+# ── Well-known localhost ports for Docker-managed datasources ────────────────
+# The compose builder uses these to decide which containers to create
+# and how to rewrite URLs for the docker-internal network.
+
+_SOURCE_PG_EXT_PORT = 15432
+_SOURCE_PG_INT_PORT = 5432
+_SOURCE_PG_SERVICE = "source-pg"
+
+_SINK_PG_EXT_PORT = 25432
+_SINK_PG_INT_PORT = 5432
+_SINK_PG_SERVICE = "sink-pg"
+
+_SINK_SR_HTTP_EXT_PORT = 18030
+_SINK_SR_HTTP_INT_PORT = 8030
+_SINK_SR_MYSQL_EXT_PORT = 19030
+_SINK_SR_MYSQL_INT_PORT = 9030
+_SINK_SR_SERVICE = "sink-starrocks"
+
+
+# ── URL helpers ──────────────────────────────────────────────────────────────
+
+def _extract_port(url: str) -> int | None:
+    """Extract port from a URL. Returns None if no port found."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        return parsed.port
+    except (ValueError, AttributeError):
+        return None
+
+
+def _rewrite_url_for_docker(url: str, ext_port: int, int_port: int, service: str) -> str:
+    """Rewrite a localhost URL to use the docker-internal service name and port."""
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(url)
+    if parsed.hostname in ("localhost", "127.0.0.1") and parsed.port == ext_port:
+        new_netloc = f"{parsed.username}:{parsed.password}@{service}:{int_port}" if parsed.username else f"{service}:{int_port}"
+        return urlunparse((parsed.scheme, new_netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+    return url
 
 
 # ── Cache layout ─────────────────────────────────────────────────────────────
@@ -110,20 +152,19 @@ def build_compose_for_pair(
     services: dict[str, dict] = {}
     volumes: dict[str, dict] = {}
 
-    # ── Source service (only when managed) ──
-    if source.managed and isinstance(source, PostgresSourceSpec):
+    # ── Source service (when URL points to a well-known localhost port) ──
+    if isinstance(source, PostgresSourceSpec) and _extract_port(source.url) == _SOURCE_PG_EXT_PORT:
         services["source-pg"] = _build_managed_pg_source_service(source)
         volumes["source_pg_data"] = {}
 
-    # ── Sink service (only when managed) ──
-    if sink.managed:
-        if isinstance(sink, StarRocksSinkSpec):
-            services["sink-starrocks"] = _build_managed_starrocks_service()
-            services["sink-starrocks-init"] = _build_starrocks_init_service()
-            volumes["sink_starrocks_data"] = {}
-        elif isinstance(sink, PostgresSinkSpec):
-            services["sink-pg"] = _build_managed_pg_sink_service()
-            volumes["sink_pg_data"] = {}
+    # ── Sink service (when URL points to a well-known localhost port) ──
+    if isinstance(sink, StarRocksSinkSpec) and _extract_port(sink.url) == _SINK_SR_HTTP_EXT_PORT:
+        services["sink-starrocks"] = _build_managed_starrocks_service()
+        services["sink-starrocks-init"] = _build_starrocks_init_service()
+        volumes["sink_starrocks_data"] = {}
+    elif isinstance(sink, PostgresSinkSpec) and _extract_port(sink.url) == _SINK_PG_EXT_PORT:
+        services["sink-pg"] = _build_managed_pg_sink_service()
+        volumes["sink_pg_data"] = {}
 
     # ── dbmazz service (always present) ──
     services["dbmazz"] = _build_dbmazz_service(source, sink)
@@ -161,6 +202,121 @@ def build_compose_for_pair(
     return compose_path, env_path
 
 
+# ── Global infra compose (all datasources at once) ─────────────────────────
+
+INFRA_CACHE_DIR = CACHE_ROOT / "_infra"
+
+
+def infra_compose_path() -> Path:
+    """Return the path to the global infra compose.yml."""
+    return INFRA_CACHE_DIR / "compose.yml"
+
+
+def build_infra_compose(
+    sources: dict[str, SourceSpec],
+    sinks: dict[str, SinkSpec],
+    *,
+    project_name: str = "ez-cdc-infra",
+) -> Path:
+    """Generate a single compose.yml with ALL infra containers.
+
+    Scans all sources and sinks. For each one that uses a well-known
+    localhost port, adds the corresponding Docker service. Deduplicates
+    automatically (e.g., two pairs sharing the same source PG at :15432
+    only get one source-pg container).
+
+    Does NOT include the dbmazz service — that's added per-pair by
+    quickstart/verify via build_compose_for_pair().
+
+    Returns the path to the generated compose.yml.
+    """
+    INFRA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    services: dict[str, dict] = {}
+    volumes: dict[str, dict] = {}
+
+    # ── Source services ──
+    # Find the first PostgresSourceSpec with a seed field to use for the
+    # source-pg container's init script.  If none has a seed, the container
+    # is created without a seed mount.
+    seed_source: PostgresSourceSpec | None = None
+    for source in sources.values():
+        if isinstance(source, PostgresSourceSpec) and _extract_port(source.url) == _SOURCE_PG_EXT_PORT:
+            if seed_source is None and hasattr(source, "seed") and source.seed:
+                seed_source = source
+            # Deduplicate: only add the service once
+            if "source-pg" not in services:
+                src_to_use = seed_source if seed_source is not None else source
+                services["source-pg"] = _build_managed_pg_source_service(src_to_use)
+                volumes["source_pg_data"] = {}
+
+    # If we found a seed source after already adding the service without one,
+    # rebuild with the seed source.
+    if seed_source is not None and "source-pg" in services:
+        services["source-pg"] = _build_managed_pg_source_service(seed_source)
+
+    # ── Sink services ──
+    for sink in sinks.values():
+        if isinstance(sink, StarRocksSinkSpec) and _extract_port(sink.url) == _SINK_SR_HTTP_EXT_PORT:
+            if "sink-starrocks" not in services:
+                services["sink-starrocks"] = _build_managed_starrocks_service()
+                services["sink-starrocks-init"] = _build_starrocks_init_service()
+                volumes["sink_starrocks_data"] = {}
+        elif isinstance(sink, PostgresSinkSpec) and _extract_port(sink.url) == _SINK_PG_EXT_PORT:
+            if "sink-pg" not in services:
+                services["sink-pg"] = _build_managed_pg_sink_service()
+                volumes["sink_pg_data"] = {}
+        # SnowflakeSinkSpec → skip (no Docker container)
+
+    # ── Network ──
+    networks = {"dbmazz": {"driver": "bridge"}}
+
+    compose_dict: dict = {
+        "name": project_name,
+        "services": services,
+        "networks": networks,
+    }
+    if volumes:
+        compose_dict["volumes"] = volumes
+
+    # ── Write compose.yml ──
+    compose_path = INFRA_CACHE_DIR / "compose.yml"
+    compose_yaml = (
+        "# ez-cdc generated infra compose — ALL datasource containers\n"
+        "# Generated by compose_builder.py — do not edit by hand.\n"
+        "# Re-run `ez-cdc up` to regenerate after changing datasource specs.\n\n"
+        + yaml.safe_dump(compose_dict, sort_keys=False, default_flow_style=False)
+    )
+    compose_path.write_text(compose_yaml)
+
+    return compose_path
+
+
+def list_infra_services(
+    sources: dict[str, SourceSpec],
+    sinks: dict[str, SinkSpec],
+) -> list[str]:
+    """Return the service names that would be created for these datasources.
+
+    Useful for the CLI to display what ``ez-cdc up`` is about to start.
+    The list is sorted alphabetically for stable output.
+    """
+    names: set[str] = set()
+
+    for source in sources.values():
+        if isinstance(source, PostgresSourceSpec) and _extract_port(source.url) == _SOURCE_PG_EXT_PORT:
+            names.add("source-pg")
+
+    for sink in sinks.values():
+        if isinstance(sink, StarRocksSinkSpec) and _extract_port(sink.url) == _SINK_SR_HTTP_EXT_PORT:
+            names.add("sink-starrocks")
+            names.add("sink-starrocks-init")
+        elif isinstance(sink, PostgresSinkSpec) and _extract_port(sink.url) == _SINK_PG_EXT_PORT:
+            names.add("sink-pg")
+
+    return sorted(names)
+
+
 # ── Pair validation ──────────────────────────────────────────────────────────
 
 def _validate_pair(source: SourceSpec, sink: SinkSpec) -> None:
@@ -181,29 +337,21 @@ _DBMAZZ_DOCKERFILE_PATH = "e2e/Dockerfile"  # relative to repo root (build conte
 
 
 def _build_managed_pg_source_service(source: PostgresSourceSpec) -> dict:
-    """Build the docker compose service for a managed PostgreSQL source.
+    """Build the docker compose service for a Docker-managed PostgreSQL source.
 
-    Mounts the seed SQL file as a /docker-entrypoint-initdb.d entry so the
-    schema is created on first start. Uses logical replication settings
-    so dbmazz can subscribe.
+    If the source spec has a ``seed`` field, mounts the SQL file as a
+    /docker-entrypoint-initdb.d entry so the schema is created on first
+    start. Uses logical replication settings so dbmazz can subscribe.
     """
-    seed_path = FIXTURES_DIR / (source.seed or "postgres-seed.sql")
-    if not seed_path.exists():
-        raise FileNotFoundError(
-            f"seed file not found: {seed_path}. "
-            f"Either create it under e2e/fixtures/ or change the source's `seed:` field."
-        )
-
-    return {
+    service: dict = {
         "image": "postgres:16",
         "environment": {
             "POSTGRES_USER": "postgres",
             "POSTGRES_PASSWORD": "postgres",
             "POSTGRES_DB": "dbmazz",
         },
-        "ports": ["15432:5432"],
+        "ports": [f"{_SOURCE_PG_EXT_PORT}:{_SOURCE_PG_INT_PORT}"],
         "volumes": [
-            f"{seed_path.resolve()}:/docker-entrypoint-initdb.d/01-init.sql:ro",
             "source_pg_data:/var/lib/postgresql/data",
         ],
         "command": [
@@ -221,6 +369,19 @@ def _build_managed_pg_source_service(source: PostgresSourceSpec) -> dict:
         "networks": ["dbmazz"],
     }
 
+    if hasattr(source, "seed") and source.seed:
+        seed_path = FIXTURES_DIR / source.seed
+        if not seed_path.exists():
+            raise FileNotFoundError(
+                f"seed file not found: {seed_path}. "
+                f"Either create it under e2e/fixtures/ or change the source's `seed:` field."
+            )
+        service["volumes"].insert(
+            0, f"{seed_path.resolve()}:/docker-entrypoint-initdb.d/01-init.sql:ro"
+        )
+
+    return service
+
 
 # ── Service builders: sink ───────────────────────────────────────────────────
 
@@ -228,12 +389,15 @@ def _build_managed_starrocks_service() -> dict:
     """StarRocks all-in-one container with healthcheck."""
     return {
         "image": "starrocks/allin1-ubuntu:latest",
-        "ports": ["8030:8030", "9030:9030"],
+        "ports": [
+            f"{_SINK_SR_HTTP_EXT_PORT}:{_SINK_SR_HTTP_INT_PORT}",
+            f"{_SINK_SR_MYSQL_EXT_PORT}:{_SINK_SR_MYSQL_INT_PORT}",
+        ],
         "volumes": ["sink_starrocks_data:/data"],
         "healthcheck": {
             "test": [
                 "CMD-SHELL",
-                "mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' 2>/dev/null || exit 1",
+                f"mysql -h 127.0.0.1 -P {_SINK_SR_MYSQL_INT_PORT} -u root -e 'SELECT 1' 2>/dev/null || exit 1",
             ],
             "interval": "5s",
             "timeout": "10s",
@@ -256,12 +420,12 @@ def _build_starrocks_init_service() -> dict:
         "volumes": [f"{init_script.resolve()}:/init.sh:ro"],
         "entrypoint": ["/bin/sh", "/init.sh"],
         "environment": {
-            "SR_HOST": "sink-starrocks",
-            "SR_PORT": "9030",
+            "SR_HOST": _SINK_SR_SERVICE,
+            "SR_PORT": str(_SINK_SR_MYSQL_INT_PORT),
             "SR_DATABASE": "dbmazz",
         },
         "depends_on": {
-            "sink-starrocks": {"condition": "service_healthy"},
+            _SINK_SR_SERVICE: {"condition": "service_healthy"},
         },
         "networks": ["dbmazz"],
     }
@@ -276,7 +440,7 @@ def _build_managed_pg_sink_service() -> dict:
             "POSTGRES_PASSWORD": "postgres",
             "POSTGRES_DB": "dbmazz_target",
         },
-        "ports": ["25432:5432"],
+        "ports": [f"{_SINK_PG_EXT_PORT}:{_SINK_PG_INT_PORT}"],
         "volumes": ["sink_pg_data:/var/lib/postgresql/data"],
         "healthcheck": {
             "test": ["CMD-SHELL", "pg_isready -U postgres"],
@@ -298,19 +462,19 @@ def _build_dbmazz_service(source: SourceSpec, sink: SinkSpec) -> dict:
     SOURCE_URL / SINK_TYPE / etc.
 
     `depends_on` is computed dynamically based on which other services
-    are present (managed source/sink). For pure BYOD (both user-managed),
-    no depends_on entries are added — dbmazz is the only service.
+    are present (inferred from well-known localhost ports). For pure BYOD
+    (all remote URLs), no depends_on entries are added — dbmazz is the
+    only service.
     """
     repo_root = E2E_DIR.parent
 
     depends_on: dict = {}
-    if source.managed:
+    if isinstance(source, PostgresSourceSpec) and _extract_port(source.url) == _SOURCE_PG_EXT_PORT:
         depends_on["source-pg"] = {"condition": "service_healthy"}
-    if sink.managed:
-        if isinstance(sink, StarRocksSinkSpec):
-            depends_on["sink-starrocks-init"] = {"condition": "service_completed_successfully"}
-        elif isinstance(sink, PostgresSinkSpec):
-            depends_on["sink-pg"] = {"condition": "service_healthy"}
+    if isinstance(sink, StarRocksSinkSpec) and _extract_port(sink.url) == _SINK_SR_HTTP_EXT_PORT:
+        depends_on["sink-starrocks-init"] = {"condition": "service_completed_successfully"}
+    elif isinstance(sink, PostgresSinkSpec) and _extract_port(sink.url) == _SINK_PG_EXT_PORT:
+        depends_on["sink-pg"] = {"condition": "service_healthy"}
 
     service = {
         "build": {
@@ -351,16 +515,14 @@ def _build_env_file(source: SourceSpec, sink: SinkSpec, settings: PipelineSettin
 
     # ── Source vars ──
     if isinstance(source, PostgresSourceSpec):
-        if source.managed:
-            # When the source is managed, dbmazz connects to the source-pg
-            # container by its docker network name (not localhost!).
-            source_url = "postgres://postgres:postgres@source-pg:5432/dbmazz?replication=database"
-        else:
-            # User-provided URL — append ?replication=database if missing.
-            source_url = source.url or ""
-            if "replication=database" not in source_url:
-                sep = "&" if "?" in source_url else "?"
-                source_url = f"{source_url}{sep}replication=database"
+        # Rewrite localhost URL to docker-internal service name if needed.
+        source_url = _rewrite_url_for_docker(
+            source.url, _SOURCE_PG_EXT_PORT, _SOURCE_PG_INT_PORT, _SOURCE_PG_SERVICE,
+        )
+        # Append ?replication=database if missing.
+        if "replication=database" not in source_url:
+            sep = "&" if "?" in source_url else "?"
+            source_url = f"{source_url}{sep}replication=database"
 
         lines += [
             f"SOURCE_TYPE=postgres",
@@ -373,45 +535,31 @@ def _build_env_file(source: SourceSpec, sink: SinkSpec, settings: PipelineSettin
 
     # ── Sink vars ──
     if isinstance(sink, PostgresSinkSpec):
-        if sink.managed:
-            sink_url = "postgres://postgres:postgres@sink-pg:5432/dbmazz_target"
-            sink_database = "dbmazz_target"
-            sink_schema = "public"
-        else:
-            sink_url = sink.url or ""
-            sink_database = sink.database or ""
-            sink_schema = sink.schema_
-
+        sink_url = _rewrite_url_for_docker(
+            sink.url, _SINK_PG_EXT_PORT, _SINK_PG_INT_PORT, _SINK_PG_SERVICE,
+        )
         lines += [
             "SINK_TYPE=postgres",
             f"SINK_URL={sink_url}",
-            f"SINK_DATABASE={sink_database}",
-            f"SINK_SCHEMA={sink_schema}",
+            f"SINK_DATABASE={sink.database}",
+            f"SINK_SCHEMA={sink.schema_}",
         ]
 
     elif isinstance(sink, StarRocksSinkSpec):
-        if sink.managed:
-            sink_url = "http://sink-starrocks:8030"
-            sink_database = "dbmazz"
-            sink_user = "root"
-            sink_password = ""
-        else:
-            sink_url = sink.url or ""
-            sink_database = sink.database or ""
-            sink_user = sink.user
-            sink_password = sink.password
-
+        sink_url = _rewrite_url_for_docker(
+            sink.url, _SINK_SR_HTTP_EXT_PORT, _SINK_SR_HTTP_INT_PORT, _SINK_SR_SERVICE,
+        )
         lines += [
             "SINK_TYPE=starrocks",
             f"SINK_URL={sink_url}",
             f"SINK_PORT={sink.mysql_port}",
-            f"SINK_DATABASE={sink_database}",
-            f"SINK_USER={sink_user}",
-            f"SINK_PASSWORD={sink_password}",
+            f"SINK_DATABASE={sink.database}",
+            f"SINK_USER={sink.user}",
+            f"SINK_PASSWORD={sink.password}",
         ]
 
     elif isinstance(sink, SnowflakeSinkSpec):
-        # Snowflake is always user-managed (cloud).
+        # Snowflake: no URL rewriting (cloud service, no Docker container).
         lines += [
             "SINK_TYPE=snowflake",
             f"SINK_SNOWFLAKE_ACCOUNT={sink.account}",

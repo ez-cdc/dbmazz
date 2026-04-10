@@ -2,13 +2,14 @@
 
 Typer app with subcommands:
 
-    ez-cdc                    → interactive main menu (banner A)
-    ez-cdc quickstart [SINK]  → launch dashboard (banner A)
-    ez-cdc verify   [SINK]    → run validation tests (banner D)
-    ez-cdc up       [SINK]    → compose up (banner D)
-    ez-cdc down     [SINK]    → compose down (banner D)
-    ez-cdc logs     [SINK]    → tail compose logs (banner D)
-    ez-cdc status   [SINK]    → one-shot /status fetch (banner D)
+    ez-cdc                              → interactive main menu (banner A)
+    ez-cdc quickstart --source/--sink   → launch dashboard (banner A)
+    ez-cdc verify     --source/--sink   → run validation tests (banner D)
+    ez-cdc up         --source/--sink   → start infra containers (banner D)
+    ez-cdc down       --source/--sink   → stop compose stack (banner D)
+    ez-cdc logs       --source/--sink   → tail compose logs (banner D)
+    ez-cdc status     --source/--sink   → one-shot /status fetch (banner D)
+    ez-cdc clean      --source/--sink   → clean target database (banner D)
 
 Detects interactive TTY and prompts for missing args when possible. Falls
 back to hard errors in non-interactive mode.
@@ -17,7 +18,6 @@ back to hard errors in non-interactive mode.
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -27,10 +27,6 @@ from rich.console import Console
 from rich.text import Text
 
 from . import __version__, compose
-from .backends.base import TargetBackend
-from .backends.postgres import PostgresTarget
-from .backends.snowflake import SnowflakeTarget
-from .backends.starrocks import StarRocksTarget
 from .compose import ComposeError
 from .compose_builder import build_compose_for_pair, cache_dir_for
 from .datasources.loader import DatasourceError, DatasourceNotFoundError
@@ -46,7 +42,6 @@ from .datasources.schema import (
 from .datasources.store import DatasourceStore
 from .dbmazz import DbmazzClient, DbmazzError
 from .quickstart.dashboard import QuickstartDashboard
-from .source.postgres import PostgresSource
 from .tui import prompts
 from .tui.banner import render_banner_a, render_banner_d
 from .tui.report import (
@@ -177,42 +172,58 @@ def _main_menu() -> None:
 
         # Re-probe state on each iteration so the menu reflects current reality.
         ds_status = _probe_datasources_status()
-        running_pair = _probe_first_running_pair(ds_status)
+        infra_running = _is_infra_running()
 
-        _print_menu_status(ds_status, running_pair)
+        _print_menu_status(ds_status, infra_running)
 
-        # Build choices dynamically so the most relevant action is on top.
+        # Build choices dynamically based on state.
         choices: list[dict] = []
+        config_exists = DEFAULT_CONFIG_PATH.exists()
 
-        if running_pair is not None:
-            src_name, sk_name = running_pair
-            choices.append({
-                "name": f"Open running stack: {src_name} → {sk_name}",
-                "value": "__open_running__",
-                "description": "Reconnect the dashboard to the live stack",
-            })
-
-        choices += [
-            {"name": "Quickstart",
-             "value": "quickstart",
-             "description": "Launch a source/sink pair and watch replication"},
-            {"name": "Verify",
-             "value": "verify",
-             "description": "Run e2e validation tests"},
-            {"name": "Datasources",
-             "value": "datasources",
-             "description": "List / add / remove source and sink configs"},
-            {"name": "Clean target",
-             "value": "clean",
-             "description": "Truncate tables + drop audit columns + remove metadata"},
-            {"name": "Stacks",
-             "value": "compose",
-             "description": "Manage docker stacks (up/down/logs/status)"},
-            {"name": "Exit", "value": "exit", "description": ""},
-        ]
-
-        # Default to "open running" if a stack is up, else quickstart.
-        default = "__open_running__" if running_pair is not None else "quickstart"
+        if not config_exists:
+            # State 1: No ez-cdc.yaml
+            choices = [
+                {"name": "Init config", "value": "init_config",
+                 "description": "Create ez-cdc.yaml with demo datasources"},
+                {"name": "Datasources", "value": "datasources",
+                 "description": "List / add / remove source and sink configs"},
+                {"name": "Exit", "value": "exit", "description": ""},
+            ]
+            default = "init_config"
+        elif infra_running:
+            # State 3: Config exists, stack running
+            choices = [
+                {"name": "Quickstart", "value": "quickstart",
+                 "description": "Open the live dashboard"},
+                {"name": "Verify", "value": "verify",
+                 "description": "Run e2e validation tests"},
+                {"name": "Clean target", "value": "clean",
+                 "description": "Truncate tables + drop audit columns + remove metadata"},
+                {"name": "Logs", "value": "logs",
+                 "description": "Tail infra container logs"},
+                {"name": "Stop stack", "value": "stop_stack",
+                 "description": "Stop all infra containers"},
+                {"name": "Datasources", "value": "datasources",
+                 "description": "List / add / remove source and sink configs"},
+                {"name": "Exit", "value": "exit", "description": ""},
+            ]
+            default = "quickstart"
+        else:
+            # State 2: Config exists, no stack running
+            choices = [
+                {"name": "Start stack", "value": "start_stack",
+                 "description": "Start all infra containers from ez-cdc.yaml"},
+                {"name": "Quickstart", "value": "quickstart",
+                 "description": "Open the live dashboard"},
+                {"name": "Verify", "value": "verify",
+                 "description": "Run e2e validation tests"},
+                {"name": "Clean target", "value": "clean",
+                 "description": "Truncate tables + drop audit columns + remove metadata"},
+                {"name": "Datasources", "value": "datasources",
+                 "description": "List / add / remove source and sink configs"},
+                {"name": "Exit", "value": "exit", "description": ""},
+            ]
+            default = "start_stack"
 
         choice = prompts.select(
             "What would you like to do?",
@@ -228,30 +239,34 @@ def _main_menu() -> None:
             return
 
         try:
-            if choice == "__open_running__" and running_pair is not None:
-                src_name, sk_name = running_pair
-                quickstart(profile=None, source=src_name, sink=sk_name, keep_up=False, rebuild=False)
+            if choice == "init_config":
+                store = _load_store_for_flow()
+                _init_demos_inline(store)
+            elif choice == "start_stack":
+                up(rebuild=False)
+            elif choice == "stop_stack":
+                down()
             elif choice == "quickstart":
-                quickstart(profile=None, source=None, sink=None, keep_up=False, rebuild=False)
+                quickstart(source=None, sink=None, keep_up=False, rebuild=False)
             elif choice == "verify":
                 verify(
-                    profile=None, source=None, sink=None,
+                    source=None, sink=None,
                     quick=False, all_pairs=False, skip=None,
                     json_report=None, keep_up=False, no_up=False, rebuild=False,
                 )
             elif choice == "clean":
-                clean(profile=None, source=None, sink=None, yes=False)
+                clean(source=None, sink=None, yes=False)
+            elif choice == "logs":
+                logs()
             elif choice == "datasources":
                 _datasources_menu()
-            elif choice == "compose":
-                _compose_menu()
         except _BackToMenu:
             pass
-        except typer.Exit as e:
-            if e.exit_code == 130:
-                pass
-            else:
-                raise
+        except typer.Exit:
+            # Subcommands signal completion/failure via typer.Exit.
+            # In interactive menu mode we swallow ALL exit codes so the
+            # user returns to the menu instead of being dumped to the shell.
+            pass
 
         # Pause so the user can read the output of whatever action they
         # just ran. The next loop iteration will console.clear() and
@@ -289,6 +304,15 @@ def _probe_datasources_status() -> dict:
     }
 
 
+def _is_infra_running() -> bool:
+    """Check if the global infra compose stack has running containers."""
+    try:
+        from .compose_builder import infra_compose_path
+        return compose.is_running(infra_compose_path())
+    except (ComposeError, Exception):
+        return False
+
+
 def _probe_first_running_pair(ds_status: dict) -> Optional[tuple[str, str]]:
     """Return the first (source, sink) pair that has a running compose stack.
 
@@ -313,7 +337,7 @@ def _probe_first_running_pair(ds_status: dict) -> Optional[tuple[str, str]]:
     return None
 
 
-def _print_menu_status(ds_status: dict, running_pair: Optional[tuple[str, str]]) -> None:
+def _print_menu_status(ds_status: dict, infra_running: bool) -> None:
     """Print a one-line status banner above the menu prompt."""
     parts: list[Text] = []
 
@@ -335,10 +359,9 @@ def _print_menu_status(ds_status: dict, running_pair: Optional[tuple[str, str]])
             style="warning",
         ))
 
-    if running_pair is not None:
-        src_name, sk_name = running_pair
+    if infra_running:
         parts.append(Text(
-            f"  ● 1+ stack running ({src_name} → {sk_name})",
+            "  ● Infra stack running",
             style="info",
         ))
 
@@ -458,148 +481,11 @@ def _prompt_pick_any_datasource(verb: str) -> Optional[str]:
     return result
 
 
-def _compose_menu() -> None:
-    """Submenu for compose operations (up, down, logs, status).
-
-    Reads the user's datasources, lets them pick a (source, sink) pair, and
-    dispatches to the appropriate top-level command. For actions that
-    require an already-running stack (down/logs/status), only pairs whose
-    cache directory shows a running compose are listed.
-    """
-    action = prompts.select(
-        "Compose action:",
-        choices=[
-            {"name": "up",     "value": "up",     "description": "Start a stack"},
-            {"name": "down",   "value": "down",   "description": "Stop and destroy a stack"},
-            {"name": "logs",   "value": "logs",   "description": "Tail logs"},
-            {"name": "status", "value": "status", "description": "Fetch current status"},
-            {"name": "clean",  "value": "clean",  "description": "Clean target (truncate + drop audit cols)"},
-            {"name": "← Back", "value": "back",   "description": ""},
-        ],
-    )
-    if action in (None, "back"):
-        raise _BackToMenu()
-
-    if action == "clean":
-        try:
-            store = _load_store_for_flow()
-            _ensure_datasources_or_setup(store)
-            store.reload()
-            source_name = _pick_source_interactive(store)
-            sink_name = _pick_sink_interactive(store)
-        except _BackToMenu:
-            return
-        clean(source=source_name, sink=sink_name, yes=False)
-        return
-
-    needs_running_stack = action in ("down", "logs", "status")
-
-    if needs_running_stack:
-        pair = _pick_running_pair_or_back(action)
-        if pair is None:
-            return
-        source_name, sink_name = pair
-    else:
-        # `up` — let the user pick any pair from their datasources
-        try:
-            store = _load_store_for_flow()
-            _ensure_datasources_or_setup(store)
-            store.reload()
-            source_name = _pick_source_interactive(store)
-            sink_name = _pick_sink_interactive(store)
-        except _BackToMenu:
-            return
-
-    if action == "up":
-        up(source=source_name, sink=sink_name)
-    elif action == "down":
-        down(source=source_name, sink=sink_name)
-    elif action == "logs":
-        logs(source=source_name, sink=sink_name)
-    elif action == "status":
-        status(source=source_name, sink=sink_name)
-
-
-def _pick_running_pair_or_back(action_name: str) -> Optional[tuple[str, str]]:
-    """List currently-running source/sink pairs and let the user pick one.
-
-    Iterates over all (source, sink) combinations from the user's datasources,
-    checks each cache_dir/compose.yml with compose.is_running(), and shows
-    only the running ones. If nothing is running, prints a helpful message
-    and returns None (caller falls back to the compose menu).
-    """
-    try:
-        store = _load_store_for_flow()
-    except typer.Exit:
-        raise _BackToMenu()
-
-    if store.is_empty():
-        console.print()
-        console.print(Text(
-            f"  No datasources configured. Nothing can be {action_name}'d.",
-            style="warning",
-        ))
-        console.print()
-        raise _BackToMenu()
-
-    running_pairs: list[tuple[str, str]] = []
-    try:
-        for src_name in store.list_sources():
-            for sk_name in store.list_sinks():
-                cache = cache_dir_for(src_name, sk_name)
-                cf = cache / "compose.yml"
-                if compose.is_running(cf):
-                    running_pairs.append((src_name, sk_name))
-    except ComposeError as e:
-        console.print(Text(f"  Error querying docker: {e}", style="error"))
-        raise _BackToMenu()
-
-    if not running_pairs:
-        console.print()
-        console.print(Text(
-            f"  No stacks are currently running — nothing to {action_name}.",
-            style="warning",
-        ))
-        console.print(Text(
-            "  Start one with `ez-cdc up --source NAME --sink NAME` first.",
-            style="muted",
-        ))
-        console.print()
-        raise _BackToMenu()
-
-    choices = [
-        {"name": f"{s} → {k}", "value": f"{s}|{k}", "description": ""}
-        for (s, k) in running_pairs
-    ]
-    choices.append({"name": "← Back", "value": "__back__", "description": ""})
-
-    result = prompts.select(
-        f"Which running stack would you like to {action_name}?",
-        choices=choices,
-        default=choices[0]["value"],
-    )
-    if result is None or result == "__back__":
-        raise _BackToMenu()
-
-    src_name, sk_name = result.split("|", 1)
-    return (src_name, sk_name)
-
-
 # ── Datasource pair resolution ──────────────────────────────────────────────
 
 # Default config file location (configurable per-flow with --config).
 from .paths import E2E_DIR  # noqa: E402
 DEFAULT_CONFIG_PATH = E2E_DIR / "ez-cdc.yaml"
-
-# Legacy profile names from PR 1 mapped to (source_name, sink_name) pairs of
-# the bundled demo datasources. Lets old CI scripts that did
-# `ez-cdc verify pg-target` keep working — they get auto-translated to
-# `--source demo-pg --sink demo-pg-target`.
-LEGACY_PROFILE_PAIRS: dict[str, tuple[str, str]] = {
-    "starrocks":  ("demo-pg", "demo-starrocks"),
-    "pg-target":  ("demo-pg", "demo-pg-target"),
-    "snowflake":  ("demo-pg", "demo-snowflake"),
-}
 
 
 def _load_store_for_flow(
@@ -622,9 +508,8 @@ def _load_store_for_flow(
 def _ensure_datasources_or_setup(store: DatasourceStore) -> None:
     """Validate that the store has at least one source AND one sink.
 
-    If not, drives the user through one of three remediation paths in
-    interactive mode (configure now, use bundled demos, edit YAML manually),
-    or exits with a clear error in non-interactive mode.
+    In non-interactive mode, exits with a clear error. In interactive mode,
+    offers to bootstrap the bundled demos as the simplest path forward.
 
     Raises _BackToMenu if the user cancels — caught by the main menu loop.
     """
@@ -634,70 +519,14 @@ def _ensure_datasources_or_setup(store: DatasourceStore) -> None:
     if not is_interactive():
         console.print(Text(
             f"Error: no datasources configured in {store.path}\n"
-            f"  Run `ez-cdc datasource init-demos` to create the bundled demos,\n"
-            f"  or `ez-cdc datasource add` to configure your own.",
+            f"  Run `ez-cdc` to set up, or `ez-cdc datasource init-demos` "
+            f"to create the bundled demos.",
             style="error",
         ))
         raise typer.Exit(2)
 
-    console.print()
-    console.print(Text(
-        "  ⚠ No datasources configured yet. You need at least one source "
-        "and one sink before you can run any flow.",
-        style="warning",
-    ))
-    console.print()
-
-    choice = prompts.select(
-        "How do you want to set them up?",
-        choices=[
-            {"name": "Use the bundled demo datasources", "value": "demos",
-             "description": "Adds demo-pg + demo-starrocks + demo-pg-target (no config needed)"},
-            {"name": "Configure them now (interactive wizard)", "value": "wizard",
-             "description": "Runs `ez-cdc datasource add` for source then sink"},
-            {"name": "Edit ez-cdc.yaml manually", "value": "manual",
-             "description": "Show me the schema and let me edit"},
-            {"name": "← Back", "value": "back", "description": ""},
-        ],
-        default="demos",
-    )
-
-    if choice in (None, "back"):
-        raise _BackToMenu()
-
-    if choice == "demos":
-        _init_demos_inline(store)
-        return
-
-    if choice == "wizard":
-        from .datasources.wizard import run_add_wizard
-        # Run the wizard at least twice (need both a source and a sink).
-        while not store.has_any():
-            console.print()
-            if not store.list_sources():
-                console.print(Text("  Step: configure a source", style="info"))
-            elif not store.list_sinks():
-                console.print(Text("  Step: configure a sink", style="info"))
-            result = run_add_wizard(store, console)
-            if result is None:
-                # User cancelled mid-wizard. Loop back to the top-level
-                # remediation menu so they can pick again.
-                raise _BackToMenu()
-        return
-
-    if choice == "manual":
-        console.print()
-        console.print(Text(
-            f"  Edit {store.path} to add sources/sinks.",
-            style="info",
-        ))
-        console.print(Text(
-            "  See e2e/ez-cdc.example.yaml for the schema "
-            "(or `ez-cdc datasource init-demos` to bootstrap).",
-            style="muted",
-        ))
-        console.print()
-        raise typer.Exit(0)
+    # Interactive: init demos as the simplest path.
+    _init_demos_inline(store)
 
 
 def _init_demos_inline(store: DatasourceStore) -> None:
@@ -721,13 +550,12 @@ def _init_demos_inline(store: DatasourceStore) -> None:
 
 
 def _resolve_pair(
-    positional: Optional[str],
     source_name: Optional[str],
     sink_name: Optional[str],
     *,
     config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> tuple[str, SourceSpec, str, SinkSpec, Path, Path]:
-    """Resolve a (source, sink) pair from positional arg / flags / interactive picker.
+    """Resolve a (source, sink) pair from flags / interactive picker.
 
     Drives the user through the gate (_ensure_datasources_or_setup) if no
     datasources are configured. Returns:
@@ -735,24 +563,11 @@ def _resolve_pair(
         (source_name, source_spec, sink_name, sink_spec, compose_path, env_path)
 
     Resolution order:
-      1. If positional matches a legacy profile name (starrocks/pg-target/snowflake),
-         map it to the demo pair (auto-importing demos if missing) and ignore
-         --source/--sink flags.
-      2. Else use the explicit --source/--sink flags if both given.
-      3. Else, in interactive mode, prompt with selectors. In non-interactive
+      1. Use the explicit --source/--sink flags if both given.
+      2. Else, in interactive mode, prompt with selectors. In non-interactive
          mode, error out clearly.
     """
     store = _load_store_for_flow(config_path)
-
-    # Legacy profile name handling — auto-import demos if needed.
-    if positional and positional in LEGACY_PROFILE_PAIRS:
-        if not store.has_any():
-            _init_demos_inline(store)
-        legacy_src, legacy_sk = LEGACY_PROFILE_PAIRS[positional]
-        if not store.exists(legacy_src) or not store.exists(legacy_sk):
-            _init_demos_inline(store)
-        source_name = source_name or legacy_src
-        sink_name = sink_name or legacy_sk
 
     # Gate: must have at least one source + one sink.
     _ensure_datasources_or_setup(store)
@@ -848,16 +663,26 @@ def _pick_sink_interactive(store: DatasourceStore) -> str:
 def _short_summary(spec) -> str:
     """One-line summary of a datasource spec for selector prompts."""
     if isinstance(spec, PostgresSourceSpec):
-        if spec.managed:
-            return f"managed PG · tables={','.join(spec.tables)}"
-        return f"user PG · {len(spec.tables)} tables"
+        return f"PG · {len(spec.tables)} tables"
     if isinstance(spec, PostgresSinkSpec):
-        return "managed PG" if spec.managed else "user PG"
+        return f"PG ({_redact_url(spec.url)})"
     if isinstance(spec, StarRocksSinkSpec):
-        return "managed StarRocks" if spec.managed else f"user StarRocks ({spec.url})"
+        return f"StarRocks ({_redact_url(spec.url)})"
     if isinstance(spec, SnowflakeSinkSpec):
         return f"Snowflake ({spec.account})"
     return spec.type
+
+
+def _redact_url(url: str) -> str:
+    """Redact credentials from a URL, keeping host:port."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or "?"
+        port = parsed.port
+        return f"{host}:{port}" if port else host
+    except Exception:
+        return "..."
 
 
 # (The old `_ensure_env_file_if_needed` family of helpers from PR 1 was
@@ -876,15 +701,11 @@ def _short_summary(spec) -> str:
 
 @app.command(help="Launch a source/sink pair and watch replication live in a terminal dashboard.")
 def quickstart(
-    profile: Optional[str] = typer.Argument(
-        None,
-        help="Legacy profile name (starrocks, pg-target, snowflake). For explicit pairs use --source/--sink.",
-    ),
     source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
     sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
     keep_up: bool = typer.Option(
         False, "--keep-up",
-        help="Don't tear down the stack on exit (leave it running).",
+        help="Don't stop dbmazz on exit (leave it running).",
     ),
     rebuild: bool = typer.Option(
         False, "--rebuild",
@@ -894,59 +715,30 @@ def quickstart(
     _show_banner_a()
 
     src_name, src_spec, sk_name, sk_spec, compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
+        source, sink,
     )
 
-    # If a stack is already running for this pair, offer reuse/recreate.
-    already_running = False
-    try:
-        already_running = compose.is_running(compose_path)
-    except ComposeError:
-        pass
-
-    if already_running:
+    # Pre-flight: verify source + sink are reachable before starting dbmazz.
+    from .preflight import run_preflight
+    console.print()
+    console.print(format_step("Running pre-flight checks..."))
+    if not run_preflight(src_spec, sk_spec, console, src_name=src_name, sk_name=sk_name):
         console.print()
         console.print(Text(
-            f"  A stack for '{src_name} → {sk_name}' is already running.",
-            style="warning",
+            "  Fix the issues above, or run `ez-cdc up` if the stack isn't started yet.",
+            style="error",
         ))
-        console.print()
-        action = prompts.select(
-            "What do you want to do?",
-            choices=[
-                {"name": "Reuse it",             "value": "reuse",
-                 "description": "Open the dashboard on the existing stack"},
-                {"name": "Destroy and recreate", "value": "recreate",
-                 "description": "docker compose down -v, then up (clean slate)"},
-                {"name": "← Back",                "value": "back", "description": ""},
-            ],
-            default="reuse",
-        )
-        if action in (None, "back"):
-            raise _BackToMenu()
+        raise typer.Exit(2)
+    console.print(format_step_ok("Pre-flight checks passed"))
 
-        if action == "recreate":
-            console.print()
-            console.print(format_step(f"Destroying existing stack..."))
-            try:
-                compose.down(compose_path, remove_volumes=True)
-            except ComposeError as e:
-                console.print(Text(f"Failed to tear down stack: {e}", style="error"))
-                raise typer.Exit(2)
-            console.print(format_step_ok(f"Destroying existing stack"))
-            already_running = False
-
-    console.print()
-    if already_running:
-        console.print(format_step_ok(f"Reusing existing stack: {src_name} → {sk_name}"))
-    else:
-        console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
-        try:
-            compose.up(compose_path, wait=True, build=rebuild)
-        except ComposeError as e:
-            console.print(Text(f"Failed to start compose: {e}", style="error"))
-            raise typer.Exit(2)
-        console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
+    # Start dbmazz only (infra should already be running via `ez-cdc up`).
+    console.print(format_step(f"Starting dbmazz: {src_name} → {sk_name}"))
+    try:
+        compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild)
+    except ComposeError as e:
+        console.print(Text(f"Failed to start dbmazz: {e}", style="error"))
+        raise typer.Exit(2)
+    console.print(format_step_ok(f"Starting dbmazz: {src_name} → {sk_name}"))
 
     # Connect clients to the actual containers/endpoints
     dbmazz_client = DbmazzClient("http://localhost:8080")
@@ -973,18 +765,20 @@ def quickstart(
     # The traffic generator is **always created** but **always starts paused**
     # (rule from PR4 design discussion: never auto-generate writes — the user
     # opts in explicitly via the `[t]` keybinding). This applies to both
-    # managed sources (demos) and user-managed sources (BYOD). For BYOD, the
-    # user is responsible for the consequences of pressing `[t]` against their
-    # real database — the dashboard surfaces a warning in the header so it's
-    # not a silent surprise.
+    # demo sources and user-managed sources (BYOD). For BYOD, the user is
+    # responsible for the consequences of pressing `[t]` against their real
+    # database — the dashboard surfaces a warning in the header so it's not
+    # a silent surprise.
     dashboard = QuickstartDashboard(
-        profile=_make_profile_shim(src_name, sk_name, src_spec),
+        name=f"{src_name}-to-{sk_name}",
+        source_dsn=src_spec.url,
+        tables=tuple(src_spec.tables),
+        compose_file=compose_path,
         dbmazz=dbmazz_client,
         target=target,
         console=console,
         source_counts_fn=lambda: {t: source_client.count_rows(t) for t in src_spec.tables},
         traffic_rate_eps=15.0,
-        source_is_managed=bool(getattr(src_spec, "managed", False)),
     )
     try:
         dashboard.run()
@@ -998,30 +792,20 @@ def quickstart(
     console.print()
     if keep_up:
         console.print(Text(
-            f"Stack left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
+            f"  dbmazz left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
             style="muted",
         ))
         _print_thanks()
         return
 
-    confirmed = True
-    if is_interactive():
-        ans = prompts.confirm("Stop and destroy the stack?", default=True)
-        confirmed = bool(ans)
-
-    if confirmed:
-        console.print()
-        try:
-            compose.down(compose_path, remove_volumes=True)
-        except ComposeError as e:
-            console.print(Text(f"Failed to stop compose: {e}", style="error"))
-            raise typer.Exit(2)
-        console.print(Text("Stack destroyed.", style="muted"))
+    # Stop only dbmazz — infra stays running.
+    console.print(format_step("Stopping dbmazz..."))
+    try:
+        compose.stop_services(compose_path, ["dbmazz"])
+    except ComposeError as e:
+        console.print(Text(f"Warning: failed to stop dbmazz: {e}", style="warning"))
     else:
-        console.print(Text(
-            f"Stack left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
-            style="muted",
-        ))
+        console.print(format_step_ok("Stopping dbmazz"))
 
     _print_thanks()
 
@@ -1030,16 +814,12 @@ def quickstart(
 
 @app.command(help="Run e2e validation tests for a source/sink pair (or all pairs with --all).")
 def verify(
-    profile: Optional[str] = typer.Argument(
-        None,
-        help="Legacy profile name (starrocks, pg-target, snowflake). For explicit pairs use --source/--sink.",
-    ),
     source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
     sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
     quick: bool = typer.Option(False, "--quick", help="Tier 1 only (~30s per pair)."),
     all_pairs: bool = typer.Option(
         False, "--all",
-        help="Run verify for all (managed source × managed sink) pairs in your datasources.",
+        help="Run verify for all source × sink pairs in your datasources.",
     ),
     skip: Optional[str] = typer.Option(
         None, "--skip", help="Comma-separated check IDs to skip, e.g. --skip C3,D7"
@@ -1070,7 +850,7 @@ def verify(
         return
 
     src_name, src_spec, sk_name, sk_spec, compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
+        source, sink,
     )
     exit_code = _verify_one(
         src_name, src_spec, sk_name, sk_spec, compose_path,
@@ -1101,24 +881,35 @@ def _verify_one(
 ) -> int:
     """Run verify for a single (source, sink) pair. Returns exit code."""
     console.print()
-    mode = "read-only" if not src_spec.managed else "full"
     console.print(
         Text(
             f"EZ-CDC e2e   •   {src_name} → {sk_name}   •   "
-            f"tier: {'1' if quick else '1+2'} ({mode})",
+            f"tier: {'1' if quick else '1+2'}",
             style="brand",
         )
     )
     console.print()
 
     if not no_up:
-        console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
-        try:
-            compose.up(compose_path, wait=True, build=rebuild)
-        except ComposeError as e:
-            console.print(Text(f"Failed to start compose: {e}", style="error"))
+        # Pre-flight: verify source + sink are reachable before starting dbmazz.
+        from .preflight import run_preflight
+        console.print(format_step("Running pre-flight checks..."))
+        if not run_preflight(src_spec, sk_spec, console, src_name=src_name, sk_name=sk_name):
+            console.print()
+            console.print(Text(
+                "  Fix the issues above, or run `ez-cdc up` if the stack isn't started yet.",
+                style="error",
+            ))
             return 2
-        console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
+        console.print(format_step_ok("Pre-flight checks passed"))
+
+        console.print(format_step(f"Starting dbmazz: {src_name} → {sk_name}"))
+        try:
+            compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild)
+        except ComposeError as e:
+            console.print(Text(f"Failed to start dbmazz: {e}", style="error"))
+            return 2
+        console.print(format_step_ok(f"Starting dbmazz: {src_name} → {sk_name}"))
 
     # Run the verify suite using the spec-based runner.
     runner = VerifyRunner.from_specs(
@@ -1141,13 +932,13 @@ def _verify_one(
 
     if not keep_up:
         console.print()
-        console.print(format_step("Tearing down compose..."))
+        console.print(format_step("Stopping dbmazz..."))
         try:
-            compose.down(compose_path, remove_volumes=True)
+            compose.stop_services(compose_path, ["dbmazz"])
         except ComposeError as e:
-            console.print(Text(f"Warning: compose down failed: {e}", style="warning"))
+            console.print(Text(f"Warning: failed to stop dbmazz: {e}", style="warning"))
         else:
-            console.print(format_step_ok("Tearing down compose"))
+            console.print(format_step_ok("Stopping dbmazz"))
 
     return 0 if report.ok else 1
 
@@ -1161,35 +952,25 @@ def _verify_all(
     no_up: bool,
     rebuild: bool,
 ) -> None:
-    """Run verify for every (managed source × managed sink) pair in the store.
-
-    Per D38, --all only runs combinations where both source and sink are
-    `managed: true` — those are the safe, no-credentials-needed pairs that
-    matter for CI. User-managed datasources are excluded.
-    """
+    """Run verify for every source × sink pair in the store."""
     store = _load_store_for_flow()
     _ensure_datasources_or_setup(store)
     store.reload()
 
-    # Build the list of (source, sink) pairs to run
-    managed_sources = [
-        n for n in store.list_sources() if store.get_source(n).managed
-    ]
-    managed_sinks = [
-        n for n in store.list_sinks() if store.get_sink(n).managed
-    ]
+    sources = store.list_sources()
+    sinks = store.list_sinks()
 
-    if not managed_sources or not managed_sinks:
+    if not sources or not sinks:
         console.print(Text(
-            "Error: --all needs at least one managed source AND one managed sink. "
+            "Error: --all needs at least one source AND one sink. "
             "Run `ez-cdc datasource init-demos` to bootstrap them.",
             style="error",
         ))
         raise typer.Exit(2)
 
     pairs: list[tuple[str, SourceSpec, str, SinkSpec]] = []
-    for src_name in managed_sources:
-        for sk_name in managed_sinks:
+    for src_name in sources:
+        for sk_name in sinks:
             src_spec = store.get_source(src_name)
             sk_spec = store.get_sink(sk_name)
             pairs.append((src_name, src_spec, sk_name, sk_spec))
@@ -1236,75 +1017,97 @@ def _verify_all(
     raise typer.Exit(1 if any_failed else 0)
 
 
+    return services
+
+
 # ── Subcommand: up ───────────────────────────────────────────────────────────
 
-@app.command(help="Start the compose stack for a source/sink pair.")
+@app.command(help="Start all infra containers (source + sink DBs) defined in ez-cdc.yaml.")
 def up(
-    profile: Optional[str] = typer.Argument(
-        None, help="Legacy profile name. Use --source/--sink for explicit pairs."
-    ),
-    source: Optional[str] = typer.Option(None, "--source"),
-    sink: Optional[str] = typer.Option(None, "--sink"),
     rebuild: bool = typer.Option(
         False, "--rebuild",
-        help="Force `docker compose up --build`. Default reuses the cached dbmazz image.",
+        help="Force `docker compose up --build`. Default reuses cached images.",
     ),
 ) -> None:
     _show_banner_d()
-    src_name, _src_spec, sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
-    )
+
+    store = _load_store_for_flow()
+    _ensure_datasources_or_setup(store)
+    store.reload()
+
+    from .compose_builder import build_infra_compose, list_infra_services
+
+    services = list_infra_services(store.data.sources, store.data.sinks)
+    if not services:
+        console.print()
+        console.print(Text(
+            "  No infra containers needed — all datasources are remote.",
+            style="muted",
+        ))
+        _final_padding()
+        return
+
+    compose_path = build_infra_compose(store.data.sources, store.data.sinks)
+
     console.print()
-    console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
+    console.print(format_step(f"Starting infra ({', '.join(services)})"))
     try:
         compose.up(compose_path, wait=True, build=rebuild)
     except ComposeError as e:
-        console.print(Text(f"Failed to start compose: {e}", style="error"))
+        console.print(Text(f"Failed to start infra: {e}", style="error"))
         raise typer.Exit(2)
-    console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
+    console.print(format_step_ok(f"Infra started ({', '.join(services)})"))
     _final_padding()
 
 
 # ── Subcommand: down ─────────────────────────────────────────────────────────
 
-@app.command(help="Stop and destroy the compose stack for a source/sink pair.")
+@app.command(help="Stop and destroy all infra containers.")
 def down(
-    profile: Optional[str] = typer.Argument(None),
-    source: Optional[str] = typer.Option(None, "--source"),
-    sink: Optional[str] = typer.Option(None, "--sink"),
     keep_volumes: bool = typer.Option(
         False, "--keep-volumes", help="Keep named volumes (don't run with -v)."
     ),
 ) -> None:
     _show_banner_d()
-    src_name, _src_spec, sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
-    )
+
+    from .compose_builder import infra_compose_path
+
+    compose_path = infra_compose_path()
+    if not compose_path.exists():
+        console.print()
+        console.print(Text("  No infra stack found. Nothing to stop.", style="muted"))
+        _final_padding()
+        return
+
     console.print()
-    console.print(format_step(f"Stopping compose: {src_name} → {sk_name}"))
+    console.print(format_step("Stopping infra stack"))
     try:
         compose.down(compose_path, remove_volumes=not keep_volumes)
     except ComposeError as e:
-        console.print(Text(f"Failed to stop compose: {e}", style="error"))
+        console.print(Text(f"Failed to stop infra: {e}", style="error"))
         raise typer.Exit(2)
-    console.print(format_step_ok(f"Stopping compose: {src_name} → {sk_name}"))
+    console.print(format_step_ok("Infra stack stopped"))
     _final_padding()
 
 
 # ── Subcommand: logs ─────────────────────────────────────────────────────────
 
-@app.command(help="Tail compose logs for a source/sink pair.")
+@app.command(help="Tail logs for the infra stack.")
 def logs(
-    profile: Optional[str] = typer.Argument(None),
-    source: Optional[str] = typer.Option(None, "--source"),
-    sink: Optional[str] = typer.Option(None, "--sink"),
     follow: bool = typer.Option(True, "--follow/--no-follow", "-f", help="Stream logs."),
     tail: int = typer.Option(100, "--tail", "-n", help="Number of lines to show from the end."),
 ) -> None:
     _show_banner_d()
-    _src_name, _src_spec, _sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
-    )
+
+    from .compose_builder import infra_compose_path
+
+    compose_path = infra_compose_path()
+    if not compose_path.exists():
+        console.print()
+        console.print(Text("  No infra stack found. Run `ez-cdc up` first.", style="warning"))
+        _final_padding()
+        return
+
     console.print()
     try:
         compose.logs(compose_path, follow=follow, tail=tail)
@@ -1318,7 +1121,6 @@ def logs(
 
 @app.command(help="Fetch a one-shot status snapshot from dbmazz.")
 def status(
-    profile: Optional[str] = typer.Argument(None),
     source: Optional[str] = typer.Option(None, "--source"),
     sink: Optional[str] = typer.Option(None, "--sink"),
 ) -> None:
@@ -1327,7 +1129,7 @@ def status(
     # We still resolve the pair so we can show what's running, and so the
     # gate runs (i.e., the user gets a useful error if there are no datasources).
     _src_name, _src_spec, _sk_name, _sk_spec, _compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
+        source, sink,
     )
     client = DbmazzClient("http://localhost:8080")
     try:
@@ -1363,10 +1165,6 @@ def status(
 
 @app.command(help="Clean target database — truncate tables, drop audit columns, remove dbmazz metadata.")
 def clean(
-    profile: Optional[str] = typer.Argument(
-        None,
-        help="Legacy profile name. For explicit pairs use --source/--sink.",
-    ),
     source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
     sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
     yes: bool = typer.Option(
@@ -1377,7 +1175,7 @@ def clean(
     _show_banner_d()
 
     src_name, src_spec, sk_name, sk_spec, _compose_path, _env_path = _resolve_pair(
-        profile, source, sink,
+        source, sink,
     )
 
     tables = list(getattr(src_spec, "tables", []))
@@ -1402,19 +1200,9 @@ def clean(
             _final_padding()
             return
 
-    # 1. Tear down the compose stack if running — dbmazz must restart
-    #    after clean so it re-runs setup (creates _DBMAZZ schema, audit cols).
-    compose_path = _compose_path
-    if compose_path.exists():
-        try:
-            if compose.is_running(compose_path):
-                console.print(Text("  Stopping compose stack...", style="info"))
-                compose.down(compose_path)
-                console.print(Text("  ✓ Stack stopped", style="success"))
-        except Exception:
-            pass  # best-effort; stack might not be running
-
-    # 2. Clean the target
+    # Clean only touches the target database — it does NOT stop any
+    # containers.  The user can re-run verify/quickstart after clean and
+    # dbmazz will re-snapshot into the now-empty target.
     try:
         target = _instantiate_backend_from_spec(sk_spec)
         target.connect()
@@ -1448,23 +1236,7 @@ from .instantiate import (  # noqa: E402
 )
 
 
-def _make_profile_shim(src_name: str, sk_name: str, src_spec: SourceSpec):
-    """Build a minimal object the QuickstartDashboard accepts as `profile`.
 
-    The dashboard from PR 1 expects an object with `.name`, `.dbmazz_http_url`,
-    `.source_dsn`, `.compose_profile`, and `.tables`. With the datasources
-    refactor we no longer have ProfileSpec instances, so we synthesize a
-    duck-typed shim from the source spec for backward compat with the
-    dashboard rendering code (which is unchanged in PR 4).
-    """
-    from types import SimpleNamespace
-    return SimpleNamespace(
-        name=f"{src_name}-to-{sk_name}",
-        compose_profile=f"{src_name}-to-{sk_name}",
-        dbmazz_http_url="http://localhost:8080",
-        source_dsn="postgres://postgres:postgres@localhost:15432/dbmazz" if src_spec.managed else (src_spec.url or ""),
-        tables=tuple(src_spec.tables),
-    )
 
 
 def _print_thanks() -> None:

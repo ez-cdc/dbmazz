@@ -12,12 +12,12 @@ Flow:
      for collisions in the store).
   2. Ask for the role (source or sink).
   3. Ask for the type (postgres / starrocks / snowflake — sinks only).
-  4. Ask whether it's managed (`Run a sample one for me`) or user-provided
-     (`I have my own connection details`). Snowflake is forced to user-only.
-  5. Type-specific connection prompts. For user-provided Postgres sources,
-     this includes a connection test and an interactive table picker via
+  4. Type-specific connection prompts. All specs require explicit
+     connection details; a "Use demo defaults?" shortcut pre-fills
+     localhost URLs for quick local testing. For Postgres sources, this
+     includes a connection test and an interactive table picker via
      pg_tables.
-  6. Save to the store and persist to disk.
+  5. Save to the store and persist to disk.
 
 Cancellation handling:
   Any prompt can be cancelled with Ctrl+C / Esc. We catch _Cancelled
@@ -73,13 +73,12 @@ def run_add_wizard(store: DatasourceStore, console: Console) -> Optional[str]:
         name = _prompt_name(store, console)
         role = _prompt_role()
         type_ = _prompt_type(role)
-        managed = _prompt_managed(type_)
 
         if role == "source":
-            spec = _build_source_spec(console, type_, managed)
+            spec = _build_source_spec(console, type_)
             store.add_source(name, spec)
         else:
-            spec = _build_sink_spec(console, type_, managed)
+            spec = _build_sink_spec(console, type_)
             store.add_sink(name, spec)
 
         store.save()
@@ -180,75 +179,21 @@ def _prompt_type(role: str) -> str:
     return type_
 
 
-# ── Step 4: managed or user-provided ────────────────────────────────────────
+# ── Step 4: source spec ─────────────────────────────────────────────────────
 
-def _prompt_managed(type_: str) -> bool:
-    if type_ == "snowflake":
-        return False  # cloud-only
-
-    answer = prompts.select(
-        "Where will this database run?",
-        choices=[
-            {"name": "Run a sample one for me", "value": "managed",
-             "description": "ez-cdc starts it in a Docker container"},
-            {"name": "I have my own",            "value": "user",
-             "description": "You provide the connection details"},
-            {"name": "← Cancel",                 "value": "cancel", "description": ""},
-        ],
-        default="managed",
-    )
-    if answer in (None, "cancel"):
-        raise _Cancelled()
-    return answer == "managed"
-
-
-# ── Step 5a: source spec ─────────────────────────────────────────────────────
-
-def _build_source_spec(console: Console, type_: str, managed: bool) -> SourceSpec:
+def _build_source_spec(console: Console, type_: str) -> SourceSpec:
     if type_ != "postgres":
         raise _Cancelled()
-    if managed:
-        return _build_managed_pg_source(console)
-    return _build_user_pg_source(console)
+    return _build_pg_source(console)
 
 
-def _build_managed_pg_source(console: Console) -> PostgresSourceSpec:
+_DEMO_PG_SOURCE_URL = "postgres://postgres:postgres@localhost:15432/postgres"
+
+
+def _build_pg_source(console: Console) -> PostgresSourceSpec:
     console.print()
     console.print(Text(
-        "  Managed PostgreSQL source — ez-cdc will start it in a Docker container.",
-        style="info",
-    ))
-    console.print()
-
-    seed = prompts.text(
-        "Seed SQL file in e2e/fixtures/ (default: postgres-seed.sql)",
-        default="postgres-seed.sql",
-    )
-    if seed is None:
-        raise _Cancelled()
-    seed = seed.strip() or "postgres-seed.sql"
-
-    tables_raw = prompts.text(
-        "Tables to replicate (comma-separated):",
-        default="orders,order_items",
-    )
-    if tables_raw is None:
-        raise _Cancelled()
-    tables = [t.strip() for t in tables_raw.split(",") if t.strip()]
-    if not tables:
-        raise DatasourceError("at least one table is required")
-
-    return PostgresSourceSpec(
-        managed=True,
-        seed=seed,
-        tables=tables,
-    )
-
-
-def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
-    console.print()
-    console.print(Text(
-        "  User-provided PostgreSQL source — you'll need:",
+        "  PostgreSQL source — you'll need:",
         style="info",
     ))
     console.print(Text("    • A connection URL with replication permission", style="muted"))
@@ -256,9 +201,18 @@ def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
     console.print(Text("    • The database must have wal_level=logical",      style="muted"))
     console.print()
 
+    use_demo = prompts.confirm(
+        "Use demo defaults? (localhost:15432 Docker source)",
+        default=False,
+    )
+    if use_demo is None:
+        raise _Cancelled()
+
+    default_url = _DEMO_PG_SOURCE_URL if use_demo else ""
+
     url = prompts.text(
         "Connection URL (postgres://user:pass@host:port/dbname):",
-        default="",
+        default=default_url,
     )
     if url is None or not url.strip():
         raise _Cancelled()
@@ -272,6 +226,16 @@ def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
         )
     if not parsed.hostname:
         raise DatasourceError("URL must include a hostname")
+
+    seed: str | None = None
+    if use_demo:
+        seed_raw = prompts.text(
+            "Seed SQL file in e2e/fixtures/ (default: postgres-seed.sql)",
+            default="postgres-seed.sql",
+        )
+        if seed_raw is None:
+            raise _Cancelled()
+        seed = seed_raw.strip() or "postgres-seed.sql"
 
     slot = prompts.text("Replication slot name", default="dbmazz_slot")
     if slot is None:
@@ -304,10 +268,15 @@ def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
         ))
         console.print()
 
+    default_tables = "orders,order_items" if use_demo else ""
+
     if discovered_tables:
         tables = _pick_tables_interactive(discovered_tables)
     else:
-        tables_raw = prompts.text("Tables to replicate (comma-separated):", default="")
+        tables_raw = prompts.text(
+            "Tables to replicate (comma-separated):",
+            default=default_tables,
+        )
         if tables_raw is None:
             raise _Cancelled()
         tables = [t.strip() for t in tables_raw.split(",") if t.strip()]
@@ -316,8 +285,8 @@ def _build_user_pg_source(console: Console) -> PostgresSourceSpec:
         raise DatasourceError("at least one table is required")
 
     return PostgresSourceSpec(
-        managed=False,
         url=url,
+        seed=seed,
         replication_slot=slot,
         publication=pub,
         tables=tables,
@@ -367,38 +336,42 @@ def _pick_tables_interactive(available: list[str]) -> list[str]:
     return result
 
 
-# ── Step 5b: sink spec ───────────────────────────────────────────────────────
+# ── Step 5: sink spec ────────────────────────────────────────────────────────
 
-def _build_sink_spec(console: Console, type_: str, managed: bool) -> SinkSpec:
+def _build_sink_spec(console: Console, type_: str) -> SinkSpec:
     if type_ == "postgres":
-        return _build_pg_sink(console, managed)
+        return _build_pg_sink(console)
     if type_ == "starrocks":
-        return _build_starrocks_sink(console, managed)
+        return _build_starrocks_sink(console)
     if type_ == "snowflake":
         return _build_snowflake_sink(console)
     raise _Cancelled()
 
 
-def _build_pg_sink(console: Console, managed: bool) -> PostgresSinkSpec:
-    if managed:
-        console.print()
-        console.print(Text(
-            "  Managed PostgreSQL sink — ez-cdc will start it in a Docker container.",
-            style="info",
-        ))
-        console.print()
-        return PostgresSinkSpec(managed=True)
+_DEMO_PG_SINK_URL = "postgres://postgres:postgres@localhost:15433/postgres"
+_DEMO_SR_URL = "http://localhost:18030"
 
+
+def _build_pg_sink(console: Console) -> PostgresSinkSpec:
     console.print()
-    console.print(Text("  User-provided PostgreSQL sink.", style="info"))
+    console.print(Text("  PostgreSQL sink.", style="info"))
     console.print()
 
-    url = prompts.text("Connection URL (postgres://user:pass@host:port/dbname):", default="")
+    use_demo = prompts.confirm(
+        "Use demo defaults? (localhost:15433 Docker sink)",
+        default=False,
+    )
+    if use_demo is None:
+        raise _Cancelled()
+
+    default_url = _DEMO_PG_SINK_URL if use_demo else ""
+
+    url = prompts.text("Connection URL (postgres://user:pass@host:port/dbname):", default=default_url)
     if url is None or not url.strip():
         raise _Cancelled()
     url = url.strip()
 
-    database = prompts.text("Target database name:", default="")
+    database = prompts.text("Target database name:", default="postgres" if use_demo else "")
     if database is None or not database.strip():
         raise _Cancelled()
     database = database.strip()
@@ -409,33 +382,32 @@ def _build_pg_sink(console: Console, managed: bool) -> PostgresSinkSpec:
     schema = schema.strip() or "public"
 
     return PostgresSinkSpec(
-        managed=False,
         url=url,
         database=database,
         **{"schema": schema},  # alias to schema_
     )
 
 
-def _build_starrocks_sink(console: Console, managed: bool) -> StarRocksSinkSpec:
-    if managed:
-        console.print()
-        console.print(Text(
-            "  Managed StarRocks sink — ez-cdc will start it (~60s on first run).",
-            style="info",
-        ))
-        console.print()
-        return StarRocksSinkSpec(managed=True)
-
+def _build_starrocks_sink(console: Console) -> StarRocksSinkSpec:
     console.print()
-    console.print(Text("  User-provided StarRocks sink.", style="info"))
+    console.print(Text("  StarRocks sink.", style="info"))
     console.print()
 
-    url = prompts.text("FE HTTP URL (e.g., http://starrocks.local:8030):", default="")
+    use_demo = prompts.confirm(
+        "Use demo defaults? (localhost:18030 Docker StarRocks)",
+        default=False,
+    )
+    if use_demo is None:
+        raise _Cancelled()
+
+    default_url = _DEMO_SR_URL if use_demo else ""
+
+    url = prompts.text("FE HTTP URL (e.g., http://starrocks.local:8030):", default=default_url)
     if url is None or not url.strip():
         raise _Cancelled()
     url = url.strip()
 
-    database = prompts.text("Target database name:", default="")
+    database = prompts.text("Target database name:", default="test" if use_demo else "")
     if database is None or not database.strip():
         raise _Cancelled()
     database = database.strip()
@@ -448,7 +420,6 @@ def _build_starrocks_sink(console: Console, managed: bool) -> StarRocksSinkSpec:
     password = prompts.password("Password (leave empty if none):") or ""
 
     return StarRocksSinkSpec(
-        managed=False,
         url=url,
         database=database,
         user=user,
@@ -518,7 +489,6 @@ def _build_snowflake_sink(console: Console) -> SnowflakeSinkSpec:
         raise _Cancelled()
 
     return SnowflakeSinkSpec(
-        managed=False,
         account=account,
         user=user.strip(),
         password=password,

@@ -23,29 +23,27 @@ Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rus
 Clone the repo, install the `ez-cdc` CLI, and launch an interactive dashboard:
 
 ```bash
-git clone https://github.com/ez-cdc/dbmazz.git
-cd dbmazz
+git clone https://github.com/ez-cdc/dbmazz.git && cd dbmazz
 
 # First time only — install the test harness CLI
-cd e2e
-python3 -m venv venv
-source venv/vin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -e e2e/
 
-# Optional but recommended: tab completion for your shell
-ez-cdc --install-completion
+# Initialize config and start infrastructure
+ez-cdc                # interactive menu → "Init config" → creates ez-cdc.yaml
+ez-cdc up             # starts all infra containers (source PG + sinks)
 
-# Launch dbmazz with a sink of your choice
-ez-cdc quickstart                 # interactive menu
-ez-cdc quickstart starrocks       # direct: PG → StarRocks
-ez-cdc quickstart pg-target       # direct: PG → PG
+# Launch dbmazz with a live dashboard
+ez-cdc quickstart --source demo-pg --sink demo-starrocks
 ```
 
-`ez-cdc quickstart` spins up the selected sink, waits for replication to
-start, and opens a live terminal dashboard showing stage, lag, throughput,
-and source → target row counts in real time. Press `q` or `Ctrl+C` to
-exit, and the CLI will ask whether to stop and destroy the stack.
+`ez-cdc quickstart` runs preflight checks, waits for replication to start,
+and opens a live terminal dashboard showing stage, lag, throughput, and
+source → target row counts in real time. Press `q` or `Ctrl+C` to exit.
 
+> `ez-cdc.yaml` does not exist at clone time. It is created on first run
+> via the interactive menu or `ez-cdc init`.
+>
 > StarRocks takes ~60s to initialize on first run.
 
 ### Use your own databases
@@ -73,45 +71,39 @@ CDC (INSERT/UPDATE/DELETE), TOAST handling, schema consistency, and
 more — see [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
 for the full list of checks.
 
-| Profile | Source | Target | Requirements |
-|---------|--------|--------|--------------|
-| `starrocks` | PostgreSQL | StarRocks | Docker only |
-| `pg-target` | PostgreSQL | PostgreSQL | Docker only |
-| `snowflake` | PostgreSQL | Snowflake (cloud) | Snowflake account |
+### Supported sinks
 
-### Run verify for one sink
+| Sink | Demo datasource | Requirements |
+|------|----------------|--------------|
+| StarRocks | `demo-starrocks` | Docker only |
+| PostgreSQL | `demo-pg-target` | Docker only |
+| Snowflake | (add via wizard) | Snowflake account |
 
-```bash
-ez-cdc verify pg-target           # full suite (tier 1 + 2), ~2 min
-ez-cdc verify starrocks --quick   # tier 1 only, ~30s
-ez-cdc verify snowflake           # requires e2e/.env.snowflake
-```
-
-### Run verify for all sinks
+### Run verify
 
 ```bash
-ez-cdc verify --all               # auto-detects snowflake if .env.snowflake exists
+ez-cdc verify --source demo-pg --sink demo-starrocks          # full suite (tier 1 + 2)
+ez-cdc verify --source demo-pg --sink demo-pg-target          # PG target
+ez-cdc verify --source demo-pg --sink demo-starrocks --quick  # tier 1 only
 ```
 
-### Snowflake credentials (one-time)
+### Snowflake
 
-Snowflake is cloud-only — no Docker container. Configure credentials once:
-
-```bash
-cp e2e/.env.snowflake.example e2e/.env.snowflake
-# Edit e2e/.env.snowflake with your account, warehouse, user, password
-```
-
-Free 30-day trial at [signup.snowflake.com](https://signup.snowflake.com).
+Snowflake is cloud-only — no Docker container. Add credentials interactively
+with `ez-cdc datasource add`, or edit `ez-cdc.yaml` directly. Free 30-day
+trial at [signup.snowflake.com](https://signup.snowflake.com).
 
 ### Other commands
 
 ```bash
-ez-cdc up starrocks               # just bring the stack up (no tests, no dashboard)
-ez-cdc down starrocks             # stop and destroy
-ez-cdc logs starrocks             # tail compose logs
-ez-cdc status starrocks           # one-shot dbmazz /status snapshot
-ez-cdc --help                     # see everything
+ez-cdc up                                                # start all infra containers
+ez-cdc down                                              # stop all infra containers
+ez-cdc logs                                              # tail infra logs
+ez-cdc clean --source demo-pg --sink demo-starrocks      # clean target DB
+ez-cdc status --source demo-pg --sink demo-starrocks     # one-shot status
+ez-cdc datasource list                                   # show configured datasources
+ez-cdc datasource add                                    # interactive wizard
+ez-cdc --help                                            # see everything
 ```
 
 > Adding a new sink? See [`e2e/README.md`](e2e/README.md) and
@@ -245,31 +237,16 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 <summary><strong>🐳 Docker deployment</strong></summary>
 
 The preferred way to run dbmazz locally is through the `ez-cdc` CLI
-(see the Quickstart at the top of this README). You can also drive
-`docker compose` directly if you prefer:
-
-### StarRocks (batteries included)
+(see the Quickstart at the top of this README). The `ez-cdc` CLI
+manages Docker compose under the hood:
 
 ```bash
-docker compose -f e2e/compose.yml --profile starrocks up -d
+ez-cdc up       # start all infra containers (source PG + sinks)
+ez-cdc down     # stop and destroy all containers + volumes
 ```
 
-### With initial snapshot (backfill existing data)
-
-Set environment variables in your shell or via a `.env` file next to
-`e2e/compose.yml`:
-
-```bash
-DO_SNAPSHOT=true
-SNAPSHOT_CHUNK_SIZE=50000
-docker compose -f e2e/compose.yml --profile starrocks up -d
-```
-
-### Stop
-
-```bash
-docker compose -f e2e/compose.yml --profile starrocks down -v
-```
+Snapshot and pipeline settings are configured in `e2e/ez-cdc.yaml`
+under the `settings:` section.
 
 </details>
 

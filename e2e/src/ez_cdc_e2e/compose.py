@@ -59,6 +59,7 @@ def up(
     *,
     wait: bool = True,
     build: bool = False,
+    services: list[str] | None = None,
 ) -> None:
     """Start the stack defined by a compose file.
 
@@ -70,6 +71,9 @@ def up(
     reuse the cached image if present. Combined with the tight .dockerignore
     at the repo root, Python-only edits to the test harness never trigger
     a Rust recompile.
+
+    If `services` is provided, only those services are started (instead of
+    the whole stack).
     """
     check_docker_compose()
 
@@ -78,6 +82,8 @@ def up(
         cmd.append("--build")
     if wait:
         cmd.append("--wait")
+    if services:
+        cmd.extend(services)
 
     result = subprocess.run(cmd, text=True)
     if result.returncode != 0:
@@ -86,13 +92,21 @@ def up(
         )
 
 
-def down(compose_file: Path, *, remove_volumes: bool = True) -> None:
+def down(compose_file: Path, *, remove_volumes: bool = True, services: list[str] | None = None) -> None:
     """Stop and remove the stack defined by a compose file.
 
-    With remove_volumes=True (the default), also removes named volumes so
-    each test run starts from a clean state.
+    With remove_volumes=True (the default) and no specific services, also
+    removes named volumes so each test run starts from a clean state.
+
+    If `services` is provided, only those services are stopped and removed
+    via `stop_services()` — ``docker compose down`` does not accept service
+    names.
     """
     check_docker_compose()
+
+    if services:
+        stop_services(compose_file, services)
+        return
 
     cmd = _base_cmd(compose_file) + ["down"]
     if remove_volumes:
@@ -148,5 +162,46 @@ def is_running(compose_file: Path) -> bool:
     check_docker_compose()
 
     cmd = _base_cmd(compose_file) + ["ps", "-q"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0 and result.stdout.strip() != ""
+
+
+def stop_services(compose_file: Path, services: list[str]) -> None:
+    """Stop and remove specific services (not the whole stack).
+
+    ``docker compose down`` does not accept service names, so this uses
+    ``docker compose stop`` followed by ``docker compose rm -f`` to
+    achieve targeted teardown.
+    """
+    check_docker_compose()
+
+    # Stop the services.
+    cmd = _base_cmd(compose_file) + ["stop"] + services
+    result = subprocess.run(cmd, text=True)
+    if result.returncode != 0:
+        raise ComposeError(
+            f"docker compose stop failed for services {services} (exit {result.returncode})"
+        )
+
+    # Remove the stopped containers.
+    cmd = _base_cmd(compose_file) + ["rm", "-f"] + services
+    result = subprocess.run(cmd, text=True)
+    if result.returncode != 0:
+        raise ComposeError(
+            f"docker compose rm failed for services {services} (exit {result.returncode})"
+        )
+
+
+def is_service_running(compose_file: Path, service: str) -> bool:
+    """Check if a specific service has a running container.
+
+    Returns False if the compose file doesn't exist (e.g., the pair was
+    never `up`'d).
+    """
+    if not compose_file.exists():
+        return False
+    check_docker_compose()
+
+    cmd = _base_cmd(compose_file) + ["ps", "-q", service]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return result.returncode == 0 and result.stdout.strip() != ""

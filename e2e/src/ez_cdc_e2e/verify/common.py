@@ -26,10 +26,8 @@ class TestContext:
     the baseline counts, B2 reads them).
 
     PR 4 reshape: instead of holding a `profile: ProfileSpec`, this dataclass
-    now carries the bare minimum the checks need: tables, source name (for
-    error messages), and a flag for whether the source is managed by us or
-    user-provided. The latter drives the read-only/full mode decision in
-    PR 5; today the field is set but unused by the tier 1 checks.
+    now carries the bare minimum the checks need: tables and source/sink
+    names (for error messages).
     """
     source: SourceClient
     target: TargetBackend
@@ -38,7 +36,6 @@ class TestContext:
     tables: tuple[str, ...]
     source_name: str = "source"
     sink_name: str = "sink"
-    source_managed: bool = True
     scratch: dict[str, Any] = field(default_factory=dict)
 
 
@@ -112,21 +109,7 @@ def precheck(ctx: TestContext) -> None:
     except Exception as e:
         raise PrecheckError(f"Target {ctx.target.name} unreachable: {e}") from e
 
-    # Target must be clean — stale data from a previous run will pollute results.
-    # We only check tables that are in ctx.tables (the ones being replicated).
-    dirty_tables: list[str] = []
-    for table in ctx.tables:
-        if table in target_tables:
-            try:
-                count = ctx.target.count_rows(table, exclude_deleted=False)
-                if count > 0:
-                    dirty_tables.append(f"{table} ({count} rows)")
-            except Exception:
-                pass  # table might exist but be inaccessible; A1 will catch that
-    if dirty_tables:
-        raise PrecheckError(
-            f"Target has stale data from a previous run — clean it before verify.\n"
-            f"  Dirty tables: {', '.join(dirty_tables)}\n"
-            f"  For managed sinks, run: ez-cdc down --source <SRC> --sink <SINK>\n"
-            f"  Then start fresh:       ez-cdc verify --source <SRC> --sink <SINK>"
-        )
+    # Note: we intentionally do NOT check whether the target is empty.
+    # With the separated infra model (ez-cdc up + ez-cdc verify), dbmazz
+    # runs snapshot before verify's prechecks execute, so the target will
+    # normally contain data.  The B1 check validates that counts match.

@@ -130,33 +130,45 @@ class QuickstartDashboard:
 
     def __init__(
         self,
-        profile: Any,  # PR 4: duck-typed shim built by cli._make_profile_shim
+        *,
+        name: str,
+        source_dsn: str,
+        tables: tuple[str, ...],
+        compose_file: "Path | None" = None,
         dbmazz: DbmazzClient,
         target: TargetBackend,
         console: Console,
         source_counts_fn,  # callable[[], dict[str, int]] — avoids coupling to SourceClient
         traffic_rate_eps: float = 15.0,
-        source_is_managed: bool = True,
+        source_is_external: bool = False,
     ) -> None:
         """
         Args:
+            name: human-readable label for the pair (e.g. "demo-pg-to-demo-starrocks").
+            source_dsn: PostgreSQL connection string for the traffic generator.
+            tables: tuple of table names to display row counts for.
+            compose_file: path to the compose.yml — used by the [l] key to
+                tail logs.  None disables the keybinding.
             traffic_rate_eps: rate in ops/sec for the background traffic
                 generator. The generator is **always created** but **always
                 starts paused** — the user opts in by pressing `[t]`.
                 Universal rule: never auto-generate writes against any
-                source, managed or BYOD. Only opt-in.
-            source_is_managed: True for demo sources, False for user-managed
-                (BYOD). Used to surface a clearer warning in the header for
-                BYOD when traffic is enabled, since pressing `[t]` against
-                a real production database has real consequences.
+                source. Only opt-in.
+            source_is_external: True for user-provided (BYOD) sources. Used
+                to surface a clearer warning in the header when traffic is
+                enabled, since pressing `[t]` against a real database has
+                real consequences.
         """
-        self.profile = profile
+        self.name = name
+        self.source_dsn = source_dsn
+        self.tables = tables
+        self.compose_file = compose_file
         self.dbmazz = dbmazz
         self.target = target
         self.console = console
         self.source_counts_fn = source_counts_fn
         self.traffic_rate_eps = traffic_rate_eps
-        self.source_is_managed = source_is_managed
+        self.source_is_external = source_is_external
 
         self.start_time = time.time()
         self.throughput_history: list[float] = []
@@ -178,7 +190,7 @@ class QuickstartDashboard:
         # without starting a new thread) but produces nothing until the
         # user activates it.
         self.traffic_generator = TrafficGenerator(
-            source_dsn=self.profile.source_dsn,
+            source_dsn=self.source_dsn,
             rate_eps=self.traffic_rate_eps,
         )
         self.traffic_generator.pause()
@@ -272,7 +284,10 @@ class QuickstartDashboard:
         keys.drain()
 
         try:
-            compose_logs(self.profile.compose_profile, service=None, follow=True, tail=50)
+            if self.compose_file is not None:
+                compose_logs(self.compose_file, service=None, follow=True, tail=50)
+            else:
+                self.console.print(Text("  No compose file available for logs.", style="warning"))
         except KeyboardInterrupt:
             pass
 
@@ -348,7 +363,7 @@ class QuickstartDashboard:
         t = Text()
         t.append("EZ-CDC ", style="brand")
         t.append("•  ", style="muted")
-        t.append(f"{self.profile.name} profile", style="default")
+        t.append(self.name, style="default")
         t.append("  •  ", style="muted")
         uptime = _format_uptime(int(time.time() - self.start_time))
         t.append(f"uptime {uptime}", style="muted")
@@ -359,7 +374,7 @@ class QuickstartDashboard:
     def _render_disconnected(self) -> RenderableType:
         return Panel(
             Text(
-                f"Cannot reach dbmazz at {self.profile.dbmazz_http_url}. "
+                f"Cannot reach dbmazz at http://localhost:8080. "
                 "Is the daemon still running?",
                 style="error",
             ),
@@ -409,7 +424,7 @@ class QuickstartDashboard:
                     # First-time hint — only when no traffic has been
                     # generated yet, so we don't keep nagging after the
                     # user has been toggling on/off intentionally.
-                    if self.source_is_managed:
+                    if not self.source_is_external:
                         gen_line.append("  — press [t] to start", style="muted")
                     else:
                         gen_line.append(
@@ -532,7 +547,7 @@ class QuickstartDashboard:
         except Exception:
             source_counts = {}
 
-        for table in self.profile.tables:
+        for table in self.tables:
             src = int(source_counts.get(table, 0))
             try:
                 tgt = self.target.count_rows(table)

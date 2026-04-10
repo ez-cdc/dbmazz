@@ -768,7 +768,6 @@ To add e2e coverage for a new sink:
    ```python
    class MySinkSpec(BaseModel):
        type: Literal["my-sink"] = "my-sink"
-       managed: bool = True
        host: str
        port: int = 9030
        database: str
@@ -784,10 +783,18 @@ To add e2e coverage for a new sink:
    compose services dict for your sink (target container + init script
    if needed).
 
-4. **Run the suite**: `ez-cdc verify --source demo-pg --sink my-sink`.
-   The runner automatically exercises all Tier 1 validations against
-   your backend — you don't write any test functions yourself, the
-   framework provides them.
+4. **Run the suite**:
+
+   ```bash
+   ez-cdc up                                       # start all infra (Docker containers)
+   ez-cdc verify --source demo-pg --sink my-sink   # run preflight checks + e2e tests
+   ```
+
+   `ez-cdc verify` runs preflight checks (connectivity and schema
+   validation) before executing the test suite. The runner then
+   automatically exercises all Tier 1 validations against your
+   backend — you don't write any test functions yourself, the framework
+   provides them.
 
    Every sink passes the same set of checks, so adding one is ~1 class
    (~150 lines) and zero test code.

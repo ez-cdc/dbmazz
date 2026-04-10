@@ -7,9 +7,11 @@ A datasources file has two top-level sections:
     sinks:
       <name>: <PostgresSinkSpec | StarRocksSinkSpec | SnowflakeSinkSpec>
 
-Each spec discriminates on `type:`. The `managed` flag distinguishes between
-"ez-cdc runs this database in Docker for you" (managed=true) and "you provide
-the connection details for an existing instance" (managed=false).
+Each spec discriminates on `type:`. Every datasource always carries explicit
+connection details (url, host, port, user, password) so the YAML reads like a
+real datasource configuration file.  The compose builder infers which Docker
+containers to create based on well-known localhost ports (see compose_builder.py
+for the port registry).
 
 Pydantic v2 is used for validation. Errors include the field path and a
 human-readable message — see DatasourceValidationError in loader.py for the
@@ -70,49 +72,33 @@ class _DatasourceBase(BaseModel):
         validate_assignment=True,
     )
 
-    managed: bool = Field(
-        ...,
-        description=(
-            "If true, ez-cdc runs this database in a Docker container for you. "
-            "If false, you provide the connection details for an existing instance."
-        ),
-    )
-
 
 # ── Source specs ─────────────────────────────────────────────────────────────
 
 class PostgresSourceSpec(_DatasourceBase):
     """A PostgreSQL source database for CDC.
 
-    For managed=true (we run it):
-      - `seed` (optional): path to a SQL file inside e2e/fixtures/ to apply
-        on startup. Defaults to postgres-seed.sql which provides the
-        orders + order_items demo schema.
-      - `tables` (required): which tables to replicate.
-
-    For managed=false (user-provided):
-      - `url` (required): PostgreSQL connection URL. Should NOT include
-        `?replication=database` — ez-cdc adds it when starting dbmazz.
-      - `replication_slot` (optional): defaults to "dbmazz_slot".
-      - `publication` (optional): defaults to "dbmazz_pub".
-      - `tables` (required).
+    Fields:
+      - ``url`` (required): PostgreSQL connection URL.  Should NOT include
+        ``?replication=database`` — ez-cdc adds it when starting dbmazz.
+      - ``seed`` (optional): path to a SQL file inside ``e2e/fixtures/`` to
+        apply on container startup.  Only meaningful for demo/Docker sources.
+      - ``replication_slot`` / ``publication``: logical replication identifiers.
+      - ``tables`` (required): which tables to replicate.
     """
 
     type: Literal["postgres"] = "postgres"
 
-    # Connection (only used when managed=false)
-    url: str | None = Field(
-        default=None,
-        description="postgres:// connection URL. Required when managed=false.",
+    url: str = Field(
+        ...,
+        description="postgres:// connection URL.",
     )
 
-    # Fixture (only used when managed=true)
     seed: str | None = Field(
         default=None,
         description="Path to a SQL seed file inside e2e/fixtures/.",
     )
 
-    # Replication topology (applies to both modes)
     replication_slot: str = Field(
         default="dbmazz_slot",
         description="Logical replication slot name.",
@@ -151,21 +137,17 @@ class PostgresSourceSpec(_DatasourceBase):
 # ── Sink specs ───────────────────────────────────────────────────────────────
 
 class PostgresSinkSpec(_DatasourceBase):
-    """A PostgreSQL sink database.
-
-    For managed=true: ez-cdc spins up a fresh empty Postgres in Docker.
-    For managed=false: user provides url + database.
-    """
+    """A PostgreSQL sink database."""
 
     type: Literal["postgres"] = "postgres"
 
-    url: str | None = Field(
-        default=None,
-        description="postgres:// connection URL. Required when managed=false.",
+    url: str = Field(
+        ...,
+        description="postgres:// connection URL.",
     )
-    database: str | None = Field(
-        default=None,
-        description="Target database name. Required when managed=false.",
+    database: str = Field(
+        ...,
+        description="Target database name.",
     )
     schema_: str = Field(
         default="public",
@@ -175,17 +157,13 @@ class PostgresSinkSpec(_DatasourceBase):
 
 
 class StarRocksSinkSpec(_DatasourceBase):
-    """A StarRocks sink.
-
-    For managed=true: ez-cdc spins up StarRocks in Docker (~60s on first run).
-    For managed=false: user provides FE HTTP URL + credentials.
-    """
+    """A StarRocks sink."""
 
     type: Literal["starrocks"] = "starrocks"
 
-    url: str | None = Field(
-        default=None,
-        description="StarRocks FE HTTP URL like http://host:8030. Required when managed=false.",
+    url: str = Field(
+        ...,
+        description="StarRocks FE HTTP URL like http://host:8030.",
     )
     mysql_port: int = Field(
         default=9030,
@@ -193,20 +171,16 @@ class StarRocksSinkSpec(_DatasourceBase):
         le=65535,
         description="StarRocks FE MySQL protocol port (used for DDL).",
     )
-    database: str | None = Field(
-        default=None,
-        description="Target database. Required when managed=false.",
+    database: str = Field(
+        ...,
+        description="Target database.",
     )
     user: str = Field(default="root")
     password: str = Field(default="")
 
 
 class SnowflakeSinkSpec(_DatasourceBase):
-    """A Snowflake sink.
-
-    Snowflake is cloud-only and can NEVER be managed=true. The schema enforces
-    this in the validator below — passing managed=true will raise.
-    """
+    """A Snowflake sink (cloud-only — no Docker container)."""
 
     type: Literal["snowflake"] = "snowflake"
 
@@ -228,16 +202,6 @@ class SnowflakeSinkSpec(_DatasourceBase):
         default=True,
         description="If true, DELETEs become _DBMAZZ_IS_DELETED=true. If false, hard delete.",
     )
-
-    @field_validator("managed", mode="before")
-    @classmethod
-    def _enforce_not_managed(cls, v: bool) -> bool:
-        if v is True:
-            raise ValueError(
-                "Snowflake is cloud-only and cannot be managed by ez-cdc. "
-                "Set managed: false and provide your account credentials."
-            )
-        return v
 
 
 # ── Pipeline settings ───────────────────────────────────────────────────────

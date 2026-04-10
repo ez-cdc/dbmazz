@@ -194,7 +194,6 @@ def list_cmd(
     table.add_column("Role",    style="check.id", no_wrap=True)
     table.add_column("Name",    style="metric.number", no_wrap=True)
     table.add_column("Type",    style="metric.label", no_wrap=True)
-    table.add_column("Managed", style="metric.label", justify="center", no_wrap=True)
     table.add_column("Connection / details", style="check.detail")
 
     for name in store.list_sources():
@@ -203,7 +202,6 @@ def list_cmd(
             "source",
             name,
             spec.type,
-            "✓ yes" if spec.managed else "✗ no",
             _summarize_source(spec),
         )
 
@@ -213,7 +211,6 @@ def list_cmd(
             "sink",
             name,
             spec.type,
-            "✓ yes" if spec.managed else "✗ no",
             _summarize_sink(spec),
         )
 
@@ -234,28 +231,16 @@ def list_cmd(
 def _summarize_source(spec: SourceSpec) -> str:
     """One-line summary of a source spec for the list view."""
     if isinstance(spec, PostgresSourceSpec):
-        if spec.managed:
-            seed = f"seed={spec.seed}" if spec.seed else "no seed"
-            return f"managed PG · {seed} · tables={','.join(spec.tables)}"
-        else:
-            redacted_url = _redact_url_password(spec.url or "")
-            return f"{redacted_url} · tables={','.join(spec.tables)}"
+        return f"{_redact_url_password(spec.url)} · tables={','.join(spec.tables)}"
     return spec.type
 
 
 def _summarize_sink(spec: SinkSpec) -> str:
     """One-line summary of a sink spec for the list view."""
     if isinstance(spec, PostgresSinkSpec):
-        if spec.managed:
-            return "managed PG (will be started by ez-cdc)"
-        else:
-            redacted_url = _redact_url_password(spec.url or "")
-            return f"{redacted_url}/{spec.database}"
+        return f"{_redact_url_password(spec.url)}/{spec.database}"
     if isinstance(spec, StarRocksSinkSpec):
-        if spec.managed:
-            return "managed StarRocks (will be started by ez-cdc)"
-        else:
-            return f"{spec.url}/{spec.database} (user={spec.user})"
+        return f"{spec.url}/{spec.database} (user={spec.user})"
     if isinstance(spec, SnowflakeSinkSpec):
         return (
             f"{spec.account} · db={spec.database} · wh={spec.warehouse} · "
@@ -366,7 +351,7 @@ def remove_cmd(
     final_padding(console)
 
 
-@datasource_app.command("test", help="Test connectivity to a datasource (user-managed only).")
+@datasource_app.command("test", help="Test connectivity to a datasource.")
 def test_cmd(
     name: str = typer.Argument(..., help="Datasource name."),
     config: Path = typer.Option(
@@ -388,19 +373,6 @@ def test_cmd(
         spec = store.get_source(name)
     else:
         spec = store.get_sink(name)
-
-    # Managed datasources don't have a meaningful "test" — they're started
-    # by ez-cdc itself, not pre-existing.
-    if spec.managed:
-        console.print(Text(
-            f"  Datasource {name!r} is managed by ez-cdc — there's nothing to test.",
-            style="warning",
-        ))
-        console.print(Text(
-            f"  It will be created in a Docker container when a flow needs it.",
-            style="muted",
-        ))
-        return
 
     console.print()
     console.print(Text(f"  Testing connection to {name!r}...", style="info"))
@@ -433,7 +405,7 @@ def test_cmd(
 def _test_postgres_source(spec: PostgresSourceSpec) -> None:
     import psycopg2
     if not spec.url:
-        raise RuntimeError("user-managed Postgres source has no url")
+        raise RuntimeError("Postgres source has no url")
     conn = psycopg2.connect(spec.url, connect_timeout=5)
     try:
         with conn.cursor() as cur:
@@ -447,7 +419,7 @@ def _test_postgres_source(spec: PostgresSourceSpec) -> None:
 def _test_postgres_sink(spec: PostgresSinkSpec) -> None:
     import psycopg2
     if not spec.url:
-        raise RuntimeError("user-managed Postgres sink has no url")
+        raise RuntimeError("Postgres sink has no url")
     conn = psycopg2.connect(spec.url, connect_timeout=5)
     try:
         with conn.cursor() as cur:
@@ -461,7 +433,7 @@ def _test_postgres_sink(spec: PostgresSinkSpec) -> None:
 def _test_starrocks_sink(spec: StarRocksSinkSpec) -> None:
     import mysql.connector
     if not spec.url:
-        raise RuntimeError("user-managed StarRocks sink has no url")
+        raise RuntimeError("StarRocks sink has no url")
     # Parse the FE HTTP URL to extract the host
     from urllib.parse import urlparse
     parsed = urlparse(spec.url)

@@ -252,7 +252,6 @@ class VerifyRunner:
             tables=tuple(getattr(self.src_spec, "tables", ())),
             source_name=self.src_name,
             sink_name=self.sk_name,
-            source_managed=bool(getattr(self.src_spec, "managed", True)),
         )
 
     def _close_context(self, ctx: TestContext) -> None:

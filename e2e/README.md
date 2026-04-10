@@ -2,76 +2,120 @@
 
 Interactive CLI for running dbmazz end-to-end: try a sink with a live
 terminal dashboard (`quickstart`), run validation suites (`verify`), or
-manage the docker compose stack (`up`, `down`, `logs`, `status`).
+manage the infrastructure stack (`up`, `down`, `logs`).
 
-Replaces the old `deploy/test-sink.sh` + `deploy/load-test.py` scripts
-with a single unified Python CLI (`ez-cdc`).
-
-## First time setup
+## Quick start (clone to running tests)
 
 ```bash
-# From the repo root
+# 1. Clone and install
+git clone <repo> && cd dbmazz
 pip install -e e2e/
 
-# Optional but recommended — enables Tab completion in your shell
-ez-cdc --install-completion
+# 2. Create the config file (ez-cdc.yaml) with demo datasources
+ez-cdc                        # interactive menu → "Init config"
+
+# 3. Start all infrastructure containers
+ez-cdc up
+
+# 4. Run the validation suite against StarRocks
+ez-cdc verify --source demo-pg --sink demo-starrocks
+
+# 5. Or open a live dashboard against PostgreSQL target
+ez-cdc quickstart --source demo-pg --sink demo-pg-target
+
+# 6. Stop all containers when done
+ez-cdc down
 ```
 
-> `pip install -e` installs the package in editable mode, so changes to
-> `e2e/src/ez_cdc_e2e/` take effect without reinstalling. Use a virtualenv
-> (`python -m venv .venv && source .venv/bin/activate`) if you want to
-> isolate the deps from your system Python.
+> **Tip:** Use a virtualenv (`python -m venv .venv && source .venv/bin/activate`)
+> if you want to isolate the deps from your system Python.
 
-## Try dbmazz in 30 seconds
+## How it works
 
-```bash
-ez-cdc quickstart --source demo-pg --sink demo-starrocks
+The CLI manages two things independently:
+
+1. **Infrastructure** (`ez-cdc up/down/logs`) -- Docker containers for all
+   datasources defined in `ez-cdc.yaml`. One compose stack for everything.
+   No per-pair containers.
+
+2. **dbmazz runs** (`quickstart/verify/clean/status`) -- Build and run
+   the dbmazz daemon for a specific `--source X --sink Y` pair. Infra
+   must be running first. Preflight checks validate connectivity and
+   schema before starting the daemon.
+
+## Configuration: ez-cdc.yaml
+
+The file `e2e/ez-cdc.yaml` holds all datasources and pipeline settings.
+It does **not** exist at clone time. The CLI creates it on first run
+via the interactive menu ("Init config") or via `ez-cdc datasource init-demos`.
+
+All datasources have explicit connection details (host, port, user,
+password, or a URL). Docker compose services are generated from these.
+
+### Example
+
+```yaml
+settings:
+  flush_size: 2000
+  flush_interval_ms: 2000
+  do_snapshot: true
+
+sources:
+  demo-pg:
+    type: postgres
+    url: postgres://postgres:postgres@localhost:15432/dbmazz
+    seed: postgres-seed.sql
+    tables:
+      - orders
+      - order_items
+
+sinks:
+  demo-starrocks:
+    type: starrocks
+    url: http://localhost:18030
+    mysql_port: 19030
+    database: dbmazz
+    user: root
+    password: ""
+
+  demo-pg-target:
+    type: postgres
+    url: postgres://postgres:postgres@localhost:25432/dbmazz_target
+    database: dbmazz_target
+    schema: public
 ```
 
-Or just run `ez-cdc` for the interactive menu — it will guide you
-through selecting a source and sink, creating demo datasources if needed,
-and launching the dashboard.
+### Variable interpolation
 
-The CLI will:
-1. Generate a docker compose stack for the selected source/sink pair.
-2. Build dbmazz from source and start all containers.
-3. Wait for dbmazz to reach the CDC stage.
-4. Open an interactive live dashboard showing stage, replication lag,
-   throughput, and source → target row counts, updated twice per second.
+Connection strings support `${VAR}` interpolation from environment variables:
 
-Keybindings in the dashboard:
-
-| Key | Action |
-|---|---|
-| `q` / `Ctrl+C` | Exit the dashboard |
-| `l` | Tail `docker compose logs -f` for the stack |
-| `p` | Pause the daemon (`POST /pause`) |
-| `r` | Resume the daemon (`POST /resume`) |
-| `t` | Toggle traffic generator (paused by default) |
-| `s` | Trigger a snapshot |
-
-When you exit, the CLI asks whether to stop and destroy the stack. Say
-yes to clean up, no to leave it running for further inspection.
+```yaml
+sources:
+  my-pg:
+    type: postgres
+    host: ${PG_HOST}
+    port: ${PG_PORT:-5432}
+    database: ${PG_DATABASE}
+    user: ${PG_USER}
+    password: ${PG_PASSWORD}
+```
 
 ## Datasources
 
-All source/sink configurations live in `e2e/ez-cdc.yaml`. Each
-datasource has a name, a type (source or sink), and connection details.
+### Bundled demos
 
-### Bundled demos (Docker-managed)
+The CLI ships with three demo datasources that run in Docker:
 
-The CLI ships with three demo datasources that run entirely in Docker:
-
-| Name | Type | Description |
+| Name | Role | Connection |
 |---|---|---|
-| `demo-pg` | source (postgres) | PostgreSQL 16 with WAL logical + seed data |
-| `demo-starrocks` | sink (starrocks) | StarRocks all-in-one |
-| `demo-pg-target` | sink (postgres) | PostgreSQL 16 as replication target |
+| `demo-pg` | source (postgres) | `postgres://postgres:postgres@localhost:15432/dbmazz` |
+| `demo-starrocks` | sink (starrocks) | HTTP `localhost:18030`, MySQL `localhost:19030` |
+| `demo-pg-target` | sink (postgres) | `postgres://postgres:postgres@localhost:25432/dbmazz_target` |
 
-These are auto-created when you run `ez-cdc datasource init-demos` or
-when the interactive menu detects no datasources exist.
+These are created when you run `ez-cdc datasource init-demos` or when
+the interactive menu detects no config file exists.
 
-### Your own databases (BYOD)
+### Your own databases
 
 Add your own datasources with the interactive wizard:
 
@@ -80,36 +124,61 @@ ez-cdc datasource add
 ```
 
 The wizard supports PostgreSQL sources, PostgreSQL sinks, StarRocks
-sinks, and Snowflake sinks. Credentials are stored in the YAML file —
-no separate `.env` files needed.
+sinks, and Snowflake sinks. Credentials are stored in the YAML file.
 
 ### Datasource subcommands
 
-```
-ez-cdc datasource list          # show all datasources in a table
-ez-cdc datasource show NAME     # full details of one datasource
-ez-cdc datasource add           # interactive wizard to add a new datasource
-ez-cdc datasource remove NAME   # remove a datasource by name
-ez-cdc datasource test NAME     # test connectivity (user-managed only)
-ez-cdc datasource init-demos    # create bundled demo datasources
-```
+| Command | Description |
+|---|---|
+| `ez-cdc datasource list` | Show all datasources in a table |
+| `ez-cdc datasource add` | Interactive wizard to add a new datasource |
+| `ez-cdc datasource remove NAME` | Remove a datasource by name |
+| `ez-cdc datasource test NAME` | Test connectivity |
+| `ez-cdc datasource init-demos` | Create demo datasources |
 
-### Variable interpolation
+## CLI subcommands
 
-Connection strings in the YAML support `${VAR}` interpolation from
-environment variables:
+| Command | Description |
+|---|---|
+| `ez-cdc` | Interactive menu (contextual based on state) |
+| `ez-cdc up` | Start all infra containers from ez-cdc.yaml |
+| `ez-cdc down` | Stop all infra containers |
+| `ez-cdc quickstart --source X --sink Y` | Preflight + dbmazz + live dashboard |
+| `ez-cdc verify --source X --sink Y` | Preflight + dbmazz + e2e test suite |
+| `ez-cdc clean --source X --sink Y` | Clean target DB (TRUNCATE + DROP audit cols) |
+| `ez-cdc logs` | Tail infra container logs |
+| `ez-cdc status --source X --sink Y` | One-shot dbmazz status |
+| `ez-cdc --install-completion` | Install shell tab completion |
+| `ez-cdc --version` | Show version |
 
-```yaml
-sources:
-  my-pg:
-    type: postgres
-    managed: false
-    host: ${PG_HOST}
-    port: ${PG_PORT:-5432}
-    database: ${PG_DATABASE}
-    user: ${PG_USER}
-    password: ${PG_PASSWORD}
-```
+In an interactive terminal, `--source` and `--sink` can be omitted and
+the CLI will prompt with a selector. In non-interactive mode (CI, piped
+stdout), omitting them is a hard error.
+
+### `quickstart` dashboard
+
+The `quickstart` command validates connectivity, starts dbmazz, waits
+for the CDC stage, and opens an interactive live dashboard showing stage,
+replication lag, throughput, and source-to-target row counts.
+
+| Key | Action |
+|---|---|
+| `q` / `Ctrl+C` | Exit the dashboard and stop dbmazz |
+| `l` | Tail container logs |
+| `p` | Pause the daemon |
+| `r` | Resume the daemon |
+| `t` | Toggle traffic generator |
+| `s` | Trigger a snapshot |
+
+### `verify` flags
+
+| Flag | Effect |
+|---|---|
+| `--quick` | Run tier 1 only (~30s per pair), skip tier 2 |
+| `--skip IDS` | Skip specific check IDs, comma-separated (e.g. `--skip C3,D7`) |
+| `--json-report PATH` | Write a structured JSON report (for CI) |
+| `--no-color` | Disable colored output |
+| `--non-interactive` | Disable prompts |
 
 ## Pipeline settings
 
@@ -122,61 +191,26 @@ during replication. Each field maps 1:1 to a dbmazz environment variable.
 | `flush_interval_ms` | `FLUSH_INTERVAL_MS` | `2000` | Max milliseconds before flushing a partial batch |
 | `do_snapshot` | `DO_SNAPSHOT` | `true` | Run initial snapshot (backfill) on startup |
 | `snapshot_chunk_size` | `SNAPSHOT_CHUNK_SIZE` | `10000` | Rows per snapshot chunk (PK-range based) |
-| `snapshot_parallel_workers` | `SNAPSHOT_PARALLEL_WORKERS` | `2` | Concurrent snapshot workers (1–32) |
-| `initial_snapshot_only` | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot completes — no CDC streaming |
+| `snapshot_parallel_workers` | `SNAPSHOT_PARALLEL_WORKERS` | `2` | Concurrent snapshot workers (1-32) |
+| `initial_snapshot_only` | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot completes -- no CDC streaming |
 | `rust_log` | `RUST_LOG` | `info` | Log level filter (`info`, `debug`, `dbmazz=debug`, etc.) |
 | `snowflake_flush_files` | `SINK_SNOWFLAKE_FLUSH_FILES` | `1` | Snowflake: trigger COPY INTO after N staged files (production: 20) |
 | `snowflake_flush_bytes` | `SINK_SNOWFLAKE_FLUSH_BYTES` | `104857600` | Snowflake: trigger COPY INTO after N bytes staged (default 100MB) |
 
-View current values: `ez-cdc datasource settings`
-Edit interactively: `ez-cdc datasource settings --edit`
-
-## Subcommands
-
-```
-ez-cdc                                          # interactive main menu
-ez-cdc quickstart --source SRC --sink SINK      # launch + live dashboard
-ez-cdc verify     --source SRC --sink SINK      # run validation tests
-ez-cdc verify     --all                         # run all managed pairs
-ez-cdc up         --source SRC --sink SINK      # just bring the stack up
-ez-cdc down       --source SRC --sink SINK      # stop and destroy
-ez-cdc logs       --source SRC --sink SINK      # tail compose logs
-ez-cdc status     --source SRC --sink SINK      # one-shot /status snapshot
-ez-cdc datasource ...                           # manage datasources (see above)
-ez-cdc --install-completion                     # install shell tab completion
-ez-cdc --version
-ez-cdc --help
-```
-
-All subcommands accept `--source` and `--sink` options. If you omit
-them in an interactive terminal, the CLI will prompt with a selector.
-In non-interactive mode (CI, piped stdout), omitting them is a hard error.
-
-### `verify` flags
-
-| Flag | Effect |
-|---|---|
-| `--quick` | Run tier 1 only (~30s per pair), skip tier 2 |
-| `--skip IDS` | Skip specific check IDs, comma-separated, e.g. `--skip C3,D7` |
-| `--all` | Run all (managed source × managed sink) pairs |
-| `--json-report PATH` | Write a structured JSON report (for CI) |
-| `--keep-up` | Don't run `compose down` at the end (for debugging) |
-| `--no-up` | Assume the compose stack is already running |
-
 ## Supported sink types
 
-| Sink Type | Source | Target | Requirements |
+| Sink Type | Demo name | Docker port(s) | Notes |
 |---|---|---|---|
-| StarRocks | PostgreSQL | StarRocks | Docker only (demo) or your own instance |
-| PostgreSQL | PostgreSQL | PostgreSQL | Docker only (demo) or your own instance |
-| Snowflake | PostgreSQL | Snowflake (cloud) | Your Snowflake account credentials |
+| StarRocks | `demo-starrocks` | 18030 (HTTP), 19030 (MySQL) | All-in-one container |
+| PostgreSQL | `demo-pg-target` | 25432 | PostgreSQL 16 as target |
+| Snowflake | (add manually) | N/A (cloud) | Requires your Snowflake account |
 
 ## Validation tiers
 
 The `verify` subcommand runs a tiered suite of checks. Every check has
 a two-letter ID (e.g., `A1`, `D4`) that you can skip individually.
 
-### Tier 1 — Correctness baseline (~30s per sink, runs with `--quick`)
+### Tier 1 -- Correctness baseline (~30s per sink, runs with `--quick`)
 
 **Precheck:** before any check runs, verify confirms the target tables
 are empty (no stale data from a previous run). If dirty tables are found,
@@ -196,49 +230,54 @@ verify exits with a clear message listing what to clean.
 | E1 | Sequential UPDATEs, last wins |
 | D3 | DELETE replicated |
 | D5 | Multi-row INSERT in single TX |
-| **D4** | **TOAST UPDATE preserves unchanged value** — bug #1 in PG CDCs |
+| **D4** | **TOAST UPDATE preserves unchanged value** |
 | C10 | NULL roundtrip |
 | B2 | Post-CDC delta matches |
 | H1 | Restart without traffic is no-op |
 
-### Tier 2 — Extended validation (~2 min, runs by default in PR 2)
+### Tier 2 -- Extended validation (~2 min)
 
-A5 schema evolution · A6 type compatibility · B4 no orphan rows ·
-C1 row-level hash compare · C2–C7 type fidelity fixture · D6 mixed TX
-atomicity · D7 PK UPDATE · E2 transactional consistency ·
-E3 LSN monotonicity · H2 crash replay idempotency.
+A5 schema evolution, A6 type compatibility, B4 no orphan rows,
+C1 row-level hash compare, C2-C7 type fidelity fixture, D6 mixed TX
+atomicity, D7 PK UPDATE, E2 transactional consistency,
+E3 LSN monotonicity, H2 crash replay idempotency.
 
-Tier 2 lands in PR 2. Until then, `verify` runs tier 1 only.
+### Tier 3 -- Nightly (future)
 
-### Tier 3 — Nightly (future)
-
-F1–F6 resilience tests (kill dbmazz / target / source during CDC and
+F1-F6 resilience tests (kill dbmazz / target / source during CDC and
 snapshot) will run as a nightly pipeline. Tier 3 is not part of the
 standard `verify` run.
 
-## Adding a new sink
+## Snowflake testing
 
-Adding a sink takes ~3 files and zero changes to the verify runner,
-because the runner only calls methods on `TargetBackend`. See
-[`docs/contributing-connectors.md`](../docs/contributing-connectors.md#end-to-end-tests-required-for-sink-connectors)
-for the full checklist. Briefly:
+Snowflake has no Docker container. Add your Snowflake datasource
+manually, then run the tests with only the source container running:
 
-1. **`e2e/src/ez_cdc_e2e/backends/my_sink.py`** — subclass `TargetBackend`,
-   implement its abstract methods. Look at `backends/postgres.py` or
-   `backends/snowflake.py` for reference implementations.
+```bash
+# Add via interactive wizard
+ez-cdc datasource add
 
-2. **`e2e/src/ez_cdc_e2e/datasources/schema.py`** — add a `MySinkSpec`
-   pydantic model and register it in the `SinkSpec` discriminated union.
+# Or edit ez-cdc.yaml directly with your Snowflake credentials
 
-3. **`e2e/src/ez_cdc_e2e/compose_builder.py`** — add a `_sink_services_*`
-   function to generate the docker compose services for your sink.
+# Start infra (only source-pg will have a container, Snowflake is cloud)
+ez-cdc up
 
-Then `ez-cdc verify --source demo-pg --sink my-sink` runs the full
-Tier 1 suite against your sink without you writing any test code.
+# Run tests
+ez-cdc verify --source demo-pg --sink my-snowflake
+```
 
 ## CI integration
 
-The `--non-interactive` and `--json-report` flags are designed for CI:
+```bash
+ez-cdc datasource init-demos
+ez-cdc up
+ez-cdc verify --source demo-pg --sink demo-starrocks
+ez-cdc verify --source demo-pg --sink demo-pg-target
+ez-cdc down
+```
+
+For CI pipelines, use `--non-interactive`, `--no-color`, and
+`--json-report`:
 
 ```bash
 ez-cdc verify --source demo-pg --sink demo-starrocks \
@@ -257,54 +296,64 @@ Exit codes:
 | 3 | Invalid invocation (unknown datasource, bad flags) |
 | 130 | User interrupted (Ctrl+C) |
 
-A GitHub Actions workflow for this (matrix over sinks) is planned for a
-follow-up PR — see `.plans/e2e-refactor.md` section 11.
+## Adding a new sink
+
+Adding a sink takes ~3 files and zero changes to the verify runner,
+because the runner only calls methods on `TargetBackend`. See
+[`docs/contributing-connectors.md`](../docs/contributing-connectors.md#end-to-end-tests-required-for-sink-connectors)
+for the full checklist. Briefly:
+
+1. **`e2e/src/ez_cdc_e2e/backends/my_sink.py`** -- subclass `TargetBackend`,
+   implement its abstract methods. Look at `backends/postgres.py` or
+   `backends/snowflake.py` for reference implementations.
+
+2. **`e2e/src/ez_cdc_e2e/datasources/schema.py`** -- add a `MySinkSpec`
+   pydantic model and register it in the `SinkSpec` discriminated union.
+
+3. **`e2e/src/ez_cdc_e2e/compose_builder.py`** -- add a `_sink_services_*`
+   function to generate the docker compose services for your sink.
+
+Then `ez-cdc verify --source demo-pg --sink my-sink` runs the full
+tier 1 suite against your sink without writing any test code.
 
 ## Troubleshooting
 
-**`ez-cdc: command not found`** — you haven't installed the CLI yet.
-Run `pip install -e e2e/` from the repo root.
+**`ez-cdc: command not found`** -- Run `pip install -e e2e/` from the
+repo root.
 
-**`psycopg2-binary` fails to install** — on some Linux distros you need
+**`psycopg2-binary` fails to install** -- On some Linux distros you need
 `libpq-dev` installed first. On macOS, `psycopg2-binary` should install
 from a wheel without extra setup.
 
-**Snowflake tests fail with missing credentials** — add your Snowflake
+**Snowflake tests fail with missing credentials** -- Add your Snowflake
 datasource via `ez-cdc datasource add` and fill in account, user,
 password, warehouse, database, and schema.
 
-**dbmazz never reaches CDC stage** — check `ez-cdc logs --source X --sink Y`
-to see what the daemon is stuck on. Common causes: the target is
-unreachable, the source publication is misconfigured, or StarRocks
-hasn't finished its 60s warmup.
+**dbmazz never reaches CDC stage** -- Check `ez-cdc logs` to see what
+the daemon is stuck on. Common causes: the target is unreachable, the
+source publication is misconfigured, or StarRocks hasn't finished its
+60s warmup.
 
-**Banner looks broken** — your terminal is probably narrower than 56
+**Banner looks broken** -- Your terminal is probably narrower than 56
 columns. Widen the terminal or use `--no-banner`.
+
+**Target has stale data** -- Run `ez-cdc clean --source X --sink Y` to
+TRUNCATE target tables and DROP audit columns before retrying.
 
 ## Design notes
 
 - **Python, not Rust.** Snowflake's Python driver is the only mature
   client library, and the e2e harness needs to talk to every target
   sink. Trading the Rust mono-lingualism for `pip install
-  snowflake-connector-python` was the right call. See
-  `.plans/e2e-refactor.md` D1 for the full rationale.
+  snowflake-connector-python` was the right call.
 
-- **No Makefile.** The `ez-cdc` console script is short enough (`ez-cdc
-  verify --source X --sink Y` vs `make e2e-verify SINK=starrocks`) that
+- **No Makefile.** The `ez-cdc` console script is short enough that
   wrapping it in a Makefile would just add indirection.
 
 - **`rich` + `questionary` + `typer`.** Rich for display, questionary
-  for prompts, typer as the CLI framework (built on click). This
-  combination is what the Python CLI community has settled on — see
-  `stripe-cli`, `poetry`, `gh cli` for similar patterns.
+  for prompts, typer as the CLI framework (built on click).
 
 - **Datasources as first-class entities.** All connection configs live in
-  `e2e/ez-cdc.yaml` — a single file for all sources, sinks, and pipeline settings,
-  managed via `ez-cdc datasource` subcommands. Docker compose files are
-  generated programmatically per (source, sink) pair and cached at
-  `e2e/.cache/compose/`.
-
-- **Banner colors are real brand colors.** Pulled from
-  `dev-workspace/brand/colors.json` (Tailwind Blue primary palette).
-  If you're looking at a gradient and wondering why that specific blue,
-  it's because that's the EZ-CDC logo color.
+  `ez-cdc.yaml` -- a single file for all sources, sinks, and pipeline
+  settings, managed via `ez-cdc datasource` subcommands. Docker compose
+  files are generated programmatically and cached at `e2e/.cache/compose/`.
