@@ -36,6 +36,9 @@ without that feature, variables marked **required** must be provided.
 | `SINK_SNOWFLAKE_ROLE` | *(empty)* | Snowflake role (optional). |
 | `SINK_SNOWFLAKE_PRIVATE_KEY_PATH` | *(empty)* | Path to the RSA private key for key-pair JWT authentication (preferred over user/password). |
 | `SINK_SNOWFLAKE_SOFT_DELETE` | `true` | `true` = rows marked with `_DBMAZZ_IS_DELETED=true`; `false` = hard `DELETE`. |
+| `SINK_SNOWFLAKE_MERGE_INTERVAL_MS` | `30000` | Normalizer MERGE polling interval in ms. |
+| `SINK_SNOWFLAKE_FLUSH_FILES` | `20` | Trigger `COPY INTO` after accumulating this many staged Parquet files. For e2e testing, set to `1` for immediate flush. |
+| `SINK_SNOWFLAKE_FLUSH_BYTES` | `104857600` | Trigger `COPY INTO` after accumulating this many bytes (default 100 MB). Whichever threshold (files or bytes) is reached first wins. |
 
 ## Pipeline / batching
 
