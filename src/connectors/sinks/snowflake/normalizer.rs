@@ -102,39 +102,46 @@ async fn normalizer_loop(config: NormalizerConfig, mut rx: mpsc::Receiver<i64>) 
     Ok(())
 }
 
-/// Process all pending batches sequentially.
+/// Process all pending batches in the raw table.
+///
+/// Snowflake sequences distribute ID ranges across sessions to avoid
+/// contention, so batch_ids are NOT guaranteed to be monotonically
+/// increasing over time (e.g., session A gets 1-100, session B gets
+/// 101-200). The normalizer must process ALL batch_ids present in the
+/// raw table, regardless of their numeric order relative to metadata.
+///
+/// The raw table is the source of truth: each batch is deleted after
+/// MERGE, so anything still in the raw table needs processing.
 async fn drain_pending_batches(
     client: &SnowflakeClient,
     config: &NormalizerConfig,
     raw_table: &str,
 ) -> Result<()> {
-    // Get current sync and normalize batch IDs from metadata
-    let result = client
+    // Query all batch_ids present in the raw table, ordered for determinism.
+    let pending_result = client
         .execute(&format!(
-            "SELECT SYNC_BATCH_ID, NORMALIZE_BATCH_ID \
-             FROM {}._DBMAZZ._METADATA \
-             WHERE JOB_NAME = '{}'",
-            config.database, config.job_name
+            "SELECT DISTINCT _BATCH_ID FROM {}.{} ORDER BY _BATCH_ID",
+            config.database, raw_table
         ))
         .await
-        .context("Failed to read metadata")?;
+        .context("Failed to get pending batch IDs")?;
 
-    let (sync_batch_id, normalize_batch_id) = parse_batch_ids(&result)?;
+    let pending_ids = parse_i64_column(&pending_result);
 
-    if normalize_batch_id >= sync_batch_id {
+    if pending_ids.is_empty() {
         return Ok(()); // Nothing to normalize
     }
 
     debug!(
-        "Normalizer: sync={}, normalize={}, pending={}",
-        sync_batch_id,
-        normalize_batch_id,
-        sync_batch_id - normalize_batch_id
+        "Normalizer: {} batches to process: {:?}",
+        pending_ids.len(),
+        pending_ids
     );
 
-    // Process each pending batch sequentially
-    for batch_id in (normalize_batch_id + 1)..=sync_batch_id {
-        normalize_single_batch(client, config, raw_table, batch_id).await?;
+    // Process each batch that has data. normalize_single_batch deletes
+    // processed records from raw, so they won't appear on the next poll.
+    for batch_id in &pending_ids {
+        normalize_single_batch(client, config, raw_table, *batch_id).await?;
     }
 
     Ok(())
@@ -156,7 +163,7 @@ async fn normalize_single_batch(
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     error!(
-                        "Normalizer: batch {} failed after {} retries, skipping: {}",
+                        "Normalizer: batch {} failed after {} retries, skipping: {:#}",
                         batch_id, MAX_RETRIES, e
                     );
                     // Update metadata to skip this batch
@@ -172,7 +179,7 @@ async fn normalize_single_batch(
 
                 let backoff = std::cmp::min(2u64.pow(retries), MAX_BACKOFF_SECS);
                 warn!(
-                    "Normalizer: batch {} retry {}/{} in {}s: {}",
+                    "Normalizer: batch {} retry {}/{} in {}s: {:#}",
                     batch_id, retries, MAX_RETRIES, backoff, e
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
@@ -286,7 +293,29 @@ async fn normalize_batch_inner(
     Ok(())
 }
 
+/// Parse a single i64 column from query result rows.
+fn parse_i64_column(result: &super::client::QueryResult) -> Vec<i64> {
+    let mut values = Vec::new();
+    if let Some(ref data) = result.data {
+        if let Some(rows) = data.as_array() {
+            for row in rows {
+                if let Some(row_arr) = row.as_array() {
+                    if let Some(val) = row_arr
+                        .first()
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<i64>().ok())
+                    {
+                        values.push(val);
+                    }
+                }
+            }
+        }
+    }
+    values
+}
+
 /// Parse sync_batch_id and normalize_batch_id from query result.
+#[allow(dead_code)]
 fn parse_batch_ids(result: &super::client::QueryResult) -> Result<(i64, i64)> {
     if let Some(ref data) = result.data {
         if let Some(rows) = data.as_array() {
