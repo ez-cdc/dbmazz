@@ -409,23 +409,23 @@ def _datasources_menu() -> None:
 
         try:
             if action == "list":
-                ds_cmds.list_cmd(datasources=DEFAULT_CONFIG_PATH)
+                ds_cmds.list_cmd(config=DEFAULT_CONFIG_PATH)
             elif action == "add":
-                ds_cmds.add_cmd(datasources=DEFAULT_CONFIG_PATH)
+                ds_cmds.add_cmd(config=DEFAULT_CONFIG_PATH)
             elif action == "show":
                 name = _prompt_pick_any_datasource("show")
                 if name:
-                    ds_cmds.show_cmd(name=name, reveal=False, datasources=DEFAULT_CONFIG_PATH)
+                    ds_cmds.show_cmd(name=name, reveal=False, config=DEFAULT_CONFIG_PATH)
             elif action == "test":
                 name = _prompt_pick_any_datasource("test")
                 if name:
-                    ds_cmds.test_cmd(name=name, datasources=DEFAULT_CONFIG_PATH)
+                    ds_cmds.test_cmd(name=name, config=DEFAULT_CONFIG_PATH)
             elif action == "remove":
                 name = _prompt_pick_any_datasource("remove")
                 if name:
-                    ds_cmds.remove_cmd(name=name, yes=False, datasources=DEFAULT_CONFIG_PATH)
+                    ds_cmds.remove_cmd(name=name, yes=False, config=DEFAULT_CONFIG_PATH)
             elif action == "init":
-                ds_cmds.init_demos_cmd(datasources=DEFAULT_CONFIG_PATH)
+                ds_cmds.init_demos_cmd(config=DEFAULT_CONFIG_PATH)
         except typer.Exit:
             # Subcommand decided to exit — swallow it so the menu loops.
             pass
