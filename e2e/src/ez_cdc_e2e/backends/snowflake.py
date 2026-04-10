@@ -112,8 +112,8 @@ class SnowflakeTarget(TargetBackend):
             supports_enum=False,
             has_metadata_table=True,
             supports_hash_compare_sql=True,
-            post_cdc_settle_seconds=10.0,        # async normalizer MERGE
-            post_snapshot_settle_seconds=15.0,   # snapshot flushes multiple COPY INTOs
+            post_cdc_settle_seconds=35.0,        # normalizer MERGE runs every 30s
+            post_snapshot_settle_seconds=40.0,   # snapshot COPY INTO + normalizer cycle
         )
 
     def expected_audit_columns(self) -> list[str]:
