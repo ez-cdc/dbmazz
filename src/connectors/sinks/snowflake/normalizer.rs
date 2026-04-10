@@ -156,7 +156,7 @@ async fn normalize_single_batch(
                 retries += 1;
                 if retries >= MAX_RETRIES {
                     error!(
-                        "Normalizer: batch {} failed after {} retries, skipping: {}",
+                        "Normalizer: batch {} failed after {} retries, skipping: {:#}",
                         batch_id, MAX_RETRIES, e
                     );
                     // Update metadata to skip this batch
@@ -172,7 +172,7 @@ async fn normalize_single_batch(
 
                 let backoff = std::cmp::min(2u64.pow(retries), MAX_BACKOFF_SECS);
                 warn!(
-                    "Normalizer: batch {} retry {}/{} in {}s: {}",
+                    "Normalizer: batch {} retry {}/{} in {}s: {:#}",
                     batch_id, retries, MAX_RETRIES, backoff, e
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
