@@ -426,6 +426,9 @@ def _build_env_file(source: SourceSpec, sink: SinkSpec, settings: PipelineSettin
             lines.append(f"SINK_SNOWFLAKE_ROLE={sink.role}")
         if sink.private_key_path:
             lines.append(f"SINK_SNOWFLAKE_PRIVATE_KEY_PATH={sink.private_key_path}")
+        # Force flush after every write_batch for e2e testing — default threshold
+        # of 20 files / 100MB is too high for small test datasets.
+        lines.append("SINK_SNOWFLAKE_FLUSH_FILES=1")
 
     lines += [
         "",
