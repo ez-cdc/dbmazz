@@ -41,7 +41,7 @@ from .datasources.schema import (
     StarRocksSinkSpec,
 )
 from .datasources.store import DatasourceStore
-from .paths import E2E_DIR
+from .paths import E2E_DIR, ENV_SNOWFLAKE_FILE
 from .tui import prompts
 from .tui.report import final_padding
 from .tui.theme import EZ_CDC_THEME
@@ -594,3 +594,183 @@ def add_cmd(
 
     store = _load_store(datasources, must_exist=False)
     run_add_wizard(store, console)
+
+
+# ── import-env ──────────────────────────────────────────────────────────────
+
+@datasource_app.command(
+    "import-env",
+    help="Import credentials from a legacy .env file into a new datasource.",
+)
+def import_env_cmd(
+    env_file: Path = typer.Option(
+        ENV_SNOWFLAKE_FILE, "--file", "-f",
+        help="Path to the env file to import (default: e2e/.env.snowflake).",
+    ),
+    name: str = typer.Option(
+        "snowflake-imported", "--name", "-n",
+        help="Name to assign to the new datasource.",
+    ),
+    datasource_type: str = typer.Option(
+        "snowflake", "--type", "-t",
+        help="Type of datasource to create. Currently only 'snowflake' is supported.",
+    ),
+    delete_after: bool = typer.Option(
+        False, "--delete-after",
+        help="Delete the env file after a successful import.",
+    ),
+    datasources: Path = typer.Option(
+        DEFAULT_DATASOURCES_PATH, "--datasources",
+    ),
+) -> None:
+    """Import legacy .env.snowflake credentials into datasources.yaml.
+
+    Convenience for users coming from PR 1, where Snowflake credentials
+    lived in a separate .env.snowflake file. This command parses that
+    file and writes the equivalent SnowflakeSinkSpec into the datasources
+    YAML, so subsequent runs use the YAML as the source of truth like
+    every other datasource. Optionally deletes the legacy file after.
+
+    The wizard (`ez-cdc datasource add` → sink → snowflake) is the
+    recommended path for *new* Snowflake configurations. import-env is
+    for migrating existing ones without retyping.
+    """
+    if not env_file.exists():
+        console.print()
+        console.print(Text(
+            f"Error: env file not found: {env_file}",
+            style="error",
+        ))
+        console.print(Text(
+            "  If your credentials live elsewhere, pass --file PATH.",
+            style="muted",
+        ))
+        final_padding(console)
+        raise typer.Exit(2)
+
+    if datasource_type != "snowflake":
+        console.print()
+        console.print(Text(
+            f"Error: --type={datasource_type!r} not supported. "
+            "Only 'snowflake' can be imported from .env files today.",
+            style="error",
+        ))
+        final_padding(console)
+        raise typer.Exit(3)
+
+    # Parse the env file
+    env_vars = _parse_env_file(env_file)
+
+    # Validate the required Snowflake vars
+    required = [
+        "SINK_SNOWFLAKE_ACCOUNT",
+        "SINK_USER",
+        "SINK_PASSWORD",
+        "SINK_DATABASE",
+        "SINK_SNOWFLAKE_WAREHOUSE",
+    ]
+    missing = [v for v in required if not env_vars.get(v)]
+    if missing:
+        console.print()
+        console.print(Text(
+            f"Error: env file is missing required variables: {', '.join(missing)}",
+            style="error",
+        ))
+        console.print(Text(
+            f"  See e2e/.env.snowflake.example for the expected format.",
+            style="muted",
+        ))
+        final_padding(console)
+        raise typer.Exit(2)
+
+    # Build the spec
+    soft_delete = (env_vars.get("SINK_SNOWFLAKE_SOFT_DELETE", "true").lower() == "true")
+    spec = SnowflakeSinkSpec(
+        managed=False,
+        account=env_vars["SINK_SNOWFLAKE_ACCOUNT"],
+        user=env_vars["SINK_USER"],
+        password=env_vars["SINK_PASSWORD"],
+        database=env_vars["SINK_DATABASE"],
+        warehouse=env_vars["SINK_SNOWFLAKE_WAREHOUSE"],
+        role=env_vars.get("SINK_SNOWFLAKE_ROLE") or None,
+        soft_delete=soft_delete,
+        **{"schema": env_vars.get("SINK_SCHEMA", "PUBLIC")},
+    )
+
+    # Add to store
+    store = _load_store(datasources, must_exist=False)
+    if store.exists(name):
+        console.print()
+        console.print(Text(
+            f"Error: a datasource named {name!r} already exists in {datasources}",
+            style="error",
+        ))
+        console.print(Text(
+            "  Use a different --name or remove the existing one first.",
+            style="muted",
+        ))
+        final_padding(console)
+        raise typer.Exit(2)
+
+    try:
+        store.add_sink(name, spec)
+        store.save()
+    except (DatasourceError, OSError) as e:
+        console.print(Text(f"Error: failed to save: {e}", style="error"))
+        final_padding(console)
+        raise typer.Exit(2)
+
+    console.print()
+    console.print(Text(
+        f"  ✓ Imported credentials from {env_file}",
+        style="success",
+    ))
+    console.print(Text(
+        f"      → saved as sink {name!r} in {datasources}",
+        style="muted",
+    ))
+
+    if delete_after:
+        try:
+            env_file.unlink()
+            console.print(Text(f"  ✓ Deleted {env_file}", style="success"))
+        except OSError as e:
+            console.print(Text(
+                f"  ⚠ Could not delete {env_file}: {e}",
+                style="warning",
+            ))
+    else:
+        console.print()
+        console.print(Text(
+            f"  ℹ The env file at {env_file} is no longer used by ez-cdc.",
+            style="muted",
+        ))
+        console.print(Text(
+            f"    Re-run with --delete-after to remove it, or keep it as a backup.",
+            style="muted",
+        ))
+
+    console.print()
+    console.print(Text(
+        f"  Try it: `ez-cdc verify --source demo-pg --sink {name}`",
+        style="info",
+    ))
+    final_padding(console)
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a simple KEY=VALUE .env file (same parser as backends/snowflake.py)."""
+    env: dict[str, str] = {}
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        env[key] = value
+    return env
