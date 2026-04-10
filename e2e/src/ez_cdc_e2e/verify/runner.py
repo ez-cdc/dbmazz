@@ -1,9 +1,13 @@
 """Verify runner — orchestrates tier execution and result collection.
 
-Takes a TestContext, runs the requested tiers in order, and returns a
-VerifyReport. Handles --skip filtering, streams results to the console
-as they happen (for live feedback), and collects everything for the
-final summary + optional JSON export.
+Takes a (source_spec, sink_spec) pair, builds a TestContext from them,
+runs the requested tiers in order, and returns a VerifyReport. Handles
+--skip filtering, streams results to the console as they happen, and
+collects everything for the final summary + optional JSON export.
+
+PR 4: the runner is now constructed via VerifyRunner.from_specs(...) which
+takes datasource specs instead of a ProfileSpec. The original __init__
+that took a ProfileSpec is gone — profiles.py was removed in chunk 9.
 
 In PR 1 only Tier 1 is implemented. Tier 2 is added in PR 2.
 """
@@ -16,11 +20,12 @@ from typing import Optional
 from rich.console import Console
 from rich.text import Text
 
-from ..backends.base import TargetBackend
+from ..datasources.schema import SinkSpec, SourceSpec
 from ..dbmazz import DbmazzClient, DbmazzError
-from ..profiles import ProfileSpec, load_backend_class
-from ..source.base import SourceClient
-from ..source.postgres import PostgresSource
+from ..instantiate import (
+    instantiate_backend_from_spec,
+    instantiate_source_from_spec,
+)
 from ..tui.report import (
     CheckResult,
     CheckStatus,
@@ -37,19 +42,55 @@ from .common import PrecheckError, TestContext, precheck
 
 
 class VerifyRunner:
-    """Orchestrates a verify run for a single profile."""
+    """Orchestrates a verify run for a single (source, sink) pair.
+
+    Constructed via the `from_specs` classmethod which takes datasource
+    specs and the names. The runner builds the TestContext (source +
+    target + dbmazz clients) lazily when run() is called, so construction
+    is cheap and never raises on missing services.
+    """
 
     def __init__(
         self,
-        profile: ProfileSpec,
+        *,
+        src_name: str,
+        src_spec: SourceSpec,
+        sk_name: str,
+        sk_spec: SinkSpec,
         console: Console,
         quick: bool = False,
         skip_ids: Optional[set[str]] = None,
     ) -> None:
-        self.profile = profile
+        self.src_name = src_name
+        self.src_spec = src_spec
+        self.sk_name = sk_name
+        self.sk_spec = sk_spec
         self.console = console
         self.quick = quick
         self.skip_ids = skip_ids or set()
+
+    @classmethod
+    def from_specs(
+        cls,
+        *,
+        src_name: str,
+        src_spec: SourceSpec,
+        sk_name: str,
+        sk_spec: SinkSpec,
+        console: Console,
+        quick: bool = False,
+        skip_ids: Optional[set[str]] = None,
+    ) -> "VerifyRunner":
+        """Build a runner from datasource specs (PR 4 entry point)."""
+        return cls(
+            src_name=src_name,
+            src_spec=src_spec,
+            sk_name=sk_name,
+            sk_spec=sk_spec,
+            console=console,
+            quick=quick,
+            skip_ids=skip_ids,
+        )
 
     def run(self) -> VerifyReport:
         """Execute the verify run and return the final report.
@@ -58,7 +99,8 @@ class VerifyRunner:
         for handling the return value (printing summary, writing JSON, setting
         exit code).
         """
-        report = VerifyReport(profile=self.profile.name)
+        report_name = f"{self.src_name}-to-{self.sk_name}"
+        report = VerifyReport(profile=report_name)
         start = time.time()
 
         # Build the context (connects source, target, dbmazz).
@@ -187,51 +229,27 @@ class VerifyRunner:
     # ── context lifecycle ────────────────────────────────────────────────────
 
     def _build_context(self) -> TestContext:
-        """Instantiate source, target, and dbmazz clients from the profile."""
-        source: SourceClient = PostgresSource(self.profile.source_dsn)
+        """Instantiate source, target, and dbmazz clients from the specs."""
+        source = instantiate_source_from_spec(self.src_spec)
         source.connect()
 
-        backend_cls = load_backend_class(self.profile)
-        target: TargetBackend = self._instantiate_backend(backend_cls)
+        target = instantiate_backend_from_spec(self.sk_spec)
         target.connect()
 
-        dbmazz = DbmazzClient(self.profile.dbmazz_http_url)
+        # All managed setups expose dbmazz on localhost:8080. For pure BYOD
+        # the same is true because compose still publishes the dbmazz container.
+        dbmazz = DbmazzClient("http://localhost:8080")
 
         return TestContext(
-            profile=self.profile,
             source=source,
             target=target,
             dbmazz=dbmazz,
             console=self.console,
+            tables=tuple(getattr(self.src_spec, "tables", ())),
+            source_name=self.src_name,
+            sink_name=self.sk_name,
+            source_managed=bool(getattr(self.src_spec, "managed", True)),
         )
-
-    def _instantiate_backend(self, backend_cls) -> TargetBackend:
-        """Build a target backend from profile + env.
-
-        Each backend has different constructor args. This is the place where
-        profile-specific wiring happens.
-        """
-        name = self.profile.name
-
-        if name == "pg-target":
-            return backend_cls(
-                dsn="postgres://postgres:postgres@localhost:25432/dbmazz_target",
-                schema="public",
-            )
-
-        if name == "starrocks":
-            return backend_cls(
-                host="localhost",
-                port=9030,
-                user="root",
-                password="",
-                database="dbmazz",
-            )
-
-        if name == "snowflake":
-            return backend_cls(env_file=self.profile.requires_env_file)
-
-        raise ValueError(f"unknown profile for backend instantiation: {name}")
 
     def _close_context(self, ctx: TestContext) -> None:
         try:

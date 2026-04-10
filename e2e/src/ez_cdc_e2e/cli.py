@@ -29,15 +29,23 @@ from rich.text import Text
 
 from . import __version__, compose
 from .backends.base import TargetBackend
+from .backends.postgres import PostgresTarget
+from .backends.snowflake import SnowflakeTarget
+from .backends.starrocks import StarRocksTarget
 from .compose import ComposeError
-from .dbmazz import DbmazzClient, DbmazzError
-from .profiles import (
-    ProfileSpec,
-    get_profile,
-    list_profiles,
-    list_runnable_profiles,
-    load_backend_class,
+from .compose_builder import build_compose_for_pair, cache_dir_for
+from .datasources.loader import DatasourceError, DatasourceNotFoundError
+from .datasources.presets import merge_demos_into
+from .datasources.schema import (
+    PostgresSinkSpec,
+    PostgresSourceSpec,
+    SinkSpec,
+    SnowflakeSinkSpec,
+    SourceSpec,
+    StarRocksSinkSpec,
 )
+from .datasources.store import DatasourceStore
+from .dbmazz import DbmazzClient, DbmazzError
 from .quickstart.dashboard import QuickstartDashboard
 from .source.postgres import PostgresSource
 from .tui import prompts
@@ -194,12 +202,10 @@ def _main_menu() -> None:
 def _compose_menu() -> None:
     """Submenu for compose operations (up, down, logs, status).
 
-    Sink selection is context-aware:
-      - `up` offers all profiles (any can be started)
-      - `down`, `logs`, `status` offer only profiles whose stack is
-        currently running. If no stacks are running, those actions
-        short-circuit with a clear message instead of dropping the user
-        into an empty selector.
+    Reads the user's datasources, lets them pick a (source, sink) pair, and
+    dispatches to the appropriate top-level command. For actions that
+    require an already-running stack (down/logs/status), only pairs whose
+    cache directory shows a running compose are listed.
     """
     action = prompts.select(
         "Compose action:",
@@ -214,94 +220,288 @@ def _compose_menu() -> None:
     if action in (None, "back"):
         raise _BackToMenu()
 
-    # `up` works against any profile; the others only make sense against a
-    # stack that's actually running.
     needs_running_stack = action in ("down", "logs", "status")
 
-    try:
-        if needs_running_stack:
-            sink = _prompt_running_sink_or_back(action)
-        else:
-            sink = _prompt_sink_or_back()
-    except _BackToMenu:
-        return  # back from sink selector → re-show the compose menu (caller loops)
+    if needs_running_stack:
+        pair = _pick_running_pair_or_back(action)
+        if pair is None:
+            return
+        source_name, sink_name = pair
+    else:
+        # `up` — let the user pick any pair from their datasources
+        try:
+            store = _load_store_for_flow()
+            _ensure_datasources_or_setup(store)
+            store.reload()
+            source_name = _pick_source_interactive(store)
+            sink_name = _pick_sink_interactive(store)
+        except _BackToMenu:
+            return
 
     if action == "up":
-        up(sink=sink)
+        up(source=source_name, sink=sink_name)
     elif action == "down":
-        down(sink=sink)
+        down(source=source_name, sink=sink_name)
     elif action == "logs":
-        logs(sink=sink)
+        logs(source=source_name, sink=sink_name)
     elif action == "status":
-        status(sink=sink)
+        status(source=source_name, sink=sink_name)
 
 
-def _prompt_running_sink_or_back(action_name: str) -> str:
-    """Sink selector restricted to profiles whose compose stack is running.
+def _pick_running_pair_or_back(action_name: str) -> Optional[tuple[str, str]]:
+    """List currently-running source/sink pairs and let the user pick one.
 
-    Shells out to `docker compose ps` (via compose.is_running) for each
-    profile and builds the selector from the result. If no stacks are
-    running, prints a helpful message and raises _BackToMenu so the
-    caller returns to the compose menu.
+    Iterates over all (source, sink) combinations from the user's datasources,
+    checks each cache_dir/compose.yml with compose.is_running(), and shows
+    only the running ones. If nothing is running, prints a helpful message
+    and returns None (caller falls back to the compose menu).
     """
-    # Probe each profile — this costs one `docker compose ps` per profile,
-    # which is ~50 ms each locally. Fast enough for menu UX.
-    running: list[ProfileSpec] = []
     try:
-        for profile in list_profiles():
-            if compose.is_running(profile.compose_profile):
-                running.append(profile)
-    except compose.ComposeError as e:
+        store = _load_store_for_flow()
+    except typer.Exit:
+        raise _BackToMenu()
+
+    if store.is_empty():
         console.print()
-        console.print(Text(f"  Error querying docker: {e}", style="error"))
+        console.print(Text(
+            f"  No datasources configured. Nothing can be {action_name}'d.",
+            style="warning",
+        ))
         console.print()
         raise _BackToMenu()
 
-    if not running:
+    running_pairs: list[tuple[str, str]] = []
+    try:
+        for src_name in store.list_sources():
+            for sk_name in store.list_sinks():
+                cache = cache_dir_for(src_name, sk_name)
+                cf = cache / "compose.yml"
+                if compose.is_running(cf):
+                    running_pairs.append((src_name, sk_name))
+    except ComposeError as e:
+        console.print(Text(f"  Error querying docker: {e}", style="error"))
+        raise _BackToMenu()
+
+    if not running_pairs:
         console.print()
         console.print(Text(
             f"  No stacks are currently running — nothing to {action_name}.",
             style="warning",
         ))
         console.print(Text(
-            "  Start one with `ez-cdc up <sink>` first.",
+            "  Start one with `ez-cdc up --source NAME --sink NAME` first.",
             style="muted",
         ))
         console.print()
         raise _BackToMenu()
 
     choices = [
-        {"name": p.name, "value": p.name, "description": p.description}
-        for p in running
+        {"name": f"{s} → {k}", "value": f"{s}|{k}", "description": ""}
+        for (s, k) in running_pairs
     ]
     choices.append({"name": "← Back", "value": "__back__", "description": ""})
 
     result = prompts.select(
         f"Which running stack would you like to {action_name}?",
         choices=choices,
-        default=running[0].name,
+        default=choices[0]["value"],
     )
     if result is None or result == "__back__":
         raise _BackToMenu()
-    return result
+
+    src_name, sk_name = result.split("|", 1)
+    return (src_name, sk_name)
 
 
-# ── Sink resolution helper ───────────────────────────────────────────────────
+# ── Datasource pair resolution ──────────────────────────────────────────────
 
-def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
-    """Resolve a sink name to a ProfileSpec, prompting if interactive and missing.
+# Default datasources file location (configurable per-flow with --datasources).
+from .paths import E2E_DIR  # noqa: E402
+DEFAULT_DATASOURCES_PATH = E2E_DIR / "datasources.yaml"
 
-    If the resolved profile requires an env file (e.g., snowflake needs
-    e2e/.env.snowflake) and the file doesn't exist, the user is prompted
-    to either supply a path or enter the credentials interactively.
+# Legacy profile names from PR 1 mapped to (source_name, sink_name) pairs of
+# the bundled demo datasources. Lets old CI scripts that did
+# `ez-cdc verify pg-target` keep working — they get auto-translated to
+# `--source demo-pg --sink demo-pg-target`.
+LEGACY_PROFILE_PAIRS: dict[str, tuple[str, str]] = {
+    "starrocks":  ("demo-pg", "demo-starrocks"),
+    "pg-target":  ("demo-pg", "demo-pg-target"),
+    "snowflake":  ("demo-pg", "demo-snowflake"),
+}
 
-    In interactive mode, if the user cancels any sub-prompt (Esc / Ctrl+C /
-    picks "Back"), this raises _BackToMenu instead of terminating the program.
-    The main menu loop catches it and re-shows the top-level menu.
+
+def _load_store_for_flow(
+    datasources_path: Path = DEFAULT_DATASOURCES_PATH,
+) -> DatasourceStore:
+    """Load the datasources store for a flow command.
+
+    On parse errors, prints a friendly message and exits with code 2.
+    On a missing file, returns an empty store (the gate decides what to do).
     """
-    if sink is None:
+    store = DatasourceStore(datasources_path)
+    try:
+        store.load(allow_missing=True)
+    except DatasourceError as e:
+        console.print(Text(f"Error: {e}", style="error"))
+        raise typer.Exit(2)
+    return store
+
+
+def _ensure_datasources_or_setup(store: DatasourceStore) -> None:
+    """Validate that the store has at least one source AND one sink.
+
+    If not, drives the user through one of three remediation paths in
+    interactive mode (configure now, use bundled demos, edit YAML manually),
+    or exits with a clear error in non-interactive mode.
+
+    Raises _BackToMenu if the user cancels — caught by the main menu loop.
+    """
+    if store.has_any():
+        return
+
+    if not is_interactive():
+        console.print(Text(
+            f"Error: no datasources configured in {store.path}\n"
+            f"  Run `ez-cdc datasource init-demos` to create the bundled demos,\n"
+            f"  or `ez-cdc datasource add` to configure your own.",
+            style="error",
+        ))
+        raise typer.Exit(2)
+
+    console.print()
+    console.print(Text(
+        "  ⚠ No datasources configured yet. You need at least one source "
+        "and one sink before you can run any flow.",
+        style="warning",
+    ))
+    console.print()
+
+    choice = prompts.select(
+        "How do you want to set them up?",
+        choices=[
+            {"name": "Use the bundled demo datasources", "value": "demos",
+             "description": "Adds demo-pg + demo-starrocks + demo-pg-target (no config needed)"},
+            {"name": "Configure them now (interactive wizard)", "value": "wizard",
+             "description": "Runs `ez-cdc datasource add` for source then sink"},
+            {"name": "Edit datasources.yaml manually", "value": "manual",
+             "description": "Show me the schema and let me edit"},
+            {"name": "← Back", "value": "back", "description": ""},
+        ],
+        default="demos",
+    )
+
+    if choice in (None, "back"):
+        raise _BackToMenu()
+
+    if choice == "demos":
+        _init_demos_inline(store)
+        return
+
+    if choice == "wizard":
+        from .datasources.wizard import run_add_wizard
+        # Run the wizard at least twice (need both a source and a sink).
+        while not store.has_any():
+            console.print()
+            if not store.list_sources():
+                console.print(Text("  Step: configure a source", style="info"))
+            elif not store.list_sinks():
+                console.print(Text("  Step: configure a sink", style="info"))
+            result = run_add_wizard(store, console)
+            if result is None:
+                # User cancelled mid-wizard. Loop back to the top-level
+                # remediation menu so they can pick again.
+                raise _BackToMenu()
+        return
+
+    if choice == "manual":
+        console.print()
+        console.print(Text(
+            f"  Edit {store.path} to add sources/sinks.",
+            style="info",
+        ))
+        console.print(Text(
+            "  See e2e/datasources.example.yaml for the schema "
+            "(or `ez-cdc datasource init-demos` to bootstrap).",
+            style="muted",
+        ))
+        console.print()
+        raise typer.Exit(0)
+
+
+def _init_demos_inline(store: DatasourceStore) -> None:
+    """Add bundled demos to the store and save. Used by the gate."""
+    added_src, added_sk = merge_demos_into(store)
+    try:
+        store.save()
+    except OSError as e:
+        console.print(Text(f"Error: failed to save: {e}", style="error"))
+        raise typer.Exit(2)
+    console.print()
+    console.print(Text(
+        f"  ✓ Added {len(added_src) + len(added_sk)} bundled demo datasource(s)",
+        style="success",
+    ))
+    for name in added_src:
+        console.print(Text(f"      + source: {name}", style="muted"))
+    for name in added_sk:
+        console.print(Text(f"      + sink:   {name}", style="muted"))
+    console.print()
+
+
+def _resolve_pair(
+    positional: Optional[str],
+    source_name: Optional[str],
+    sink_name: Optional[str],
+    *,
+    datasources_path: Path = DEFAULT_DATASOURCES_PATH,
+) -> tuple[str, SourceSpec, str, SinkSpec, Path, Path]:
+    """Resolve a (source, sink) pair from positional arg / flags / interactive picker.
+
+    Drives the user through the gate (_ensure_datasources_or_setup) if no
+    datasources are configured. Returns:
+
+        (source_name, source_spec, sink_name, sink_spec, compose_path, env_path)
+
+    Resolution order:
+      1. If positional matches a legacy profile name (starrocks/pg-target/snowflake),
+         map it to the demo pair (auto-importing demos if missing) and ignore
+         --source/--sink flags.
+      2. Else use the explicit --source/--sink flags if both given.
+      3. Else, in interactive mode, prompt with selectors. In non-interactive
+         mode, error out clearly.
+    """
+    store = _load_store_for_flow(datasources_path)
+
+    # Legacy profile name handling — auto-import demos if needed.
+    if positional and positional in LEGACY_PROFILE_PAIRS:
+        if not store.has_any():
+            _init_demos_inline(store)
+        legacy_src, legacy_sk = LEGACY_PROFILE_PAIRS[positional]
+        if not store.exists(legacy_src) or not store.exists(legacy_sk):
+            _init_demos_inline(store)
+        source_name = source_name or legacy_src
+        sink_name = sink_name or legacy_sk
+
+    # Gate: must have at least one source + one sink.
+    _ensure_datasources_or_setup(store)
+    # Reload in case the gate added datasources
+    store.reload()
+
+    # Resolve source name
+    if source_name is None:
         if is_interactive():
-            sink = _prompt_sink_or_back()
+            source_name = _pick_source_interactive(store)
+        else:
+            console.print(Text(
+                "Error: --source is required in non-interactive mode.",
+                style="error",
+            ))
+            raise typer.Exit(3)
+
+    # Resolve sink name
+    if sink_name is None:
+        if is_interactive():
+            sink_name = _pick_sink_interactive(store)
         else:
             console.print(Text(
                 "Error: --sink is required in non-interactive mode.",
@@ -310,271 +510,105 @@ def _resolve_sink(sink: Optional[str]) -> ProfileSpec:
             raise typer.Exit(3)
 
     try:
-        profile = get_profile(sink)
-    except KeyError as e:
-        console.print(Text(str(e), style="error"))
-        raise typer.Exit(3)
-
-    _ensure_env_file_if_needed(profile)
-    return profile
-
-
-def _ensure_env_file_if_needed(profile: ProfileSpec) -> None:
-    """For profiles that require an env file, ensure it exists.
-
-    If the file is missing and we're in interactive mode, prompt the user
-    to either point at an existing file elsewhere, enter credentials
-    interactively (with hidden password input), or go back.
-
-    Interactive input is the onboarding-friendly path: Snowflake trial users
-    don't have to know where to put a dotfile or how to copy the example.
-    """
-    if profile.requires_env_file is None:
-        return
-
-    target_path = profile.requires_env_file
-    if target_path.exists():
-        return  # all good
-
-    # Missing — in non-interactive mode, this is a hard error.
-    if not is_interactive():
-        console.print(Text(
-            f"Error: profile '{profile.name}' requires {target_path} which does not exist.\n"
-            f"  Copy {target_path}.example and fill it in, or run `ez-cdc` interactively "
-            f"to enter credentials.",
-            style="error",
-        ))
+        source_spec = store.get_source(source_name)
+        sink_spec = store.get_sink(sink_name)
+    except DatasourceNotFoundError as e:
+        console.print(Text(f"Error: {e}", style="error"))
         raise typer.Exit(2)
 
-    # Interactive flow.
-    console.print()
-    console.print(Text(
-        f"  Profile '{profile.name}' requires credentials, but {target_path} was not found.",
-        style="warning",
-    ))
-    console.print()
-
-    choice = prompts.select(
-        "How would you like to provide credentials?",
-        choices=[
-            {"name": "Enter them now",     "value": "input",
-             "description": "Interactive prompts (password hidden)"},
-            {"name": "Load from a file",   "value": "file",
-             "description": "Provide a path to an existing env file"},
-            {"name": "← Back",              "value": "back", "description": ""},
-        ],
-        default="input",
-    )
-
-    if choice in (None, "back"):
-        raise _BackToMenu()
-
-    if choice == "file":
-        _load_env_from_path(target_path)
-    elif choice == "input":
-        _prompt_env_interactive(profile, target_path)
-
-
-def _load_env_from_path(target_path: Path) -> None:
-    """Prompt the user for a path to an env file and copy it to target_path."""
-    raw = prompts.text(
-        f"Path to the env file (will be copied to {target_path}):",
-        default="",
-    )
-    if not raw:
-        raise _BackToMenu()
-
-    src = Path(raw).expanduser().resolve()
-    if not src.exists():
-        console.print(Text(f"Error: {src} does not exist", style="error"))
-        raise _BackToMenu()
-    if not src.is_file():
-        console.print(Text(f"Error: {src} is not a file", style="error"))
-        raise _BackToMenu()
-
+    # Generate the per-pair compose
     try:
-        content = src.read_text()
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_text(content)
-        try:
-            target_path.chmod(0o600)
-        except OSError:
-            pass
-    except OSError as e:
-        console.print(Text(f"Error: failed to copy {src} → {target_path}: {e}", style="error"))
-        raise _BackToMenu()
-
-    console.print(Text(f"  ✓ Credentials copied to {target_path}", style="success"))
-
-
-def _prompt_env_interactive(profile: ProfileSpec, target_path: Path) -> None:
-    """Prompt the user for Snowflake credentials interactively.
-
-    Currently Snowflake is the only profile that needs an env file, so the
-    field set is hard-coded here. If more sinks start requiring credentials,
-    this should become per-backend metadata.
-    """
-    if profile.name != "snowflake":
-        console.print(Text(
-            f"Interactive credential entry is only wired for snowflake (got {profile.name})",
-            style="error",
-        ))
-        raise _BackToMenu()
-
-    console.print()
-    console.print(Text("  Enter your Snowflake credentials:", style="info"))
-    console.print(Text("  (press Ctrl+C at any prompt to go back)", style="muted"))
-    console.print()
-
-    try:
-        account   = _required_text("Snowflake account", placeholder="xy12345.us-east-1")
-        user      = _required_text("User")
-        pw        = _required_password("Password")
-        database  = _required_text("Database")
-        schema    = prompts.text("Schema", default="PUBLIC") or "PUBLIC"
-        warehouse = _required_text("Warehouse", placeholder="COMPUTE_WH")
-        role      = prompts.text("Role (optional, press Enter to skip)", default="") or ""
-        soft_delete = prompts.confirm("Use soft delete?", default=False)
-    except _BackToMenu:
-        raise
-    except KeyboardInterrupt:
-        raise _BackToMenu()
-
-    # Always inject into the current process environment so the run can
-    # proceed immediately — even if the user opts not to save the file.
-    os.environ["SINK_SNOWFLAKE_ACCOUNT"]   = account
-    os.environ["SINK_USER"]                = user
-    os.environ["SINK_PASSWORD"]            = pw
-    os.environ["SINK_DATABASE"]            = database
-    os.environ["SINK_SCHEMA"]              = schema
-    os.environ["SINK_SNOWFLAKE_WAREHOUSE"] = warehouse
-    if role:
-        os.environ["SINK_SNOWFLAKE_ROLE"] = role
-    os.environ["SINK_SNOWFLAKE_SOFT_DELETE"] = "true" if soft_delete else "false"
-
-    # Offer to persist to disk for next time.
-    save = prompts.confirm(
-        f"Save these credentials to {target_path} for next time?",
-        default=True,
-    )
-
-    if save:
-        _write_snowflake_env_file(
-            target_path,
-            account=account, user=user, password=pw,
-            database=database, schema=schema, warehouse=warehouse,
-            role=role, soft_delete=soft_delete,
+        compose_path, env_path = build_compose_for_pair(
+            source_name, source_spec, sink_name, sink_spec,
         )
-        console.print(Text(f"  ✓ Saved to {target_path} (permissions 0600)", style="success"))
-    else:
-        console.print(Text(
-            "  ⚠ Credentials not saved — they will be lost when this process exits.",
-            style="warning",
-        ))
-    console.print()
+    except (FileNotFoundError, ValueError) as e:
+        console.print(Text(f"Error: {e}", style="error"))
+        raise typer.Exit(2)
+
+    return source_name, source_spec, sink_name, sink_spec, compose_path, env_path
 
 
-def _required_text(label: str, placeholder: str = "") -> str:
-    """Text prompt that re-asks until the user provides a non-empty value.
+def _pick_source_interactive(store: DatasourceStore) -> str:
+    """Prompt the user to pick a source from the store. Auto-pick if only 1."""
+    sources = store.list_sources()
+    if len(sources) == 1:
+        return sources[0]
 
-    Empty answer or Ctrl+C is treated as "go back".
-    """
-    msg = f"{label}:"
-    if placeholder:
-        msg = f"{label} (e.g. {placeholder}):"
-    value = prompts.text(msg, default="")
-    if value is None or value.strip() == "":
-        raise _BackToMenu()
-    return value.strip()
-
-
-def _required_password(label: str) -> str:
-    """Password prompt (hidden) that requires a non-empty value."""
-    value = prompts.password(f"{label}:")
-    if value is None or value == "":
-        raise _BackToMenu()
-    return value
-
-
-def _write_snowflake_env_file(
-    target_path: Path,
-    *,
-    account: str,
-    user: str,
-    password: str,
-    database: str,
-    schema: str,
-    warehouse: str,
-    role: str,
-    soft_delete: bool,
-) -> None:
-    """Write a .env.snowflake file with the given credentials."""
-    lines = [
-        "# ez-cdc Snowflake credentials — generated interactively",
-        "# Do not commit this file. It is gitignored.",
-        "",
-        f"SINK_SNOWFLAKE_ACCOUNT={account}",
-        f"SINK_USER={user}",
-        f"SINK_PASSWORD={password}",
-        f"SINK_DATABASE={database}",
-        f"SINK_SCHEMA={schema}",
-        f"SINK_SNOWFLAKE_WAREHOUSE={warehouse}",
-    ]
-    if role:
-        lines.append(f"SINK_SNOWFLAKE_ROLE={role}")
-    lines.append(f"SINK_SNOWFLAKE_SOFT_DELETE={'true' if soft_delete else 'false'}")
-    lines.append("")
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text("\n".join(lines))
-    try:
-        target_path.chmod(0o600)
-    except OSError:
-        # Non-POSIX filesystem or permission issue — not fatal.
-        pass
-
-
-def _prompt_sink_or_back() -> str:
-    """Interactive sink selection with an explicit "← Back" option.
-
-    Raises _BackToMenu if the user cancels (Esc/Ctrl+C) or picks "Back".
-    Returns the sink name on a real selection.
-    """
     choices = [
-        {"name": p.name, "value": p.name, "description": p.description}
-        for p in list_profiles()
+        {"name": name, "value": name, "description": _short_summary(store.get_source(name))}
+        for name in sources
     ]
     choices.append({"name": "← Back", "value": "__back__", "description": ""})
 
     result = prompts.select(
-        "Which sink would you like to use?",
+        "Which source?",
         choices=choices,
-        default="starrocks",
+        default=sources[0],
     )
     if result is None or result == "__back__":
         raise _BackToMenu()
     return result
 
 
-def _prompt_sink() -> Optional[str]:
-    """Backwards-compatible sink prompt that returns None on cancel.
+def _pick_sink_interactive(store: DatasourceStore) -> str:
+    """Prompt the user to pick a sink from the store. Auto-pick if only 1."""
+    sinks = store.list_sinks()
+    if len(sinks) == 1:
+        return sinks[0]
 
-    Kept for callers that don't participate in the _BackToMenu protocol.
-    New code should use _prompt_sink_or_back().
-    """
-    try:
-        return _prompt_sink_or_back()
-    except _BackToMenu:
-        return None
+    choices = [
+        {"name": name, "value": name, "description": _short_summary(store.get_sink(name))}
+        for name in sinks
+    ]
+    choices.append({"name": "← Back", "value": "__back__", "description": ""})
+
+    result = prompts.select(
+        "Which sink?",
+        choices=choices,
+        default=sinks[0],
+    )
+    if result is None or result == "__back__":
+        raise _BackToMenu()
+    return result
+
+
+def _short_summary(spec) -> str:
+    """One-line summary of a datasource spec for selector prompts."""
+    if isinstance(spec, PostgresSourceSpec):
+        if spec.managed:
+            return f"managed PG · tables={','.join(spec.tables)}"
+        return f"user PG · {len(spec.tables)} tables"
+    if isinstance(spec, PostgresSinkSpec):
+        return "managed PG" if spec.managed else "user PG"
+    if isinstance(spec, StarRocksSinkSpec):
+        return "managed StarRocks" if spec.managed else f"user StarRocks ({spec.url})"
+    if isinstance(spec, SnowflakeSinkSpec):
+        return f"Snowflake ({spec.account})"
+    return spec.type
+
+
+# (The old `_ensure_env_file_if_needed` family of helpers from PR 1 was
+# removed in PR4-7. Credentials now live in datasource specs (loaded from
+# datasources.yaml with ${VAR} interpolation), and the `add` wizard
+# collects them via interactive prompts that write directly to the spec.
+# There is no longer a separate .env.snowflake file managed by the CLI.)
+
+
+# (Old _prompt_sink_or_back / _prompt_sink helpers removed in PR4-7.
+# Replaced by _pick_source_interactive / _pick_sink_interactive above,
+# which operate on a DatasourceStore instead of a hardcoded profile list.)
 
 
 # ── Subcommand: quickstart ───────────────────────────────────────────────────
 
-@app.command(help="Launch a sink and watch replication live in a terminal dashboard.")
+@app.command(help="Launch a source/sink pair and watch replication live in a terminal dashboard.")
 def quickstart(
-    sink: Optional[str] = typer.Argument(
-        None, help="Sink profile: starrocks, pg-target, snowflake"
+    profile: Optional[str] = typer.Argument(
+        None,
+        help="Legacy profile name (starrocks, pg-target, snowflake). For explicit pairs use --source/--sink.",
     ),
+    source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
+    sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
     keep_up: bool = typer.Option(
         False, "--keep-up",
         help="Don't tear down the stack on exit (leave it running).",
@@ -585,33 +619,32 @@ def quickstart(
     ),
 ) -> None:
     _show_banner_a()
-    profile = _resolve_sink(sink)
 
-    # If a stack is already running, ask the user what they want to do.
-    # Reusing is faster and keeps whatever state the previous run left behind;
-    # recreating gives a clean slate (fresh seed + new replication slot).
+    src_name, src_spec, sk_name, sk_spec, compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
+
+    # If a stack is already running for this pair, offer reuse/recreate.
     already_running = False
     try:
-        already_running = compose.is_running(profile.compose_profile)
+        already_running = compose.is_running(compose_path)
     except ComposeError:
-        # docker not reachable — fall through to the normal up path, which
-        # will surface the error with a clearer message.
         pass
 
     if already_running:
         console.print()
         console.print(Text(
-            f"  A stack for '{profile.name}' is already running.",
+            f"  A stack for '{src_name} → {sk_name}' is already running.",
             style="warning",
         ))
         console.print()
         action = prompts.select(
             "What do you want to do?",
             choices=[
-                {"name": "Reuse it",              "value": "reuse",
-                 "description": "Open the dashboard on the existing stack (fast, keeps current state)"},
+                {"name": "Reuse it",             "value": "reuse",
+                 "description": "Open the dashboard on the existing stack"},
                 {"name": "Destroy and recreate", "value": "recreate",
-                 "description": "docker compose down -v, then up (clean slate, ~30s)"},
+                 "description": "docker compose down -v, then up (clean slate)"},
                 {"name": "← Back",                "value": "back", "description": ""},
             ],
             default="reuse",
@@ -621,39 +654,32 @@ def quickstart(
 
         if action == "recreate":
             console.print()
-            console.print(format_step(f"Destroying existing stack: {profile.compose_profile}"))
+            console.print(format_step(f"Destroying existing stack..."))
             try:
-                compose.down(profile.compose_profile, remove_volumes=True)
+                compose.down(compose_path, remove_volumes=True)
             except ComposeError as e:
                 console.print(Text(f"Failed to tear down stack: {e}", style="error"))
                 raise typer.Exit(2)
-            console.print(format_step_ok(f"Destroying existing stack: {profile.compose_profile}"))
+            console.print(format_step_ok(f"Destroying existing stack"))
             already_running = False
 
-    # Start compose (or confirm it's already up).
     console.print()
     if already_running:
-        console.print(format_step_ok(f"Reusing existing stack: {profile.compose_profile}"))
+        console.print(format_step_ok(f"Reusing existing stack: {src_name} → {sk_name}"))
     else:
-        console.print(format_step(f"Starting compose profile: {profile.compose_profile}"))
+        console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
         try:
-            compose.up(
-                profile.compose_profile,
-                env_file=profile.requires_env_file if profile.requires_env_file and profile.requires_env_file.exists() else None,
-                wait=True,
-                build=rebuild,
-            )
+            compose.up(compose_path, wait=True, build=rebuild)
         except ComposeError as e:
             console.print(Text(f"Failed to start compose: {e}", style="error"))
             raise typer.Exit(2)
-        console.print(format_step_ok(f"Starting compose profile: {profile.compose_profile}"))
+        console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
 
-    # Connect clients
-    dbmazz_client = DbmazzClient(profile.dbmazz_http_url)
-    source = PostgresSource(profile.source_dsn)
-    source.connect()
-    backend_cls = load_backend_class(profile)
-    target = _instantiate_backend(backend_cls, profile)
+    # Connect clients to the actual containers/endpoints
+    dbmazz_client = DbmazzClient("http://localhost:8080")
+    source_client = _instantiate_source_from_spec(src_spec)
+    source_client.connect()
+    target = _instantiate_backend_from_spec(sk_spec)
     target.connect()
 
     # Wait for CDC stage
@@ -662,7 +688,7 @@ def quickstart(
         dbmazz_client.wait_for_stage("cdc", timeout=180.0)
     except DbmazzError as e:
         console.print(Text(f"dbmazz did not reach CDC stage: {e}", style="error"))
-        source.close()
+        source_client.close()
         target.close()
         dbmazz_client.close()
         raise typer.Exit(2)
@@ -671,28 +697,31 @@ def quickstart(
     console.print(Text("Stack is live. Opening dashboard...", style="success"))
     console.print()
 
-    # Run dashboard
+    # Decide whether to enable the traffic generator: only for managed sources
+    # (we don't generate fake traffic against the user's real DB).
+    enable_traffic = bool(getattr(src_spec, "managed", False))
+
     dashboard = QuickstartDashboard(
-        profile=profile,
+        profile=_make_profile_shim(src_name, sk_name, src_spec),
         dbmazz=dbmazz_client,
         target=target,
         console=console,
-        source_counts_fn=lambda: {t: source.count_rows(t) for t in profile.tables},
+        source_counts_fn=lambda: {t: source_client.count_rows(t) for t in src_spec.tables},
+        traffic_rate_eps=15.0 if enable_traffic else 0.0,
     )
     try:
         dashboard.run()
     except KeyboardInterrupt:
         pass
     finally:
-        source.close()
+        source_client.close()
         target.close()
         dbmazz_client.close()
 
     console.print()
-    # Confirm teardown
     if keep_up:
         console.print(Text(
-            f"Stack left running. Run `ez-cdc down {profile.name}` to stop it.",
+            f"Stack left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
             style="muted",
         ))
         _print_thanks()
@@ -706,14 +735,14 @@ def quickstart(
     if confirmed:
         console.print()
         try:
-            compose.down(profile.compose_profile, remove_volumes=True)
+            compose.down(compose_path, remove_volumes=True)
         except ComposeError as e:
             console.print(Text(f"Failed to stop compose: {e}", style="error"))
             raise typer.Exit(2)
         console.print(Text("Stack destroyed.", style="muted"))
     else:
         console.print(Text(
-            f"Stack left running. Run `ez-cdc down {profile.name}` to stop it.",
+            f"Stack left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
             style="muted",
         ))
 
@@ -722,14 +751,18 @@ def quickstart(
 
 # ── Subcommand: verify ───────────────────────────────────────────────────────
 
-@app.command(help="Run e2e validation tests for a sink (or all sinks with --all).")
+@app.command(help="Run e2e validation tests for a source/sink pair (or all pairs with --all).")
 def verify(
-    sink: Optional[str] = typer.Argument(
-        None, help="Sink profile. Omit with --all to run everything."
+    profile: Optional[str] = typer.Argument(
+        None,
+        help="Legacy profile name (starrocks, pg-target, snowflake). For explicit pairs use --source/--sink.",
     ),
-    quick: bool = typer.Option(False, "--quick", help="Tier 1 only (~30s per sink)."),
-    all_sinks: bool = typer.Option(
-        False, "--all", help="Run verify for all runnable sinks (auto-detects snowflake)."
+    source: Optional[str] = typer.Option(None, "--source", help="Source datasource name."),
+    sink: Optional[str] = typer.Option(None, "--sink", help="Sink datasource name."),
+    quick: bool = typer.Option(False, "--quick", help="Tier 1 only (~30s per pair)."),
+    all_pairs: bool = typer.Option(
+        False, "--all",
+        help="Run verify for all (managed source × managed sink) pairs in your datasources.",
     ),
     skip: Optional[str] = typer.Option(
         None, "--skip", help="Comma-separated check IDs to skip, e.g. --skip C3,D7"
@@ -752,13 +785,18 @@ def verify(
 
     skip_ids = set(s.strip().upper() for s in skip.split(",")) if skip else set()
 
-    if all_sinks:
-        _verify_all(quick=quick, skip_ids=skip_ids, json_report=json_report, keep_up=keep_up, no_up=no_up, rebuild=rebuild)
+    if all_pairs:
+        _verify_all(
+            quick=quick, skip_ids=skip_ids, json_report=json_report,
+            keep_up=keep_up, no_up=no_up, rebuild=rebuild,
+        )
         return
 
-    profile = _resolve_sink(sink)
+    src_name, src_spec, sk_name, sk_spec, compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
     exit_code = _verify_one(
-        profile,
+        src_name, src_spec, sk_name, sk_spec, compose_path,
         quick=quick,
         skip_ids=skip_ids,
         json_report=json_report,
@@ -770,7 +808,11 @@ def verify(
 
 
 def _verify_one(
-    profile: ProfileSpec,
+    src_name: str,
+    src_spec: SourceSpec,
+    sk_name: str,
+    sk_spec: SinkSpec,
+    compose_path: Path,
     *,
     quick: bool,
     skip_ids: set[str],
@@ -779,53 +821,51 @@ def _verify_one(
     no_up: bool,
     rebuild: bool,
 ) -> int:
-    """Run verify for a single profile. Returns exit code."""
+    """Run verify for a single (source, sink) pair. Returns exit code."""
     console.print()
+    mode = "read-only" if not src_spec.managed else "full"
     console.print(
-        Text(f"EZ-CDC e2e   •   profile: {profile.name}   •   tier: {'1' if quick else '1+2'}",
-             style="brand")
+        Text(
+            f"EZ-CDC e2e   •   {src_name} → {sk_name}   •   "
+            f"tier: {'1' if quick else '1+2'} ({mode})",
+            style="brand",
+        )
     )
     console.print()
 
-    # Up compose (unless --no-up)
     if not no_up:
-        console.print(format_step(f"Starting compose profile: {profile.compose_profile}"))
+        console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
         try:
-            compose.up(
-                profile.compose_profile,
-                env_file=profile.requires_env_file if profile.requires_env_file and profile.requires_env_file.exists() else None,
-                wait=True,
-                build=rebuild,
-            )
+            compose.up(compose_path, wait=True, build=rebuild)
         except ComposeError as e:
             console.print(Text(f"Failed to start compose: {e}", style="error"))
             return 2
-        console.print(format_step_ok(f"Starting compose profile: {profile.compose_profile}"))
+        console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
 
-    # Run the verify suite
-    runner = VerifyRunner(
-        profile=profile,
+    # Run the verify suite using the spec-based runner.
+    runner = VerifyRunner.from_specs(
+        src_name=src_name,
+        src_spec=src_spec,
+        sk_name=sk_name,
+        sk_spec=sk_spec,
         console=console,
         quick=quick,
         skip_ids=skip_ids,
     )
     report = runner.run()
 
-    # Print final summary
     console.print(format_totals(report))
 
-    # Optional JSON report
     if json_report:
         json_report.parent.mkdir(parents=True, exist_ok=True)
         json_report.write_text(json.dumps(report_to_json(report), indent=2))
         console.print(Text(f"JSON report written to {json_report}", style="muted"))
 
-    # Tear down (unless --keep-up)
     if not keep_up:
         console.print()
         console.print(format_step("Tearing down compose..."))
         try:
-            compose.down(profile.compose_profile, remove_volumes=True)
+            compose.down(compose_path, remove_volumes=True)
         except ComposeError as e:
             console.print(Text(f"Warning: compose down failed: {e}", style="warning"))
         else:
@@ -843,36 +883,58 @@ def _verify_all(
     no_up: bool,
     rebuild: bool,
 ) -> None:
-    """Run verify for every runnable profile. Exits non-zero if any fail."""
-    runnable = list_runnable_profiles()
-    if not runnable:
-        console.print(Text("No runnable profiles found.", style="error"))
+    """Run verify for every (managed source × managed sink) pair in the store.
+
+    Per D38, --all only runs combinations where both source and sink are
+    `managed: true` — those are the safe, no-credentials-needed pairs that
+    matter for CI. User-managed datasources are excluded.
+    """
+    store = _load_store_for_flow()
+    _ensure_datasources_or_setup(store)
+    store.reload()
+
+    # Build the list of (source, sink) pairs to run
+    managed_sources = [
+        n for n in store.list_sources() if store.get_source(n).managed
+    ]
+    managed_sinks = [
+        n for n in store.list_sinks() if store.get_sink(n).managed
+    ]
+
+    if not managed_sources or not managed_sinks:
+        console.print(Text(
+            "Error: --all needs at least one managed source AND one managed sink. "
+            "Run `ez-cdc datasource init-demos` to bootstrap them.",
+            style="error",
+        ))
         raise typer.Exit(2)
 
-    # Report which profiles are in scope and which are skipped.
-    skipped_profiles = [p for p in list_profiles() if p not in runnable]
-    if skipped_profiles:
-        console.print()
-        for p in skipped_profiles:
-            reason = (
-                f"{p.requires_env_file} not found"
-                if p.requires_env_file is not None
-                else "not runnable"
-            )
-            console.print(Text(
-                f"  ⊘  {p.name} skipped — {reason}",
-                style="warning",
-            ))
+    pairs: list[tuple[str, SourceSpec, str, SinkSpec]] = []
+    for src_name in managed_sources:
+        for sk_name in managed_sinks:
+            src_spec = store.get_source(src_name)
+            sk_spec = store.get_sink(sk_name)
+            pairs.append((src_name, src_spec, sk_name, sk_spec))
 
-    aggregated: list[tuple[ProfileSpec, int]] = []
-    for profile in runnable:
-        # Each profile gets its own JSON report path (suffix the sink name).
+    aggregated: list[tuple[str, str, int]] = []
+    for src_name, src_spec, sk_name, sk_spec in pairs:
+        try:
+            compose_path, _env_path = build_compose_for_pair(
+                src_name, src_spec, sk_name, sk_spec,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            console.print(Text(f"Skipping {src_name} → {sk_name}: {e}", style="warning"))
+            aggregated.append((src_name, sk_name, 2))
+            continue
+
         report_path: Optional[Path] = None
         if json_report is not None:
-            report_path = json_report.with_stem(f"{json_report.stem}-{profile.name}")
+            report_path = json_report.with_stem(
+                f"{json_report.stem}-{src_name}-to-{sk_name}"
+            )
 
         exit_code = _verify_one(
-            profile,
+            src_name, src_spec, sk_name, sk_spec, compose_path,
             quick=quick,
             skip_ids=skip_ids,
             json_report=report_path,
@@ -880,16 +942,15 @@ def _verify_all(
             no_up=no_up,
             rebuild=rebuild,
         )
-        aggregated.append((profile, exit_code))
+        aggregated.append((src_name, sk_name, exit_code))
 
-    # Final aggregate summary
     console.print()
     console.print(Text("━" * 60, style="rule"))
-    any_failed = any(code != 0 for _, code in aggregated)
-    for p, code in aggregated:
+    any_failed = any(code != 0 for _, _, code in aggregated)
+    for src_name, sk_name, code in aggregated:
         sym = "✓" if code == 0 else "✗"
         style = "pass" if code == 0 else "fail"
-        console.print(Text(f"  {sym}  {p.name}", style=style))
+        console.print(Text(f"  {sym}  {src_name} → {sk_name}", style=style))
     console.print(Text("━" * 60, style="rule"))
     console.print()
 
@@ -898,65 +959,74 @@ def _verify_all(
 
 # ── Subcommand: up ───────────────────────────────────────────────────────────
 
-@app.command(help="Start the compose stack for a sink.")
+@app.command(help="Start the compose stack for a source/sink pair.")
 def up(
-    sink: Optional[str] = typer.Argument(None, help="Sink profile."),
+    profile: Optional[str] = typer.Argument(
+        None, help="Legacy profile name. Use --source/--sink for explicit pairs."
+    ),
+    source: Optional[str] = typer.Option(None, "--source"),
+    sink: Optional[str] = typer.Option(None, "--sink"),
     rebuild: bool = typer.Option(
         False, "--rebuild",
         help="Force `docker compose up --build`. Default reuses the cached dbmazz image.",
     ),
 ) -> None:
     _show_banner_d()
-    profile = _resolve_sink(sink)
+    src_name, _src_spec, sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
     console.print()
-    console.print(format_step(f"Starting compose profile: {profile.compose_profile}"))
+    console.print(format_step(f"Starting compose: {src_name} → {sk_name}"))
     try:
-        compose.up(
-            profile.compose_profile,
-            env_file=profile.requires_env_file if profile.requires_env_file and profile.requires_env_file.exists() else None,
-            wait=True,
-            build=rebuild,
-        )
+        compose.up(compose_path, wait=True, build=rebuild)
     except ComposeError as e:
         console.print(Text(f"Failed to start compose: {e}", style="error"))
         raise typer.Exit(2)
-    console.print(format_step_ok(f"Starting compose profile: {profile.compose_profile}"))
+    console.print(format_step_ok(f"Starting compose: {src_name} → {sk_name}"))
 
 
 # ── Subcommand: down ─────────────────────────────────────────────────────────
 
-@app.command(help="Stop and destroy the compose stack for a sink.")
+@app.command(help="Stop and destroy the compose stack for a source/sink pair.")
 def down(
-    sink: Optional[str] = typer.Argument(None, help="Sink profile."),
+    profile: Optional[str] = typer.Argument(None),
+    source: Optional[str] = typer.Option(None, "--source"),
+    sink: Optional[str] = typer.Option(None, "--sink"),
     keep_volumes: bool = typer.Option(
         False, "--keep-volumes", help="Keep named volumes (don't run with -v)."
     ),
 ) -> None:
     _show_banner_d()
-    profile = _resolve_sink(sink)
+    src_name, _src_spec, sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
     console.print()
-    console.print(format_step(f"Stopping compose profile: {profile.compose_profile}"))
+    console.print(format_step(f"Stopping compose: {src_name} → {sk_name}"))
     try:
-        compose.down(profile.compose_profile, remove_volumes=not keep_volumes)
+        compose.down(compose_path, remove_volumes=not keep_volumes)
     except ComposeError as e:
         console.print(Text(f"Failed to stop compose: {e}", style="error"))
         raise typer.Exit(2)
-    console.print(format_step_ok(f"Stopping compose profile: {profile.compose_profile}"))
+    console.print(format_step_ok(f"Stopping compose: {src_name} → {sk_name}"))
 
 
 # ── Subcommand: logs ─────────────────────────────────────────────────────────
 
-@app.command(help="Tail compose logs for a sink.")
+@app.command(help="Tail compose logs for a source/sink pair.")
 def logs(
-    sink: Optional[str] = typer.Argument(None, help="Sink profile."),
+    profile: Optional[str] = typer.Argument(None),
+    source: Optional[str] = typer.Option(None, "--source"),
+    sink: Optional[str] = typer.Option(None, "--sink"),
     follow: bool = typer.Option(True, "--follow/--no-follow", "-f", help="Stream logs."),
     tail: int = typer.Option(100, "--tail", "-n", help="Number of lines to show from the end."),
 ) -> None:
     _show_banner_d()
-    profile = _resolve_sink(sink)
+    _src_name, _src_spec, _sk_name, _sk_spec, compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
     console.print()
     try:
-        compose.logs(profile.compose_profile, follow=follow, tail=tail)
+        compose.logs(compose_path, follow=follow, tail=tail)
     except ComposeError as e:
         console.print(Text(f"Failed to tail logs: {e}", style="error"))
         raise typer.Exit(2)
@@ -966,11 +1036,18 @@ def logs(
 
 @app.command(help="Fetch a one-shot status snapshot from dbmazz.")
 def status(
-    sink: Optional[str] = typer.Argument(None, help="Sink profile."),
+    profile: Optional[str] = typer.Argument(None),
+    source: Optional[str] = typer.Option(None, "--source"),
+    sink: Optional[str] = typer.Option(None, "--sink"),
 ) -> None:
     _show_banner_d()
-    profile = _resolve_sink(sink)
-    client = DbmazzClient(profile.dbmazz_http_url)
+    # status doesn't actually need the spec — it just hits localhost:8080.
+    # We still resolve the pair so we can show what's running, and so the
+    # gate runs (i.e., the user gets a useful error if there are no datasources).
+    _src_name, _src_spec, _sk_name, _sk_spec, _compose_path, _env_path = _resolve_pair(
+        profile, source, sink,
+    )
+    client = DbmazzClient("http://localhost:8080")
     try:
         s = client.status()
     except DbmazzError as e:
@@ -1019,24 +1096,31 @@ def load(
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _instantiate_backend(backend_cls, profile: ProfileSpec) -> TargetBackend:
-    """Build a target backend from profile + env (kept in sync with verify/runner.py)."""
-    if profile.name == "pg-target":
-        return backend_cls(
-            dsn="postgres://postgres:postgres@localhost:25432/dbmazz_target",
-            schema="public",
-        )
-    if profile.name == "starrocks":
-        return backend_cls(
-            host="localhost",
-            port=9030,
-            user="root",
-            password="",
-            database="dbmazz",
-        )
-    if profile.name == "snowflake":
-        return backend_cls(env_file=profile.requires_env_file)
-    raise ValueError(f"unknown profile: {profile.name}")
+# Spec → client/backend instantiation lives in `instantiate.py` so the
+# verify runner can use the same logic without importing cli.py.
+from .instantiate import (  # noqa: E402
+    instantiate_backend_from_spec as _instantiate_backend_from_spec,
+    instantiate_source_from_spec as _instantiate_source_from_spec,
+)
+
+
+def _make_profile_shim(src_name: str, sk_name: str, src_spec: SourceSpec):
+    """Build a minimal object the QuickstartDashboard accepts as `profile`.
+
+    The dashboard from PR 1 expects an object with `.name`, `.dbmazz_http_url`,
+    `.source_dsn`, `.compose_profile`, and `.tables`. With the datasources
+    refactor we no longer have ProfileSpec instances, so we synthesize a
+    duck-typed shim from the source spec for backward compat with the
+    dashboard rendering code (which is unchanged in PR 4).
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        name=f"{src_name}-to-{sk_name}",
+        compose_profile=f"{src_name}-to-{sk_name}",
+        dbmazz_http_url="http://localhost:8080",
+        source_dsn="postgres://postgres:postgres@localhost:15432/dbmazz" if src_spec.managed else (src_spec.url or ""),
+        tables=tuple(src_spec.tables),
+    )
 
 
 def _print_thanks() -> None:

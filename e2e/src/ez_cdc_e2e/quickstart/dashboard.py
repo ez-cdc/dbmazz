@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from typing import Any
+
 from rich.console import Console, Group, RenderableType
 from rich.layout import Layout
 from rich.live import Live
@@ -34,7 +36,6 @@ from ..backends.base import TargetBackend
 from ..compose import logs as compose_logs
 from ..dbmazz import DaemonStatus, DbmazzClient, DbmazzError
 from ..load.generator import TrafficGenerator
-from ..profiles import ProfileSpec
 from ..tui.keys import KeyReader
 
 
@@ -129,7 +130,7 @@ class QuickstartDashboard:
 
     def __init__(
         self,
-        profile: ProfileSpec,
+        profile: Any,  # PR 4: duck-typed shim built by cli._make_profile_shim
         dbmazz: DbmazzClient,
         target: TargetBackend,
         console: Console,

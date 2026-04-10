@@ -10,7 +10,6 @@ from rich.console import Console
 
 from ..backends.base import TargetBackend
 from ..dbmazz import DbmazzClient
-from ..profiles import ProfileSpec
 from ..source.base import SourceClient
 
 
@@ -25,12 +24,21 @@ class TestContext:
     Passed to every check function. The `scratch` dict is a free-form
     place for checks to share state across each other (e.g., B1 stores
     the baseline counts, B2 reads them).
+
+    PR 4 reshape: instead of holding a `profile: ProfileSpec`, this dataclass
+    now carries the bare minimum the checks need: tables, source name (for
+    error messages), and a flag for whether the source is managed by us or
+    user-provided. The latter drives the read-only/full mode decision in
+    PR 5; today the field is set but unused by the tier 1 checks.
     """
-    profile: ProfileSpec
     source: SourceClient
     target: TargetBackend
     dbmazz: DbmazzClient
     console: Console
+    tables: tuple[str, ...]
+    source_name: str = "source"
+    sink_name: str = "sink"
+    source_managed: bool = True
     scratch: dict[str, Any] = field(default_factory=dict)
 
 
@@ -87,13 +95,14 @@ def precheck(ctx: TestContext) -> None:
     # dbmazz healthy
     if not ctx.dbmazz.health():
         raise PrecheckError(
-            f"dbmazz daemon at {ctx.profile.dbmazz_http_url} is not healthy. "
-            "Is the compose stack up?"
+            "dbmazz daemon is not healthy. Is the compose stack up?"
         )
 
     # Source reachable
+    if not ctx.tables:
+        raise PrecheckError("source has no tables declared in the datasource spec")
     try:
-        _ = ctx.source.count_rows(ctx.profile.tables[0])
+        _ = ctx.source.count_rows(ctx.tables[0])
     except Exception as e:
         raise PrecheckError(f"Source database unreachable: {e}") from e
 

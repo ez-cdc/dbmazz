@@ -94,7 +94,7 @@ def _wait_until_absent_in_target(
 # ── Phase 1: Schema ──────────────────────────────────────────────────────────
 
 def check_a1_target_tables_present(ctx: TestContext) -> CheckResult:
-    expected = list(ctx.profile.tables)
+    expected = list(ctx.tables)
     actual = set(ctx.target.list_tables())
     missing = [t for t in expected if t not in actual]
     if missing:
@@ -122,7 +122,7 @@ def check_a2_source_columns_in_target(ctx: TestContext) -> CheckResult:
     total_cols = 0
     matched_cols = 0
 
-    for table in ctx.profile.tables:
+    for table in ctx.tables:
         # Read source column names via information_schema.
         # We use the source client's low-level connection directly for this
         # because adding a list_columns method to SourceClient just for one
@@ -166,7 +166,7 @@ def check_a3_audit_columns_present(ctx: TestContext) -> CheckResult:
         )
 
     missing_by_table: dict[str, list[str]] = {}
-    for table in ctx.profile.tables:
+    for table in ctx.tables:
         target_cols = {c.name.lower() for c in ctx.target.get_columns(table)}
         for col in expected_cols:
             if col.lower() not in target_cols:
@@ -185,7 +185,7 @@ def check_a3_audit_columns_present(ctx: TestContext) -> CheckResult:
         id="A3",
         description="Audit columns present",
         status=CheckStatus.PASS,
-        detail=f"{len(expected_cols)} cols × {len(ctx.profile.tables)} tables",
+        detail=f"{len(expected_cols)} cols × {len(ctx.tables)} tables",
     )
 
 
@@ -241,7 +241,7 @@ def check_b1_snapshot_counts(ctx: TestContext) -> CheckResult:
     baselines: dict[str, int] = {}
     mismatches: list[str] = []
 
-    for table in ctx.profile.tables:
+    for table in ctx.tables:
         src_count = ctx.source.count_rows(table)
         tgt_count = ctx.target.count_rows(table)
         baselines[table] = src_count
@@ -275,7 +275,7 @@ def check_b3_no_duplicates(ctx: TestContext) -> CheckResult:
     emitted as a CDC event. This check should return 0 duplicates.
     """
     dupes_by_table: dict[str, int] = {}
-    for table in ctx.profile.tables:
+    for table in ctx.tables:
         dupes = ctx.target.count_duplicates_by_pk(table, pk_column="id")
         if dupes > 0:
             dupes_by_table[table] = dupes
@@ -713,9 +713,9 @@ def check_h1_no_op_idempotent(ctx: TestContext) -> CheckResult:
     PR 1 implements the weaker variant of H1 (no actual dbmazz restart).
     The full restart-based idempotency test lives in the roadmap (plan §11 H2).
     """
-    counts_before = {t: ctx.target.count_rows(t) for t in ctx.profile.tables}
+    counts_before = {t: ctx.target.count_rows(t) for t in ctx.tables}
     time.sleep(ctx.target.capabilities.post_cdc_settle_seconds + 1)
-    counts_after = {t: ctx.target.count_rows(t) for t in ctx.profile.tables}
+    counts_after = {t: ctx.target.count_rows(t) for t in ctx.tables}
 
     drift: list[str] = []
     for table, before in counts_before.items():
