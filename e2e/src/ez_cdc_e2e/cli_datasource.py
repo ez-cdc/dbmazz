@@ -33,6 +33,7 @@ from .datasources.loader import (
 )
 from .datasources.presets import merge_demos_into
 from .datasources.schema import (
+    PipelineSettings,
     PostgresSinkSpec,
     PostgresSourceSpec,
     SinkSpec,
@@ -594,3 +595,131 @@ def add_cmd(
 
     store = _load_store(datasources, must_exist=False)
     run_add_wizard(store, console)
+
+
+# ── settings ────────────────────────────────────────────────────────────────
+
+_SETTINGS_FIELDS = [
+    ("flush_size",               "Batch size (events per flush)",          "int"),
+    ("flush_interval_ms",        "Flush interval (ms)",                    "int"),
+    ("do_snapshot",              "Enable initial snapshot",                "bool"),
+    ("snapshot_chunk_size",      "Rows per snapshot chunk",                "int"),
+    ("snapshot_parallel_workers","Parallel snapshot workers",              "int"),
+    ("initial_snapshot_only",    "Exit after snapshot (no CDC)",           "bool"),
+    ("rust_log",                 "Log level (RUST_LOG)",                   "str"),
+]
+
+
+@datasource_app.command("settings", help="View or edit dbmazz pipeline settings.")
+def settings_cmd(
+    edit: bool = typer.Option(
+        False, "--edit", "-e",
+        help="Interactively edit settings (without this flag, just shows current values).",
+    ),
+    datasources: Path = typer.Option(
+        DEFAULT_DATASOURCES_PATH, "--datasources",
+    ),
+) -> None:
+    store = _load_store(datasources, must_exist=False)
+    settings = store.data.settings
+
+    if not edit:
+        _show_settings(settings)
+        return
+
+    _edit_settings_interactive(store, settings)
+
+
+def _show_settings(settings: PipelineSettings) -> None:
+    """Display current pipeline settings in a table."""
+    table = Table(
+        title=Text("Pipeline settings", style="brand"),
+        title_justify="left",
+        show_header=True,
+        header_style="panel.header",
+        border_style="panel.border",
+        padding=(0, 1),
+    )
+    table.add_column("Setting",     style="metric.label", no_wrap=True)
+    table.add_column("Value",       style="metric.number", no_wrap=True)
+    table.add_column("Env var",     style="muted", no_wrap=True)
+    table.add_column("Description", style="check.detail")
+
+    for field_name, description, _ in _SETTINGS_FIELDS:
+        value = getattr(settings, field_name)
+        env_var = field_name.upper()
+        table.add_row(field_name, str(value), env_var, description)
+
+    console.print()
+    console.print(Padding(table, (0, 0, 0, 2)))
+    console.print()
+    console.print(Text(
+        "  Use `ez-cdc datasource settings --edit` to change values.",
+        style="muted",
+    ))
+    final_padding(console)
+
+
+def _edit_settings_interactive(store: DatasourceStore, settings: PipelineSettings) -> None:
+    """Walk through each setting and let the user change it."""
+    console.print()
+    console.print(Text(
+        "  Edit pipeline settings (press Enter to keep current value):",
+        style="info",
+    ))
+    console.print()
+
+    changed = False
+    for field_name, description, field_type in _SETTINGS_FIELDS:
+        current = getattr(settings, field_name)
+
+        if field_type == "bool":
+            new_val = prompts.confirm(
+                f"  {description}",
+                default=current,
+            )
+            if new_val != current:
+                setattr(settings, field_name, new_val)
+                changed = True
+        elif field_type == "int":
+            raw = prompts.text(
+                f"  {description}",
+                default=str(current),
+            )
+            if raw is None:
+                continue
+            raw = raw.strip()
+            if raw and raw != str(current):
+                try:
+                    setattr(settings, field_name, int(raw))
+                    changed = True
+                except (ValueError, Exception) as e:
+                    console.print(Text(f"    Invalid value: {e}", style="error"))
+        else:
+            raw = prompts.text(
+                f"  {description}",
+                default=str(current),
+            )
+            if raw is None:
+                continue
+            raw = raw.strip()
+            if raw and raw != str(current):
+                setattr(settings, field_name, raw)
+                changed = True
+
+    if not changed:
+        console.print()
+        console.print(Text("  No changes made.", style="muted"))
+        final_padding(console)
+        return
+
+    store.data.settings = settings
+    try:
+        store.save()
+    except OSError as e:
+        console.print(Text(f"Error: failed to save: {e}", style="error"))
+        raise typer.Exit(2)
+
+    console.print()
+    console.print(Text("  ✓ Settings saved", style="success"))
+    final_padding(console)

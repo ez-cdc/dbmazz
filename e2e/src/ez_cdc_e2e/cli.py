@@ -783,6 +783,7 @@ def _resolve_pair(
     try:
         compose_path, env_path = build_compose_for_pair(
             source_name, source_spec, sink_name, sink_spec,
+            settings=store.data.settings,
         )
     except (FileNotFoundError, ValueError) as e:
         console.print(Text(f"Error: {e}", style="error"))
@@ -1189,6 +1190,7 @@ def _verify_all(
         try:
             compose_path, _env_path = build_compose_for_pair(
                 src_name, src_spec, sk_name, sk_spec,
+                settings=store.data.settings,
             )
         except (FileNotFoundError, ValueError) as e:
             console.print(Text(f"Skipping {src_name} → {sk_name}: {e}", style="warning"))

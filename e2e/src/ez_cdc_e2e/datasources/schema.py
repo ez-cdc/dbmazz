@@ -240,6 +240,66 @@ class SnowflakeSinkSpec(_DatasourceBase):
         return v
 
 
+# ── Pipeline settings ───────────────────────────────────────────────────────
+
+class PipelineSettings(BaseModel):
+    """Tuning knobs for the dbmazz daemon.
+
+    These map 1:1 to the environment variables that dbmazz reads from
+    ``Config::from_env()`` in ``src/config.rs``.  Defaults match the
+    values used by the old static compose.yml so existing workflows are
+    unchanged when ``settings:`` is omitted from the YAML.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    flush_size: int = Field(
+        default=2000,
+        ge=1,
+        description="Max events per batch (FLUSH_SIZE).",
+    )
+    flush_interval_ms: int = Field(
+        default=2000,
+        ge=100,
+        description="Max ms before flushing a partial batch (FLUSH_INTERVAL_MS).",
+    )
+    do_snapshot: bool = Field(
+        default=True,
+        description="Enable initial snapshot / backfill (DO_SNAPSHOT).",
+    )
+    snapshot_chunk_size: int = Field(
+        default=10000,
+        ge=1,
+        description="Rows per snapshot chunk (SNAPSHOT_CHUNK_SIZE).",
+    )
+    snapshot_parallel_workers: int = Field(
+        default=2,
+        ge=1,
+        le=32,
+        description="Parallel snapshot workers (SNAPSHOT_PARALLEL_WORKERS).",
+    )
+    initial_snapshot_only: bool = Field(
+        default=False,
+        description="Exit after snapshot — no CDC (INITIAL_SNAPSHOT_ONLY).",
+    )
+    rust_log: str = Field(
+        default="info",
+        description="Rust log filter (RUST_LOG). e.g. info, debug, dbmazz=debug.",
+    )
+
+    def to_env_lines(self) -> list[str]:
+        """Render as KEY=value lines for the .env file."""
+        return [
+            f"FLUSH_SIZE={self.flush_size}",
+            f"FLUSH_INTERVAL_MS={self.flush_interval_ms}",
+            f"DO_SNAPSHOT={'true' if self.do_snapshot else 'false'}",
+            f"SNAPSHOT_CHUNK_SIZE={self.snapshot_chunk_size}",
+            f"SNAPSHOT_PARALLEL_WORKERS={self.snapshot_parallel_workers}",
+            f"INITIAL_SNAPSHOT_ONLY={'true' if self.initial_snapshot_only else 'false'}",
+            f"RUST_LOG={self.rust_log}",
+        ]
+
+
 # ── Discriminated unions ─────────────────────────────────────────────────────
 
 # Pydantic v2 discriminator on `type` — tells the parser which subclass to
@@ -271,6 +331,7 @@ class DatasourcesFile(BaseModel):
         str_strip_whitespace=True,
     )
 
+    settings: PipelineSettings = Field(default_factory=PipelineSettings)
     sources: dict[str, SourceSpec] = Field(default_factory=dict)
     sinks: dict[str, SinkSpec] = Field(default_factory=dict)
 
