@@ -20,13 +20,22 @@ from .theme import PRIMARY_400, GRAY_400, GRAY_500
 # All "chosen" styles use the brand blue (PRIMARY_400) — using green (SUCCESS)
 # is reserved for pass results in the verify output. Mixing them confuses the
 # user into thinking the default choice is already "correct".
+#
+# IMPORTANT — `noreverse` and `bg:default` on `highlighted`:
+#   prompt_toolkit applies a reverse-video (inverted background) effect by
+#   default to the currently-hovered choice in a select. That produces a
+#   solid blue block under the first option, which looks like the option
+#   is "pre-selected". We don't want that — we just want the text in brand
+#   color and the `❯` pointer to indicate position.
+#   `noreverse` cancels the reverse effect and `bg:default` keeps the
+#   terminal's normal background (no fill).
 EZ_CDC_PROMPT_STYLE = Style([
     ("qmark",       f"fg:{PRIMARY_400} bold"),   # the ? marker
     ("question",    "bold"),                      # question text
     ("answer",      f"fg:{PRIMARY_400} bold"),    # user's answer (after confirm)
     ("pointer",     f"fg:{PRIMARY_400} bold"),    # ❯ indicator
-    ("highlighted", f"fg:{PRIMARY_400} bold"),    # currently-hovered choice
-    ("selected",    f"fg:{PRIMARY_400}"),         # selected item (multiselect)
+    ("highlighted", f"fg:{PRIMARY_400} bold noreverse bg:default"),
+    ("selected",    f"fg:{PRIMARY_400} noreverse bg:default"),  # multiselect "checked"
     ("separator",   f"fg:{GRAY_500}"),            # separator lines
     ("instruction", f"fg:{GRAY_400}"),            # "(use ↑↓ to navigate)"
     ("text",        ""),                          # plain text
