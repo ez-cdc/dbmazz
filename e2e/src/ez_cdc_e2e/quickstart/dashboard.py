@@ -211,6 +211,10 @@ class QuickstartDashboard:
             self._tail_logs(live, keys)
             return
 
+        if key in ("t", "T"):
+            self._toggle_traffic()
+            return
+
         if key in ("p", "P"):
             self._pause_daemon()
             return
@@ -222,6 +226,17 @@ class QuickstartDashboard:
         if key in ("s", "S"):
             self._trigger_snapshot()
             return
+
+    def _toggle_traffic(self) -> None:
+        """Toggle the background traffic generator (pause/resume)."""
+        if self.traffic_generator is None or not self.traffic_generator.is_running():
+            self._set_status("Traffic generator is not running.", ttl=3.0)
+            return
+        now_paused = self.traffic_generator.toggle()
+        if now_paused:
+            self._set_status("Traffic paused. Press 't' again to resume.", ttl=3.0)
+        else:
+            self._set_status("Traffic resumed.", ttl=3.0)
 
     def _tail_logs(self, live: Live, keys: KeyReader) -> None:
         """Pause Live, tail docker logs, resume Live on any key."""
@@ -352,17 +367,24 @@ class QuickstartDashboard:
 
         # Traffic generator indicator — tells the user WHY the numbers
         # are moving (otherwise the dashboard just looks busy for no
-        # obvious reason on a fresh stack).
+        # obvious reason on a fresh stack). Shows a different glyph +
+        # color when paused so the state is visually obvious.
         if self.traffic_generator is not None and self.traffic_generator.is_running():
             gen_stats = self.traffic_generator.stats
+            gen_paused = self.traffic_generator.is_paused
             gen_line = Text()
             gen_line.append("  ")
-            gen_line.append("● ", style="info")
-            gen_line.append("traffic  ", style="metric.label")
-            gen_line.append(
-                f"generating ~{self.traffic_rate_eps:.0f} ops/s",
-                style="metric.number",
-            )
+            if gen_paused:
+                gen_line.append("◌ ", style="warning")
+                gen_line.append("traffic  ", style="metric.label")
+                gen_line.append("paused", style="warning")
+            else:
+                gen_line.append("● ", style="info")
+                gen_line.append("traffic  ", style="metric.label")
+                gen_line.append(
+                    f"generating ~{self.traffic_rate_eps:.0f} ops/s",
+                    style="metric.number",
+                )
             gen_line.append(
                 f"   ({gen_stats.inserts} ins, {gen_stats.updates} upd, "
                 f"{gen_stats.deletes} del)",
@@ -452,8 +474,9 @@ class QuickstartDashboard:
         for key, label in [
             ("[q]", "quit"),
             ("[l]", "logs"),
-            ("[p]", "pause"),
-            ("[r]", "resume"),
+            ("[t]", "toggle traffic"),
+            ("[p]", "pause daemon"),
+            ("[r]", "resume daemon"),
             ("[s]", "snapshot"),
         ]:
             t.append(key, style="brand")
