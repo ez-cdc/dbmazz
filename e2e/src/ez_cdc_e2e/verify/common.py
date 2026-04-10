@@ -108,6 +108,25 @@ def precheck(ctx: TestContext) -> None:
 
     # Target reachable
     try:
-        _ = ctx.target.list_tables()
+        target_tables = ctx.target.list_tables()
     except Exception as e:
         raise PrecheckError(f"Target {ctx.target.name} unreachable: {e}") from e
+
+    # Target must be clean — stale data from a previous run will pollute results.
+    # We only check tables that are in ctx.tables (the ones being replicated).
+    dirty_tables: list[str] = []
+    for table in ctx.tables:
+        if table in target_tables:
+            try:
+                count = ctx.target.count_rows(table, exclude_deleted=False)
+                if count > 0:
+                    dirty_tables.append(f"{table} ({count} rows)")
+            except Exception:
+                pass  # table might exist but be inaccessible; A1 will catch that
+    if dirty_tables:
+        raise PrecheckError(
+            f"Target has stale data from a previous run — clean it before verify.\n"
+            f"  Dirty tables: {', '.join(dirty_tables)}\n"
+            f"  For managed sinks, run: ez-cdc down --source <SRC> --sink <SINK>\n"
+            f"  Then start fresh:       ez-cdc verify --source <SRC> --sink <SINK>"
+        )

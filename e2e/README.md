@@ -176,21 +176,26 @@ a two-letter ID (e.g., `A1`, `D4`) that you can skip individually.
 
 ### Tier 1 — Correctness baseline (~30s per sink, runs with `--quick`)
 
+**Precheck:** before any check runs, verify confirms the target tables
+are empty (no stale data from a previous run). If dirty tables are found,
+verify exits with a clear message listing what to clean.
+
 | ID | Check |
 |---|---|
 | A1 | Target tables present |
 | A2 | Source columns in target |
 | A3 | Audit columns present |
 | A4 | Metadata table has rows (skipped for sinks without one) |
-| B1 | Snapshot counts match |
+| B1 | Snapshot row counts match (source vs target per table) |
+| B1b | Snapshot content matches (PK sets + spot-check column values) |
 | B3 | Zero duplicates by PK |
-| C10 | NULL roundtrip |
 | D1 | INSERT replicated |
 | D2 | UPDATE replicated |
-| D3 | DELETE replicated |
-| **D4** | **TOAST UPDATE preserves unchanged value** — bug #1 in PG CDCs |
-| D5 | Multi-row INSERT in single TX |
 | E1 | Sequential UPDATEs, last wins |
+| D3 | DELETE replicated |
+| D5 | Multi-row INSERT in single TX |
+| **D4** | **TOAST UPDATE preserves unchanged value** — bug #1 in PG CDCs |
+| C10 | NULL roundtrip |
 | B2 | Post-CDC delta matches |
 | H1 | Restart without traffic is no-op |
 

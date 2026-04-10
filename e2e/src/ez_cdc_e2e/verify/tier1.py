@@ -267,6 +267,67 @@ def check_b1_snapshot_counts(ctx: TestContext) -> CheckResult:
     )
 
 
+def check_b1b_snapshot_content(ctx: TestContext) -> CheckResult:
+    """Verify that the snapshot copied the actual data, not just the right count.
+
+    Compares the set of PKs in source vs target for each table. If the counts
+    match (B1 passed) but the PKs differ, it means the snapshot wrote wrong rows.
+    Also spot-checks a sample of column values to catch silent data corruption.
+    """
+    missing_by_table: dict[str, list] = {}
+    extra_by_table: dict[str, list] = {}
+    corrupt: list[str] = []
+
+    for table in ctx.tables:
+        src_pks = set(ctx.source.list_primary_keys(table, "id"))
+        tgt_pks = set(ctx.target.list_primary_keys(table, "id"))
+
+        missing = src_pks - tgt_pks
+        extra = tgt_pks - src_pks
+
+        if missing:
+            # Show at most 10 examples
+            missing_by_table[table] = sorted(missing)[:10]
+        if extra:
+            extra_by_table[table] = sorted(extra)[:10]
+
+        # Spot-check: pick up to 5 rows and compare a value column.
+        # Only tables with a 'status' column (orders has it, order_items doesn't).
+        tgt_col_names = {c.name.lower() for c in ctx.target.get_columns(table)}
+        if "status" in tgt_col_names:
+            sample_pks = sorted(src_pks & tgt_pks)[:5]
+            for pk in sample_pks:
+                src_val = ctx.source.fetch_value(table, "id", pk, "status")
+                tgt_val = ctx.target.fetch_value(table, "id", pk, "status")
+                if str(src_val).strip() != str(tgt_val).strip():
+                    corrupt.append(f"{table}.id={pk}: source status={src_val!r} target={tgt_val!r}")
+
+    errors: list[str] = []
+    if missing_by_table:
+        for t, pks in missing_by_table.items():
+            errors.append(f"{t}: {len(pks)}+ rows in source but not in target (e.g. id={pks[0]})")
+    if extra_by_table:
+        for t, pks in extra_by_table.items():
+            errors.append(f"{t}: {len(pks)}+ unexpected rows in target (e.g. id={pks[0]})")
+    if corrupt:
+        errors.extend(corrupt[:5])
+
+    if errors:
+        return CheckResult(
+            id="B1b",
+            description="Snapshot content matches",
+            status=CheckStatus.FAIL,
+            error="; ".join(errors),
+        )
+
+    return CheckResult(
+        id="B1b",
+        description="Snapshot content matches",
+        status=CheckStatus.PASS,
+        detail=f"all PKs match across {len(ctx.tables)} tables",
+    )
+
+
 def check_b3_no_duplicates(ctx: TestContext) -> CheckResult:
     """Verify that no PK appears more than once in the target.
 

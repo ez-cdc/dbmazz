@@ -161,6 +161,7 @@ class VerifyRunner:
 
         # Snapshot baseline
         self._run_check(tier, ctx, tier1.check_b1_snapshot_counts, "B1")
+        self._run_check(tier, ctx, tier1.check_b1b_snapshot_content, "B1b")
         self._run_check(tier, ctx, tier1.check_b3_no_duplicates, "B3")
 
         # Single-row CDC flow (D1 → D2 → E1 → D3). This phase is a group of
