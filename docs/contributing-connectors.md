@@ -763,25 +763,31 @@ To add e2e coverage for a new sink:
        # Implement the rest of the abstract methods (see base.py)
    ```
 
-2. **Register the profile** in `e2e/src/ez_cdc_e2e/profiles.py`:
+2. **Add a datasource spec** in `e2e/src/ez_cdc_e2e/datasources/schema.py`:
 
    ```python
-   PROFILES["my-sink"] = ProfileSpec(
-       name="my-sink",
-       compose_profile="my-sink",
-       description="PostgreSQL → MySink",
-       source_dsn=_COMMON_SOURCE_DSN,
-       dbmazz_http_url=_COMMON_DBMAZZ_URL,
-       tables=_COMMON_TABLES,
-       backend_import="ez_cdc_e2e.backends.my_sink:MySinkTarget",
-   )
+   class MySinkSpec(BaseModel):
+       type: Literal["my-sink"] = "my-sink"
+       managed: bool = True
+       host: str
+       port: int = 9030
+       database: str
+       user: str = "root"
+       password: str = ""
    ```
 
-3. **Add a compose service** in `e2e/compose.yml` under `profiles: ["my-sink"]`.
+   Register it in the `SinkSpec` discriminated union.
 
-4. **Run the suite**: `ez-cdc verify my-sink`. The runner automatically
-   exercises all Tier 1 validations against your backend — you don't
-   write any test functions yourself, the framework provides them.
+3. **Add compose generation** in `e2e/src/ez_cdc_e2e/compose_builder.py`:
+
+   Add a `_sink_services_my_sink()` function that returns the docker
+   compose services dict for your sink (target container + init script
+   if needed).
+
+4. **Run the suite**: `ez-cdc verify --source demo-pg --sink my-sink`.
+   The runner automatically exercises all Tier 1 validations against
+   your backend — you don't write any test functions yourself, the
+   framework provides them.
 
    Every sink passes the same set of checks, so adding one is ~1 class
    (~150 lines) and zero test code.

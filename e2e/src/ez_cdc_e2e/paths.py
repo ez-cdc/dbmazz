@@ -1,8 +1,8 @@
 """Path resolution for the e2e harness.
 
 The CLI can be invoked from anywhere in the filesystem (via the ez-cdc
-console script), so we need a reliable way to locate the repo root, the
-compose.yml file, and the fixtures directory.
+console script), so we need a reliable way to locate the repo root and
+the fixtures directory.
 
 Strategy: the package is installed in editable mode (`pip install -e e2e/`),
 so __file__ always points inside <repo>/e2e/src/ez_cdc_e2e/. We walk up
@@ -32,18 +32,7 @@ REPO_ROOT = E2E_DIR.parent
 
 # ── Frequently-used paths ────────────────────────────────────────────────────
 
-COMPOSE_FILE = E2E_DIR / "compose.yml"
 FIXTURES_DIR = E2E_DIR / "fixtures"
 
 POSTGRES_SEED_SQL = FIXTURES_DIR / "postgres-seed.sql"
 TYPES_FIXTURE_SQL = FIXTURES_DIR / "types.sql"  # created in PR 2
-
-
-def ensure_compose_file() -> Path:
-    """Return the compose.yml path, raising if it doesn't exist."""
-    if not COMPOSE_FILE.exists():
-        raise FileNotFoundError(
-            f"compose.yml not found at {COMPOSE_FILE}. "
-            "Is the e2e/ directory intact?"
-        )
-    return COMPOSE_FILE
