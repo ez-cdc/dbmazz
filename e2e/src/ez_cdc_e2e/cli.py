@@ -5,7 +5,6 @@ Typer app with subcommands:
     ez-cdc                    → interactive main menu (banner A)
     ez-cdc quickstart [SINK]  → launch dashboard (banner A)
     ez-cdc verify   [SINK]    → run validation tests (banner D)
-    ez-cdc load     [SINK]    → load test (banner D) — PR 3
     ez-cdc up       [SINK]    → compose up (banner D)
     ez-cdc down     [SINK]    → compose down (banner D)
     ez-cdc logs     [SINK]    → tail compose logs (banner D)
@@ -67,7 +66,7 @@ console = Console(theme=EZ_CDC_THEME)
 
 app = typer.Typer(
     name="ez-cdc",
-    help="EZ-CDC test harness — verify, load, and quickstart for dbmazz sinks.",
+    help="EZ-CDC test harness — quickstart and verify for dbmazz sinks.",
     invoke_without_command=True,
     no_args_is_help=False,
     add_completion=True,  # enables `ez-cdc --install-completion`
@@ -200,9 +199,6 @@ def _main_menu() -> None:
             {"name": "Verify",
              "value": "verify",
              "description": "Run e2e validation tests"},
-            {"name": "Load test",
-             "value": "load",
-             "description": "Generate traffic + monitor (PR 3)"},
             {"name": "Datasources",
              "value": "datasources",
              "description": "List / add / remove source and sink configs"},
@@ -240,11 +236,6 @@ def _main_menu() -> None:
                     quick=False, all_pairs=False, skip=None,
                     json_report=None, keep_up=False, no_up=False, rebuild=False,
                 )
-            elif choice == "load":
-                console.print(Text(
-                    "Load test is coming in PR 3 — not yet implemented.",
-                    style="warning",
-                ))
             elif choice == "datasources":
                 _datasources_menu()
             elif choice == "compose":
@@ -1348,23 +1339,6 @@ def status(
         console.print(Text(f"  ERROR              {s.error_detail}", style="error"))
     _final_padding()
 
-
-# ── Subcommand: load (placeholder for PR 3) ──────────────────────────────────
-
-@app.command(help="Generate traffic and monitor replication (PR 3).")
-def load(
-    sink: Optional[str] = typer.Argument(None, help="Sink profile."),
-    rate: int = typer.Option(500, "--rate", help="Target events/sec."),
-    duration: int = typer.Option(60, "--duration", help="Duration in seconds."),
-) -> None:
-    _show_banner_d()
-    console.print()
-    console.print(Text(
-        "Load test will be implemented in PR 3. For now only quickstart and "
-        "verify are available — see `ez-cdc --help`.",
-        style="warning",
-    ))
-    raise typer.Exit(3)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
