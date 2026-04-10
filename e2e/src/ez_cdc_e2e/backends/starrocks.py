@@ -108,10 +108,13 @@ class StarRocksTarget(TargetBackend):
 
     def list_tables(self) -> list[str]:
         conn = self._require_conn()
+        # StarRocks does NOT support `LIKE ... ESCAPE 'X'` (raises a syntax
+        # error). Use LEFT() to filter the dbmazz_ prefix instead — portable
+        # and avoids the underscore-as-wildcard problem entirely.
         sql = """
             SELECT table_name FROM information_schema.tables
             WHERE table_schema = %s
-              AND table_name NOT LIKE 'dbmazz\\_%%' ESCAPE '\\'
+              AND LEFT(table_name, 7) != 'dbmazz_'
             ORDER BY table_name
         """
         cur = conn.cursor()
