@@ -608,6 +608,7 @@ _SETTINGS_FIELDS = [
     ("initial_snapshot_only",    "Exit after snapshot (no CDC)",           "bool"),
     ("rust_log",                 "Log level (RUST_LOG)",                   "str"),
     ("snowflake_flush_files",    "Snowflake: COPY INTO after N files",    "int"),
+    ("snowflake_flush_bytes",    "Snowflake: COPY INTO after N bytes",    "int"),
 ]
 
 
