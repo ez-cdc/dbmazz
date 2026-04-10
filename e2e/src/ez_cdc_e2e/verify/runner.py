@@ -153,16 +153,19 @@ class VerifyRunner:
         tier = TierResult(name="Tier 1 — Correctness baseline")
         self.console.print(format_tier_header(tier.name))
 
-        # Schema (read-only)
+        # Schema (pre-snapshot — tables and source columns exist)
         self._run_check(tier, ctx, tier1.check_a1_target_tables_present, "A1")
         self._run_check(tier, ctx, tier1.check_a2_source_columns_in_target, "A2")
-        self._run_check(tier, ctx, tier1.check_a3_audit_columns_present, "A3")
-        self._run_check(tier, ctx, tier1.check_a4_metadata_table, "A4")
 
-        # Snapshot baseline
+        # Snapshot baseline (B1 includes the settle wait)
         self._run_check(tier, ctx, tier1.check_b1_snapshot_counts, "B1")
         self._run_check(tier, ctx, tier1.check_b1b_snapshot_content, "B1b")
         self._run_check(tier, ctx, tier1.check_b3_no_duplicates, "B3")
+
+        # Schema (post-snapshot — audit columns and metadata are created by the
+        # sink's normalizer/MERGE, which may not run until after the first flush)
+        self._run_check(tier, ctx, tier1.check_a3_audit_columns_present, "A3")
+        self._run_check(tier, ctx, tier1.check_a4_metadata_table, "A4")
 
         # Single-row CDC flow (D1 → D2 → E1 → D3). This phase is a group of
         # checks that share state internally. If D1, D2, E1, or D3 is in
