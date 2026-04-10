@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS orders (
     customer_id INT,
     total DECIMAL(10,2),
     status VARCHAR(20),
+    description VARCHAR(20480),
     created_at DATETIME,
     updated_at DATETIME,
     dbmazz_op_type TINYINT,
