@@ -27,6 +27,9 @@ git clone https://github.com/ez-cdc/dbmazz.git
 cd dbmazz
 
 # First time only — install the test harness CLI
+cd e2e
+python3 -m venv venv
+source venv/vin/activate
 pip install -e e2e/
 
 # Optional but recommended: tab completion for your shell
