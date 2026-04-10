@@ -144,7 +144,8 @@ class SnowflakeTarget(TargetBackend):
         cur = conn.cursor()
         try:
             cur.execute(sql, (self.schema.upper(),))
-            return [r[0] for r in cur.fetchall()]
+            # Lowercase to match source table names (Snowflake stores uppercase).
+            return [r[0].lower() for r in cur.fetchall()]
         finally:
             cur.close()
 
