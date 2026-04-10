@@ -202,6 +202,9 @@ def _main_menu() -> None:
             {"name": "Datasources",
              "value": "datasources",
              "description": "List / add / remove source and sink configs"},
+            {"name": "Clean target",
+             "value": "clean",
+             "description": "Truncate tables + drop audit columns + remove metadata"},
             {"name": "Stacks",
              "value": "compose",
              "description": "Manage docker stacks (up/down/logs/status)"},
@@ -236,6 +239,8 @@ def _main_menu() -> None:
                     quick=False, all_pairs=False, skip=None,
                     json_report=None, keep_up=False, no_up=False, rebuild=False,
                 )
+            elif choice == "clean":
+                clean(profile=None, source=None, sink=None, yes=False)
             elif choice == "datasources":
                 _datasources_menu()
             elif choice == "compose":
