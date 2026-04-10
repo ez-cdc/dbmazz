@@ -23,6 +23,7 @@ from urllib.parse import urlparse, urlunparse
 
 import typer
 from rich.console import Console
+from rich.padding import Padding
 from rich.table import Table
 from rich.text import Text
 
@@ -214,8 +215,12 @@ def list_cmd(
             _summarize_sink(spec),
         )
 
+    # Wrap the table in a Padding so it sits 2 cols away from the terminal
+    # left edge, matching the rest of the CLI's "  " indent convention.
+    # Extra blank lines above/below give the table room to breathe.
     console.print()
-    console.print(table)
+    console.print()
+    console.print(Padding(table, (0, 0, 0, 2)))
     console.print()
     console.print(Text(
         f"  {len(store.list_sources())} source(s), {len(store.list_sinks())} sink(s)",

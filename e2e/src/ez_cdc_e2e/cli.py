@@ -163,7 +163,16 @@ def _main_menu() -> None:
         ))
         raise typer.Exit(3)
 
+    first_iteration = True
     while True:
+        # Visual breathing room between iterations: a thin rule separates
+        # successive returns to the main menu so the screen doesn't feel
+        # like one giant continuous wall of text.
+        if not first_iteration:
+            console.print()
+            console.rule(style="dim")
+        first_iteration = False
+
         # Re-probe state on each iteration so the menu reflects current reality.
         ds_status = _probe_datasources_status()
         running_pair = _probe_first_running_pair(ds_status)
@@ -324,9 +333,13 @@ def _print_menu_status(ds_status: dict, running_pair: Optional[tuple[str, str]])
             style="info",
         ))
 
+    # Generous spacing: blank line above, status lines, two blanks below.
+    # The two-below pattern gives the prompt some air before the question
+    # appears, which makes the menu feel less crowded.
     console.print()
     for line in parts:
         console.print(line)
+    console.print()
     console.print()
 
 
@@ -336,7 +349,18 @@ def _datasources_menu() -> None:
     Provides interactive access to list/show/add/remove/test/init-demos
     without having to remember the exact subcommand names.
     """
+    first_iteration = True
     while True:
+        # Visual breathing room between iterations: a thin rule separates
+        # successive runs of the submenu so when the user does "list" three
+        # times in a row, the three table dumps are clearly distinguished
+        # instead of bleeding into each other.
+        if not first_iteration:
+            console.print()
+            console.rule(style="dim")
+        console.print()
+        first_iteration = False
+
         action = prompts.select(
             "Datasource action:",
             choices=[
