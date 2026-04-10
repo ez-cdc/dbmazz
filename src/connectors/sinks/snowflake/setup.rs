@@ -218,7 +218,10 @@ async fn create_target_table(
 
     for stmt in &alter_stmts {
         if let Err(e) = client.execute(stmt).await {
-            warn!("ALTER TABLE failed (may be harmless if column exists): {:#}", e);
+            warn!(
+                "ALTER TABLE failed (may be harmless if column exists): {:#}",
+                e
+            );
         }
     }
 
@@ -230,7 +233,10 @@ async fn create_target_table(
             ))
             .await
         {
-            warn!("ALTER TABLE failed (may be harmless if column exists): {:#}", e);
+            warn!(
+                "ALTER TABLE failed (may be harmless if column exists): {:#}",
+                e
+            );
         }
     }
 
