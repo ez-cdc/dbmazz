@@ -59,6 +59,7 @@ def up(
     *,
     wait: bool = True,
     build: bool = False,
+    force_recreate: bool = False,
     services: list[str] | None = None,
 ) -> None:
     """Start the stack defined by a compose file.
@@ -72,6 +73,10 @@ def up(
     at the repo root, Python-only edits to the test harness never trigger
     a Rust recompile.
 
+    If `force_recreate=True`, passes `--force-recreate` to recreate containers
+    even if their config hasn't changed. Used by quickstart/verify to ensure
+    dbmazz starts fresh (re-runs setup, creates audit columns, etc.).
+
     If `services` is provided, only those services are started (instead of
     the whole stack).
     """
@@ -80,6 +85,8 @@ def up(
     cmd = _base_cmd(compose_file) + ["up", "-d"]
     if build:
         cmd.append("--build")
+    if force_recreate:
+        cmd.append("--force-recreate")
     if wait:
         cmd.append("--wait")
     if services:
@@ -89,6 +96,19 @@ def up(
     if result.returncode != 0:
         raise ComposeError(
             f"docker compose up failed for {compose_file.name} (exit {result.returncode})"
+        )
+
+
+def build(compose_file: Path, *, services: list[str] | None = None) -> None:
+    """Build images without starting containers."""
+    check_docker_compose()
+    cmd = _base_cmd(compose_file) + ["build"]
+    if services:
+        cmd.extend(services)
+    result = subprocess.run(cmd, text=True)
+    if result.returncode != 0:
+        raise ComposeError(
+            f"docker compose build failed for {compose_file.name} (exit {result.returncode})"
         )
 
 

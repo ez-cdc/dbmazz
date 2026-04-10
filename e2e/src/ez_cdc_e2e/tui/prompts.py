@@ -34,7 +34,7 @@ EZ_CDC_PROMPT_STYLE = Style([
     ("question",    "bold"),                      # question text
     ("answer",      f"fg:{PRIMARY_400} bold"),    # user's answer (after confirm)
     ("pointer",     f"fg:{PRIMARY_400} bold"),    # ❯ indicator
-    ("highlighted", "noreverse bg:default"),
+    ("highlighted", f"fg:{PRIMARY_400} noreverse bg:default"),
     ("selected",    f"fg:{PRIMARY_400} noreverse bg:default"),  # multiselect "checked"
     ("separator",   f"fg:{GRAY_500}"),            # separator lines
     ("instruction", f"fg:{GRAY_400}"),            # "(use ↑↓ to navigate)"

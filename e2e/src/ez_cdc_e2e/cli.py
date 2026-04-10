@@ -731,10 +731,14 @@ def quickstart(
         raise typer.Exit(2)
     console.print(format_step_ok("Pre-flight checks passed"))
 
+    # Stop any dbmazz from a different pair before starting this one
+    # (only one dbmazz can run at a time — they share port 8080).
+    _stop_other_dbmazz(compose_path)
+
     # Start dbmazz only (infra should already be running via `ez-cdc up`).
     console.print(format_step(f"Starting dbmazz: {src_name} → {sk_name}"))
     try:
-        compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild)
+        compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild, force_recreate=True)
     except ComposeError as e:
         console.print(Text(f"Failed to start dbmazz: {e}", style="error"))
         raise typer.Exit(2)
@@ -790,23 +794,6 @@ def quickstart(
         dbmazz_client.close()
 
     console.print()
-    if keep_up:
-        console.print(Text(
-            f"  dbmazz left running. Run `ez-cdc down --source {src_name} --sink {sk_name}` to stop it.",
-            style="muted",
-        ))
-        _print_thanks()
-        return
-
-    # Stop only dbmazz — infra stays running.
-    console.print(format_step("Stopping dbmazz..."))
-    try:
-        compose.stop_services(compose_path, ["dbmazz"])
-    except ComposeError as e:
-        console.print(Text(f"Warning: failed to stop dbmazz: {e}", style="warning"))
-    else:
-        console.print(format_step_ok("Stopping dbmazz"))
-
     _print_thanks()
 
 
@@ -903,9 +890,11 @@ def _verify_one(
             return 2
         console.print(format_step_ok("Pre-flight checks passed"))
 
+        _stop_other_dbmazz(compose_path)
+
         console.print(format_step(f"Starting dbmazz: {src_name} → {sk_name}"))
         try:
-            compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild)
+            compose.up(compose_path, services=["dbmazz"], wait=True, build=rebuild, force_recreate=True)
         except ComposeError as e:
             console.print(Text(f"Failed to start dbmazz: {e}", style="error"))
             return 2
@@ -929,16 +918,6 @@ def _verify_one(
         json_report.parent.mkdir(parents=True, exist_ok=True)
         json_report.write_text(json.dumps(report_to_json(report), indent=2))
         console.print(Text(f"JSON report written to {json_report}", style="muted"))
-
-    if not keep_up:
-        console.print()
-        console.print(format_step("Stopping dbmazz..."))
-        try:
-            compose.stop_services(compose_path, ["dbmazz"])
-        except ComposeError as e:
-            console.print(Text(f"Warning: failed to stop dbmazz: {e}", style="warning"))
-        else:
-            console.print(format_step_ok("Stopping dbmazz"))
 
     return 0 if report.ok else 1
 
@@ -1057,6 +1036,27 @@ def up(
         console.print(Text(f"Failed to start infra: {e}", style="error"))
         raise typer.Exit(2)
     console.print(format_step_ok(f"Infra started ({', '.join(services)})"))
+
+    # Pre-build the dbmazz image so the first quickstart/verify is fast.
+    # We generate a throwaway pair compose just to get a valid Dockerfile
+    # reference, then `docker compose build` without starting anything.
+    console.print(format_step("Pre-building dbmazz image (cached for future runs)"))
+    try:
+        from .compose_builder import build_compose_for_pair
+        src_names = store.list_sources()
+        sk_names = store.list_sinks()
+        if src_names and sk_names:
+            src_spec = store.get_source(src_names[0])
+            sk_spec = store.get_sink(sk_names[0])
+            pair_compose, _ = build_compose_for_pair(
+                src_names[0], src_spec, sk_names[0], sk_spec,
+                settings=store.data.settings,
+            )
+            compose.build(pair_compose, services=["dbmazz"])
+            console.print(format_step_ok("dbmazz image ready"))
+    except Exception:
+        console.print(Text("  dbmazz image will be built on first run.", style="muted"))
+
     _final_padding()
 
 
@@ -1237,6 +1237,33 @@ from .instantiate import (  # noqa: E402
 
 
 
+
+
+def _stop_other_dbmazz(current_compose: Path) -> None:
+    """Stop any dbmazz container from a different pair.
+
+    Only one dbmazz can run at a time (they share port 8080). Before
+    starting a new one, scan all pair cache dirs for a running dbmazz
+    and stop it if it belongs to a different compose file.
+    """
+    from .compose_builder import CACHE_ROOT
+
+    if not CACHE_ROOT.exists():
+        return
+
+    for pair_dir in CACHE_ROOT.iterdir():
+        if not pair_dir.is_dir() or pair_dir.name.startswith("_"):
+            continue  # skip _infra and non-directories
+        other_compose = pair_dir / "compose.yml"
+        if not other_compose.exists():
+            continue
+        if other_compose.resolve() == current_compose.resolve():
+            continue  # same pair — will be force-recreated
+        try:
+            if compose.is_service_running(other_compose, "dbmazz"):
+                compose.stop_services(other_compose, ["dbmazz"])
+        except ComposeError:
+            pass  # best effort
 
 
 def _print_thanks() -> None:
