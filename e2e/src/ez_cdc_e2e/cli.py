@@ -65,6 +65,11 @@ app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+# Register the `datasource` subcommand group from PR4-4. Adds:
+#   ez-cdc datasource list / show / add / remove / test / init-demos
+from .cli_datasource import datasource_app  # noqa: E402  (circular-import-safe)
+app.add_typer(datasource_app, name="datasource")
+
 
 # ── TTY detection ────────────────────────────────────────────────────────────
 
