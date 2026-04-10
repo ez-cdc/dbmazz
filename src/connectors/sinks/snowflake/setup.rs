@@ -4,7 +4,7 @@
 //! Snowflake DDL setup: creates internal schema, stage, raw table, metadata, and target tables.
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{info, warn};
 
 use super::client::SnowflakeClient;
 use super::types::TypeMapper;
@@ -197,34 +197,47 @@ async fn create_target_table(
         )
     })?;
 
-    // Add audit columns to existing tables (idempotent)
+    // Add audit columns to existing tables (idempotent).
+    // Snowflake does NOT support DEFAULT with expressions (e.g. CURRENT_TIMESTAMP())
+    // or even DEFAULT FALSE in ALTER TABLE ADD COLUMN. Only literal constants or
+    // no default at all. The MERGE sets these values explicitly, so no default needed.
     let alter_stmts = [
         format!(
-            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_OP_TYPE\" NUMBER(3,0) DEFAULT 0",
+            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_OP_TYPE\" NUMBER(3,0)",
             database, target_schema, table_name
         ),
         format!(
-            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_SYNCED_AT\" TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()",
+            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_SYNCED_AT\" TIMESTAMP_NTZ",
             database, target_schema, table_name
         ),
         format!(
-            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_CDC_VERSION\" NUMBER(20,0) DEFAULT 0",
+            "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_CDC_VERSION\" NUMBER(20,0)",
             database, target_schema, table_name
         ),
     ];
 
     for stmt in &alter_stmts {
-        client.execute(stmt).await.ok(); // Ignore errors (column already exists)
+        if let Err(e) = client.execute(stmt).await {
+            warn!(
+                "ALTER TABLE failed (may be harmless if column exists): {:#}",
+                e
+            );
+        }
     }
 
     if soft_delete {
-        client
+        if let Err(e) = client
             .execute(&format!(
-                "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_IS_DELETED\" BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE {}.{}.\"{}\" ADD COLUMN IF NOT EXISTS \"_DBMAZZ_IS_DELETED\" BOOLEAN",
                 database, target_schema, table_name
             ))
             .await
-            .ok();
+        {
+            warn!(
+                "ALTER TABLE failed (may be harmless if column exists): {:#}",
+                e
+            );
+        }
     }
 
     info!(
