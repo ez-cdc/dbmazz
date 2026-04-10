@@ -155,8 +155,6 @@ def _main_menu() -> None:
     subcommand that raises _BackToMenu (Esc/Ctrl+C in a sub-prompt)
     returns here instead of exiting the program.
     """
-    _show_banner_a()
-
     if not is_interactive():
         console.print(Text(
             "No subcommand given. Run `ez-cdc --help` to see available commands.",
@@ -164,15 +162,19 @@ def _main_menu() -> None:
         ))
         raise typer.Exit(3)
 
-    first_iteration = True
     while True:
-        # Visual breathing room between iterations: a thin rule separates
-        # successive returns to the main menu so the screen doesn't feel
-        # like one giant continuous wall of text.
-        if not first_iteration:
-            console.print()
-            console.rule(style="dim")
-        first_iteration = False
+        # Each iteration starts with a clean screen so the menu is always
+        # at the top of the visible terminal. The shell scroll buffer
+        # preserves previous output, so if the user wants to see what an
+        # earlier action printed they can scroll up with the mouse — but
+        # the *interactive* area is always anchored at the top.
+        #
+        # We use console.clear() (= ANSI clear screen) instead of an
+        # alternate buffer (console.screen()) because Live displays in
+        # quickstart already use alternate-screen mode internally and
+        # nesting two alternate buffers breaks the dashboard rendering.
+        console.clear()
+        _show_banner_a()
 
         # Re-probe state on each iteration so the menu reflects current reality.
         ds_status = _probe_datasources_status()
@@ -222,8 +224,8 @@ def _main_menu() -> None:
         if choice is None or choice == "exit":
             # Final padding before returning to the shell prompt — without
             # this the user's `$` ends up flush against the menu's last line.
-            console.print()
-            console.print()
+            console.clear()
+            _print_thanks()
             return
 
         try:
@@ -255,10 +257,13 @@ def _main_menu() -> None:
             else:
                 raise
 
-        # Two blank lines before showing the menu again so the next iteration
-        # has visual breathing room from whatever the previous action printed.
-        console.print()
-        console.print()
+        # Pause so the user can read the output of whatever action they
+        # just ran. The next loop iteration will console.clear() and
+        # redraw the menu, so this is the user's only chance to read it.
+        # Quickstart, which has its own teardown prompt, returns here
+        # *after* the user has already confirmed everything — so the
+        # second pause is acceptable.
+        _wait_for_keypress_to_continue()
 
 
 def _probe_datasources_status() -> dict:
@@ -351,23 +356,38 @@ def _print_menu_status(ds_status: dict, running_pair: Optional[tuple[str, str]])
     console.print()
 
 
+def _wait_for_keypress_to_continue() -> None:
+    """Pause the menu loop so the user can read the previous action's output.
+
+    Prints a hint and waits for Enter (or any key the input() call accepts).
+    This is the user's only chance to read the output before the next loop
+    iteration calls console.clear() and redraws the menu at the top.
+
+    Catches EOFError / KeyboardInterrupt silently — both are equivalent to
+    "the user is done reading, move on".
+    """
+    console.print()
+    console.print(Text("  ─── Press Enter to return to the menu ───", style="dim"))
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
 def _datasources_menu() -> None:
     """Submenu for `ez-cdc datasource` operations.
 
     Provides interactive access to list/show/add/remove/test/init-demos
     without having to remember the exact subcommand names.
     """
-    first_iteration = True
     while True:
-        # Visual breathing room between iterations: a thin rule separates
-        # successive runs of the submenu so when the user does "list" three
-        # times in a row, the three table dumps are clearly distinguished
-        # instead of bleeding into each other.
-        if not first_iteration:
-            console.print()
-            console.rule(style="dim")
+        # Same anchor-at-top behavior as the main menu — clear before each
+        # iteration so the submenu is always at the top of the visible
+        # terminal, and the user reviews the previous action's output via
+        # the Press Enter pause at the bottom of this loop.
+        console.clear()
+        _show_banner_d()
         console.print()
-        first_iteration = False
 
         action = prompts.select(
             "Datasource action:",
@@ -411,6 +431,9 @@ def _datasources_menu() -> None:
             pass
         except _BackToMenu:
             pass
+
+        # Pause so the user can read the output before we clear and redraw.
+        _wait_for_keypress_to_continue()
 
 
 def _prompt_pick_any_datasource(verb: str) -> Optional[str]:
