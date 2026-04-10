@@ -300,6 +300,7 @@ class PipelineSettings(BaseModel):
         ]
 
 
+
 # ── Discriminated unions ─────────────────────────────────────────────────────
 
 # Pydantic v2 discriminator on `type` — tells the parser which subclass to

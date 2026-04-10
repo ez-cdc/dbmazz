@@ -111,6 +111,24 @@ sources:
     password: ${PG_PASSWORD}
 ```
 
+## Pipeline settings
+
+The `settings:` section in `ez-cdc.yaml` controls how dbmazz behaves
+during replication. Each field maps 1:1 to a dbmazz environment variable.
+
+| Setting | Env var | Default | Description |
+|---|---|---|---|
+| `flush_size` | `FLUSH_SIZE` | `2000` | Max events per batch before flushing to the sink |
+| `flush_interval_ms` | `FLUSH_INTERVAL_MS` | `2000` | Max milliseconds before flushing a partial batch |
+| `do_snapshot` | `DO_SNAPSHOT` | `true` | Run initial snapshot (backfill) on startup |
+| `snapshot_chunk_size` | `SNAPSHOT_CHUNK_SIZE` | `10000` | Rows per snapshot chunk (PK-range based) |
+| `snapshot_parallel_workers` | `SNAPSHOT_PARALLEL_WORKERS` | `2` | Concurrent snapshot workers (1–32) |
+| `initial_snapshot_only` | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot completes — no CDC streaming |
+| `rust_log` | `RUST_LOG` | `info` | Log level filter (`info`, `debug`, `dbmazz=debug`, etc.) |
+
+View current values: `ez-cdc datasource settings`
+Edit interactively: `ez-cdc datasource settings --edit`
+
 ## Subcommands
 
 ```

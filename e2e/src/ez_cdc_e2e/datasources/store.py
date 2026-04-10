@@ -246,8 +246,8 @@ class DatasourceStore:
         header = (
             "# ez-cdc configuration file\n"
             "# Datasources + pipeline settings. Managed by `ez-cdc datasource ...`\n"
-            "# or edited manually. See e2e/ez-cdc.example.yaml for the schema.\n"
-            "# Credentials may use ${VAR} interpolation; see ez-cdc docs.\n"
+            "# Credentials may use ${VAR} interpolation.\n"
+            "# See e2e/README.md for settings documentation.\n"
             "\n"
         )
 
