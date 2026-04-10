@@ -97,6 +97,21 @@ class SnowflakeTarget(TargetBackend):
     def _qualified(self, table: str) -> str:
         return f"{self._quote(self.database)}.{self._quote(self.schema)}.{self._quote(table)}"
 
+    def _soft_delete_filter(self, table: str) -> str:
+        """Return a WHERE clause filtering soft-deleted rows, or empty string.
+
+        Returns empty string if soft_delete is disabled OR if the audit column
+        doesn't exist yet (normalizer hasn't run). This prevents SQL errors
+        when verify checks run before the first normalizer MERGE cycle.
+        """
+        if not self.soft_delete:
+            return ""
+        # Check if the column actually exists
+        cols = {c.name.upper() for c in self.get_columns(table)}
+        if "_DBMAZZ_IS_DELETED" not in cols:
+            return ""
+        return ' WHERE "_DBMAZZ_IS_DELETED" = FALSE'
+
     # ── identity ─────────────────────────────────────────────────────────────
 
     @property
@@ -202,9 +217,8 @@ class SnowflakeTarget(TargetBackend):
 
     def count_rows(self, table: str, exclude_deleted: bool = True) -> int:
         conn = self._require_conn()
-        sql = f"SELECT count(*) FROM {self._qualified(table)}"
-        if exclude_deleted and self.soft_delete:
-            sql += ' WHERE "_DBMAZZ_IS_DELETED" = FALSE'
+        where = self._soft_delete_filter(table) if exclude_deleted else ""
+        sql = f"SELECT count(*) FROM {self._qualified(table)}{where}"
         cur = conn.cursor()
         try:
             cur.execute(sql)
@@ -215,7 +229,7 @@ class SnowflakeTarget(TargetBackend):
 
     def count_duplicates_by_pk(self, table: str, pk_column: str) -> int:
         conn = self._require_conn()
-        where = ' WHERE "_DBMAZZ_IS_DELETED" = FALSE' if self.soft_delete else ""
+        where = self._soft_delete_filter(table)
         sql = (
             f"SELECT count(*) FROM ("
             f"  SELECT {self._quote(pk_column)} FROM {self._qualified(table)}{where} "
@@ -232,7 +246,7 @@ class SnowflakeTarget(TargetBackend):
 
     def list_primary_keys(self, table: str, pk_column: str) -> list[Any]:
         conn = self._require_conn()
-        where = ' WHERE "_DBMAZZ_IS_DELETED" = FALSE' if self.soft_delete else ""
+        where = self._soft_delete_filter(table)
         sql = (
             f"SELECT {self._quote(pk_column)} FROM {self._qualified(table)}{where} "
             f"ORDER BY {self._quote(pk_column)}"
@@ -326,7 +340,7 @@ class SnowflakeTarget(TargetBackend):
         col_exprs = ", ".join(
             f"COALESCE(CAST({self._quote(c)} AS VARCHAR), '\\\\N')" for c in columns
         )
-        where = ' WHERE "_DBMAZZ_IS_DELETED" = FALSE' if self.soft_delete else ""
+        where = self._soft_delete_filter(table)
         sql = (
             f"SELECT MD5(LISTAGG(row_hash, '') WITHIN GROUP (ORDER BY {self._quote(pk_column)})) "
             f"FROM ("
@@ -350,7 +364,7 @@ class SnowflakeTarget(TargetBackend):
     ) -> list[tuple]:
         conn = self._require_conn()
         col_list = ", ".join(self._quote(c) for c in columns)
-        where = ' WHERE "_DBMAZZ_IS_DELETED" = FALSE' if self.soft_delete else ""
+        where = self._soft_delete_filter(table)
         sql = (
             f"SELECT {col_list} FROM {self._qualified(table)}{where} "
             f"ORDER BY {self._quote(order_by)}"
@@ -371,7 +385,7 @@ class SnowflakeTarget(TargetBackend):
         if not expected_pks:
             return []
         conn = self._require_conn()
-        where = ' WHERE "_DBMAZZ_IS_DELETED" = FALSE' if self.soft_delete else ""
+        where = self._soft_delete_filter(table)
         sql = (
             f"SELECT {self._quote(pk_column)} FROM {self._qualified(table)}{where}"
         )

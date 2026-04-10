@@ -1402,6 +1402,19 @@ def clean(
             _final_padding()
             return
 
+    # 1. Tear down the compose stack if running — dbmazz must restart
+    #    after clean so it re-runs setup (creates _DBMAZZ schema, audit cols).
+    compose_path = _compose_path
+    if compose_path.exists():
+        try:
+            if compose.is_running(compose_path):
+                console.print(Text("  Stopping compose stack...", style="info"))
+                compose.down(compose_path)
+                console.print(Text("  ✓ Stack stopped", style="success"))
+        except Exception:
+            pass  # best-effort; stack might not be running
+
+    # 2. Clean the target
     try:
         target = _instantiate_backend_from_spec(sk_spec)
         target.connect()
