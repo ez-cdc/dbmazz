@@ -153,12 +153,15 @@ class SnowflakeTarget(TargetBackend):
 
     def list_tables(self) -> list[str]:
         conn = self._require_conn()
+        # Snowflake supports `LIKE ... ESCAPE` but the syntax with backslash
+        # interactions in f-strings is fragile. Use LEFT() to filter prefixes —
+        # portable, no escape headaches, and matches the StarRocksTarget approach.
         sql = f"""
             SELECT TABLE_NAME FROM {self._quote(self.database)}.INFORMATION_SCHEMA.TABLES
             WHERE TABLE_SCHEMA = %s
               AND TABLE_TYPE = 'BASE TABLE'
-              AND TABLE_NAME NOT LIKE '\\_DBMAZZ\\_%%' ESCAPE '\\'
-              AND TABLE_NAME NOT LIKE '\\_RAW\\_%%' ESCAPE '\\'
+              AND LEFT(TABLE_NAME, 8) != '_DBMAZZ_'
+              AND LEFT(TABLE_NAME, 5) != '_RAW_'
             ORDER BY TABLE_NAME
         """
         cur = conn.cursor()
