@@ -457,26 +457,41 @@ def _build_starrocks_sink(console: Console, managed: bool) -> StarRocksSinkSpec:
 
 
 def _build_snowflake_sink(console: Console) -> SnowflakeSinkSpec:
+    """Interactive prompts for a Snowflake sink datasource.
+
+    Snowflake's UI shows several account-related fields separately
+    (Account locator, Region, Cloud, Account/Server URL, Account name)
+    and the user typically has all of them. Rather than asking for a
+    single "account identifier" string and forcing them to know the
+    canonical format, this function offers three input formats and
+    composes the final `account` string internally.
+    """
     console.print()
     console.print(Text(
         "  Snowflake sink (cloud-only — credentials required).",
         style="info",
     ))
+    console.print(Text(
+        "  Find your account details in the Snowflake UI:",
+        style="muted",
+    ))
+    console.print(Text(
+        "    Profile menu (top-right) → Account → View account details",
+        style="muted",
+    ))
     console.print()
 
-    account = prompts.text("Account identifier (e.g., xy12345.us-east-1):", default="")
-    if account is None or not account.strip():
-        raise _Cancelled()
+    account = _prompt_snowflake_account(console)
 
-    user = prompts.text("User:", default="")
+    user = prompts.text("Username:", default="")
     if user is None or not user.strip():
         raise _Cancelled()
 
-    password = prompts.password("Password:")
+    password = prompts.password("Password (input hidden):")
     if password is None or not password:
         raise _Cancelled()
 
-    database = prompts.text("Database:", default="")
+    database = prompts.text("Database name:", default="")
     if database is None or not database.strip():
         raise _Cancelled()
 
@@ -485,20 +500,26 @@ def _build_snowflake_sink(console: Console) -> SnowflakeSinkSpec:
         raise _Cancelled()
     schema = schema.strip() or "PUBLIC"
 
-    warehouse = prompts.text("Warehouse:", default="")
+    warehouse = prompts.text("Warehouse name:", default="")
     if warehouse is None or not warehouse.strip():
         raise _Cancelled()
 
-    role_raw = prompts.text("Role (optional, press Enter to skip):", default="")
+    role_raw = prompts.text(
+        "Role (optional, e.g. ACCOUNTADMIN — press Enter to skip):",
+        default="",
+    )
     role = role_raw.strip() if role_raw else None
 
-    soft_delete = prompts.confirm("Use soft delete?", default=True)
+    soft_delete = prompts.confirm(
+        "Use soft delete? (rows marked with _DBMAZZ_IS_DELETED instead of being removed)",
+        default=True,
+    )
     if soft_delete is None:
         raise _Cancelled()
 
     return SnowflakeSinkSpec(
         managed=False,
-        account=account.strip(),
+        account=account,
         user=user.strip(),
         password=password,
         database=database.strip(),
@@ -507,3 +528,138 @@ def _build_snowflake_sink(console: Console) -> SnowflakeSinkSpec:
         soft_delete=soft_delete,
         **{"schema": schema},
     )
+
+
+def _prompt_snowflake_account(console: Console) -> str:
+    """Ask the user for the Snowflake account, offering three input formats.
+
+    Returns the canonical `account` string that snowflake-connector-python
+    expects. Examples it can produce:
+        xy12345.us-east-1
+        xy12345.us-east-1.aws
+        myorg-myaccount
+        xy12345
+    """
+    fmt = prompts.select(
+        "How do you want to provide your Snowflake account?",
+        choices=[
+            {"name": "Account URL",
+             "value": "url",
+             "description": "Full URL from Snowflake UI (most common — copy/paste)"},
+            {"name": "Locator + region",
+             "value": "parts",
+             "description": "Account locator and region as separate fields"},
+            {"name": "Identifier",
+             "value": "id",
+             "description": "Combined identifier if you already know it"},
+            {"name": "← Cancel",
+             "value": "cancel",
+             "description": ""},
+        ],
+        default="url",
+    )
+    if fmt in (None, "cancel"):
+        raise _Cancelled()
+
+    if fmt == "url":
+        raw = prompts.text(
+            "Account URL (e.g. xy12345.us-east-1.snowflakecomputing.com):",
+            default="",
+        )
+        if raw is None or not raw.strip():
+            raise _Cancelled()
+        account = _parse_snowflake_url(raw.strip())
+        if not account:
+            print_err(
+                console,
+                "Could not extract an account identifier from that URL. "
+                "Try the 'Locator + region' option instead."
+            )
+            raise _Cancelled()
+        console.print(Text(f"  → parsed as account = {account}", style="muted"))
+        return account
+
+    if fmt == "parts":
+        locator = prompts.text(
+            "Account locator (e.g. xy12345 or myorg-myaccount):",
+            default="",
+        )
+        if locator is None or not locator.strip():
+            raise _Cancelled()
+        locator = locator.strip()
+
+        region = prompts.text(
+            "Region (e.g. us-east-1 — press Enter if not applicable):",
+            default="",
+        )
+        if region is None:
+            raise _Cancelled()
+        region = region.strip()
+
+        cloud = prompts.text(
+            "Cloud provider (aws / azure / gcp — optional, press Enter to skip):",
+            default="",
+        )
+        if cloud is None:
+            raise _Cancelled()
+        cloud = cloud.strip().lower()
+
+        # Compose the account identifier:
+        #   <locator>                               (no region)
+        #   <locator>.<region>                      (region only)
+        #   <locator>.<region>.<cloud>              (region + cloud)
+        parts = [locator]
+        if region:
+            parts.append(region)
+            if cloud and cloud in ("aws", "azure", "gcp"):
+                parts.append(cloud)
+        account = ".".join(parts)
+        console.print(Text(f"  → composed as account = {account}", style="muted"))
+        return account
+
+    # fmt == "id"
+    raw = prompts.text(
+        "Account identifier (e.g. xy12345.us-east-1 or myorg-myaccount):",
+        default="",
+    )
+    if raw is None or not raw.strip():
+        raise _Cancelled()
+    return raw.strip()
+
+
+def _parse_snowflake_url(url: str) -> str:
+    """Extract the account identifier portion of a Snowflake URL.
+
+    Handles common shapes:
+        xy12345.us-east-1.snowflakecomputing.com         → xy12345.us-east-1
+        https://xy12345.us-east-1.snowflakecomputing.com → xy12345.us-east-1
+        xy12345.us-east-1.aws.snowflakecomputing.com     → xy12345.us-east-1.aws
+        myorg-myaccount.snowflakecomputing.com           → myorg-myaccount
+        xy12345.snowflakecomputing.com                   → xy12345
+
+    If the input doesn't look like a Snowflake URL (no
+    .snowflakecomputing.com suffix), returns it unchanged on the assumption
+    that the user already provided a bare identifier.
+    """
+    # Strip protocol if present
+    if url.startswith("http://"):
+        url = url[7:]
+    elif url.startswith("https://"):
+        url = url[8:]
+
+    # Strip path/query/port if present
+    for sep in ("/", "?", "#", ":"):
+        if sep in url:
+            url = url.split(sep, 1)[0]
+
+    # Strip the snowflakecomputing.com suffix
+    suffix = ".snowflakecomputing.com"
+    if url.endswith(suffix):
+        url = url[: -len(suffix)]
+
+    return url
+
+
+def print_err(console: Console, msg: str) -> None:
+    """Print an inline error inside the wizard."""
+    console.print(Text(f"  ✗ {msg}", style="error"))
