@@ -73,7 +73,10 @@ class TrafficGenerator:
         self.source_dsn = source_dsn
         self.rate_eps = max(rate_eps, 0.1)
 
+        # stop_event: set to terminate the thread
+        # pause_event: set to pause (thread keeps running but generates nothing)
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._stats = GeneratorStats()
@@ -103,6 +106,28 @@ class TrafficGenerator:
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    # ── pause / resume ───────────────────────────────────────────────────────
+
+    def pause(self) -> None:
+        """Pause generation. The thread stays alive but stops emitting ops."""
+        self._pause_event.set()
+
+    def resume(self) -> None:
+        """Resume generation after a pause."""
+        self._pause_event.clear()
+
+    def toggle(self) -> bool:
+        """Toggle paused state. Returns the new state (True = now paused)."""
+        if self._pause_event.is_set():
+            self._pause_event.clear()
+            return False
+        self._pause_event.set()
+        return True
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause_event.is_set()
 
     # ── stats ────────────────────────────────────────────────────────────────
 
@@ -144,6 +169,14 @@ class TrafficGenerator:
         try:
             with conn.cursor() as cur:
                 while not self._stop_event.is_set():
+                    # If paused, idle until either resumed or stopped. Poll
+                    # every 100 ms so stop() is still snappy.
+                    while self._pause_event.is_set() and not self._stop_event.is_set():
+                        if self._stop_event.wait(0.1):
+                            break
+                    if self._stop_event.is_set():
+                        break
+
                     r = random.random()
                     try:
                         if r < 0.70:

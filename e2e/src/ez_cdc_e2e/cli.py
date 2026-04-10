@@ -582,20 +582,66 @@ def quickstart(
     _show_banner_a()
     profile = _resolve_sink(sink)
 
-    # Start compose
-    console.print()
-    console.print(format_step(f"Starting compose profile: {profile.compose_profile}"))
+    # If a stack is already running, ask the user what they want to do.
+    # Reusing is faster and keeps whatever state the previous run left behind;
+    # recreating gives a clean slate (fresh seed + new replication slot).
+    already_running = False
     try:
-        compose.up(
-            profile.compose_profile,
-            env_file=profile.requires_env_file if profile.requires_env_file and profile.requires_env_file.exists() else None,
-            wait=True,
-            build=rebuild,
+        already_running = compose.is_running(profile.compose_profile)
+    except ComposeError:
+        # docker not reachable — fall through to the normal up path, which
+        # will surface the error with a clearer message.
+        pass
+
+    if already_running:
+        console.print()
+        console.print(Text(
+            f"  A stack for '{profile.name}' is already running.",
+            style="warning",
+        ))
+        console.print()
+        action = prompts.select(
+            "What do you want to do?",
+            choices=[
+                {"name": "Reuse it",              "value": "reuse",
+                 "description": "Open the dashboard on the existing stack (fast, keeps current state)"},
+                {"name": "Destroy and recreate", "value": "recreate",
+                 "description": "docker compose down -v, then up (clean slate, ~30s)"},
+                {"name": "← Back",                "value": "back", "description": ""},
+            ],
+            default="reuse",
         )
-    except ComposeError as e:
-        console.print(Text(f"Failed to start compose: {e}", style="error"))
-        raise typer.Exit(2)
-    console.print(format_step_ok(f"Starting compose profile: {profile.compose_profile}"))
+        if action in (None, "back"):
+            raise _BackToMenu()
+
+        if action == "recreate":
+            console.print()
+            console.print(format_step(f"Destroying existing stack: {profile.compose_profile}"))
+            try:
+                compose.down(profile.compose_profile, remove_volumes=True)
+            except ComposeError as e:
+                console.print(Text(f"Failed to tear down stack: {e}", style="error"))
+                raise typer.Exit(2)
+            console.print(format_step_ok(f"Destroying existing stack: {profile.compose_profile}"))
+            already_running = False
+
+    # Start compose (or confirm it's already up).
+    console.print()
+    if already_running:
+        console.print(format_step_ok(f"Reusing existing stack: {profile.compose_profile}"))
+    else:
+        console.print(format_step(f"Starting compose profile: {profile.compose_profile}"))
+        try:
+            compose.up(
+                profile.compose_profile,
+                env_file=profile.requires_env_file if profile.requires_env_file and profile.requires_env_file.exists() else None,
+                wait=True,
+                build=rebuild,
+            )
+        except ComposeError as e:
+            console.print(Text(f"Failed to start compose: {e}", style="error"))
+            raise typer.Exit(2)
+        console.print(format_step_ok(f"Starting compose profile: {profile.compose_profile}"))
 
     # Connect clients
     dbmazz_client = DbmazzClient(profile.dbmazz_http_url)
