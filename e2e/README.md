@@ -125,6 +125,7 @@ during replication. Each field maps 1:1 to a dbmazz environment variable.
 | `snapshot_parallel_workers` | `SNAPSHOT_PARALLEL_WORKERS` | `2` | Concurrent snapshot workers (1–32) |
 | `initial_snapshot_only` | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot completes — no CDC streaming |
 | `rust_log` | `RUST_LOG` | `info` | Log level filter (`info`, `debug`, `dbmazz=debug`, etc.) |
+| `snowflake_flush_files` | `SINK_SNOWFLAKE_FLUSH_FILES` | `1` | Snowflake: trigger COPY INTO after N staged files (production: 20) |
 
 View current values: `ez-cdc datasource settings`
 Edit interactively: `ez-cdc datasource settings --edit`

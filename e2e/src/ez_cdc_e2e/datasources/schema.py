@@ -286,6 +286,12 @@ class PipelineSettings(BaseModel):
         default="info",
         description="Rust log filter (RUST_LOG). e.g. info, debug, dbmazz=debug.",
     )
+    snowflake_flush_files: int = Field(
+        default=1,
+        ge=1,
+        description="Snowflake: COPY INTO after N staged files (SINK_SNOWFLAKE_FLUSH_FILES). "
+        "Default 1 for e2e (immediate). Production uses 20.",
+    )
 
     def to_env_lines(self) -> list[str]:
         """Render as KEY=value lines for the .env file."""
@@ -297,6 +303,7 @@ class PipelineSettings(BaseModel):
             f"SNAPSHOT_PARALLEL_WORKERS={self.snapshot_parallel_workers}",
             f"INITIAL_SNAPSHOT_ONLY={'true' if self.initial_snapshot_only else 'false'}",
             f"RUST_LOG={self.rust_log}",
+            f"SINK_SNOWFLAKE_FLUSH_FILES={self.snowflake_flush_files}",
         ]
 
 

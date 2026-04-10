@@ -607,6 +607,7 @@ _SETTINGS_FIELDS = [
     ("snapshot_parallel_workers","Parallel snapshot workers",              "int"),
     ("initial_snapshot_only",    "Exit after snapshot (no CDC)",           "bool"),
     ("rust_log",                 "Log level (RUST_LOG)",                   "str"),
+    ("snowflake_flush_files",    "Snowflake: COPY INTO after N files",    "int"),
 ]
 
 
