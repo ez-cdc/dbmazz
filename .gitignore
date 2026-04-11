@@ -5,6 +5,8 @@
 # Note: Cargo.lock is committed for binary crates (reproducible builds).
 # Only gitignore Cargo.lock in library crates.
 
+/skills-lock.json
+
 # Byproducts
 *.log
 *.tmp

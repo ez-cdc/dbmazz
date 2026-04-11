@@ -82,6 +82,7 @@ pub fn up(
 }
 
 /// Build images without starting containers.
+#[allow(dead_code)]
 pub fn build_images(compose_file: &Path, services: &[&str]) -> Result<(), ComposeError> {
     check_docker_compose()?;
 
@@ -161,6 +162,7 @@ pub fn logs(
 }
 
 /// Return the output of `docker compose ps`.
+#[allow(dead_code)]
 pub fn ps(compose_file: &Path) -> Result<String, ComposeError> {
     check_docker_compose()?;
 

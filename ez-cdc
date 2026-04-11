@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Wrapper to run the ez-cdc CLI from the repo root.
+# Uses the release binary if available, otherwise dev.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN="$SCRIPT_DIR/e2e-cli/target/release/ez-cdc"
+if [ ! -x "$BIN" ]; then
+    BIN="$SCRIPT_DIR/e2e-cli/target/debug/ez-cdc"
+fi
+if [ ! -x "$BIN" ]; then
+    echo "ez-cdc binary not found. Run: cd e2e-cli && cargo build" >&2
+    exit 1
+fi
+exec "$BIN" --config "$SCRIPT_DIR/e2e-cli/ez-cdc.yaml" "$@"

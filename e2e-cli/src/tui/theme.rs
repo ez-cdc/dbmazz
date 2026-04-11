@@ -3,6 +3,8 @@
 //! Colors sourced from the brand palette (Tailwind Blue primary, Slate grays).
 //! Hex values work with `console::Style::color256()` and `console::style()`.
 
+#![allow(dead_code)]
+
 // ── Brand palette (Tailwind Blue) ─────────────────────────────────────────
 
 pub const PRIMARY_400: &str = "#60A5FA"; // brand (dark-friendly)

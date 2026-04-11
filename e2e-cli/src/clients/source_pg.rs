@@ -26,6 +26,7 @@ pub enum SourceError {
     #[error("INSERT returned no row")]
     NoReturningRow,
 
+    #[allow(dead_code)]
     #[error("{0}")]
     Other(String),
 }
@@ -51,7 +52,6 @@ impl ToSql for SqlValue {
         ty: &tokio_postgres::types::Type,
         out: &mut tokio_postgres::types::private::BytesMut,
     ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        use tokio_postgres::types::Type;
         match self {
             SqlValue::Null => Ok(tokio_postgres::types::IsNull::Yes),
             SqlValue::Int(v) => {
@@ -104,6 +104,7 @@ fn sql_literal(v: &SqlValue) -> String {
 
 /// Contract for the source database driver used by e2e tests.
 #[async_trait]
+#[allow(dead_code)]
 pub trait SourceClient: Send + Sync {
     /// Open the connection. Must be called before any other method.
     async fn connect(&mut self) -> anyhow::Result<()>;

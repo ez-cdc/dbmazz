@@ -69,6 +69,7 @@ pub async fn check_connectivity(
 /// Check that source tables exist and target schema is accessible.
 ///
 /// Returns `true` if schema checks pass.
+#[allow(dead_code)]
 pub async fn check_schema(src_spec: &SourceSpec, sk_spec: &SinkSpec) -> bool {
     let mut ok = true;
 
@@ -137,6 +138,7 @@ pub async fn check_schema(src_spec: &SourceSpec, sk_spec: &SinkSpec) -> bool {
 /// Run all preflight checks (connectivity + schema).
 ///
 /// Returns `true` if all checks pass.
+#[allow(dead_code)]
 pub async fn run_preflight(
     src_spec: &SourceSpec,
     sk_spec: &SinkSpec,

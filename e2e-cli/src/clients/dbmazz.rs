@@ -35,26 +35,39 @@ pub enum DbmazzError {
 // ── DaemonStatus ────────────────────────────────────────────────────────────
 
 /// Snapshot of the dbmazz daemon state from `/status`.
+///
+/// Field names match what the CLI uses internally. `serde(alias)` maps
+/// from the actual JSON field names returned by the daemon's HTTP API:
+///   - `events_processed` → `events_total`
+///   - `events_per_second` → `events_per_sec`
+///   - `estimated_memory_bytes` → `memory_bytes` (converted to MB in display)
+///   - `state` → used to override `stage` when paused/stopped
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonStatus {
-    /// Pipeline stage: "setup", "snapshot", "cdc", "paused", "stopped".
+    /// Pipeline stage: "setup", "snapshot", "cdc".
+    /// Note: pause/stop is in the `state` field, not `stage`.
     #[serde(default = "default_stage")]
     pub stage: String,
+
+    /// Engine state: "running", "paused", "draining", "stopped".
+    #[serde(default)]
+    pub state: String,
 
     #[serde(default)]
     pub uptime_secs: u64,
 
-    /// E.g., "0/1A3F8E2"
     #[serde(default = "default_lsn")]
     pub confirmed_lsn: String,
 
     #[serde(default = "default_lsn")]
     pub current_lsn: String,
 
-    #[serde(default)]
+    /// Total events processed. Daemon field: `events_processed`.
+    #[serde(default, alias = "events_processed")]
     pub events_total: u64,
 
-    #[serde(default)]
+    /// Current throughput. Daemon field: `events_per_second`.
+    #[serde(default, alias = "events_per_second")]
     pub events_per_sec: f64,
 
     #[serde(default)]
@@ -63,26 +76,30 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub replication_lag_ms: u64,
 
-    #[serde(default)]
-    pub memory_rss_mb: f64,
-
-    #[serde(default)]
-    pub cpu_millicores: u64,
-
-    #[serde(default)]
-    pub snapshot_active: bool,
-
-    #[serde(default)]
-    pub snapshot_chunks_total: u64,
-
-    #[serde(default)]
-    pub snapshot_chunks_done: u64,
-
-    #[serde(default)]
-    pub snapshot_rows_synced: u64,
+    /// Memory in bytes. Daemon field: `estimated_memory_bytes`.
+    #[serde(default, alias = "estimated_memory_bytes")]
+    pub memory_bytes: u64,
 
     #[serde(default)]
     pub error_detail: Option<String>,
+}
+
+impl DaemonStatus {
+    /// The effective display stage, merging `stage` + `state`.
+    /// When state is "paused" or "stopped", that overrides the stage.
+    pub fn effective_stage(&self) -> &str {
+        match self.state.as_str() {
+            "paused" => "paused",
+            "stopped" => "stopped",
+            "draining" => "stopped",
+            _ => &self.stage,
+        }
+    }
+
+    /// Memory in MB for display.
+    pub fn memory_mb(&self) -> f64 {
+        self.memory_bytes as f64 / (1024.0 * 1024.0)
+    }
 }
 
 fn default_stage() -> String {
@@ -261,54 +278,57 @@ impl DbmazzClient {
 mod tests {
     use super::*;
 
+    /// Test parsing the REAL JSON that the daemon's /status returns.
     #[test]
-    fn parse_daemon_status_full() {
+    fn parse_real_daemon_response() {
         let json = r#"{
+            "engine_running": true,
+            "state": "running",
             "stage": "cdc",
             "uptime_secs": 120,
-            "confirmed_lsn": "0/1A3F8E2",
-            "current_lsn": "0/1A3F900",
-            "events_total": 5000,
-            "events_per_sec": 42.5,
+            "confirmed_lsn": "0x1A3F8E2",
+            "current_lsn": "0x1A3F900",
+            "events_processed": 5000,
+            "events_per_second": 42,
             "batches_sent": 100,
             "replication_lag_ms": 50,
-            "memory_rss_mb": 128.5,
-            "cpu_millicores": 250,
-            "snapshot_active": false,
-            "snapshot_chunks_total": 10,
-            "snapshot_chunks_done": 10,
-            "snapshot_rows_synced": 50000,
-            "error_detail": null
+            "estimated_memory_bytes": 5242880,
+            "pending_events": 3
         }"#;
 
         let status: DaemonStatus = serde_json::from_str(json).expect("parse failed");
         assert_eq!(status.stage, "cdc");
+        assert_eq!(status.state, "running");
+        assert_eq!(status.effective_stage(), "cdc");
         assert_eq!(status.uptime_secs, 120);
-        assert_eq!(status.confirmed_lsn, "0/1A3F8E2");
-        assert_eq!(status.current_lsn, "0/1A3F900");
-        assert_eq!(status.events_total, 5000);
-        assert!((status.events_per_sec - 42.5).abs() < f64::EPSILON);
+        assert_eq!(status.events_total, 5000); // alias: events_processed
+        assert!((status.events_per_sec - 42.0).abs() < f64::EPSILON); // alias: events_per_second
         assert_eq!(status.batches_sent, 100);
         assert_eq!(status.replication_lag_ms, 50);
-        assert!((status.memory_rss_mb - 128.5).abs() < f64::EPSILON);
-        assert_eq!(status.cpu_millicores, 250);
-        assert!(!status.snapshot_active);
-        assert_eq!(status.snapshot_chunks_total, 10);
-        assert_eq!(status.snapshot_chunks_done, 10);
-        assert_eq!(status.snapshot_rows_synced, 50000);
-        assert!(status.error_detail.is_none());
+        assert_eq!(status.memory_bytes, 5242880); // alias: estimated_memory_bytes
+        assert!((status.memory_mb() - 5.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_paused_state() {
+        let json = r#"{
+            "engine_running": true,
+            "state": "paused",
+            "stage": "cdc"
+        }"#;
+        let status: DaemonStatus = serde_json::from_str(json).expect("parse failed");
+        assert_eq!(status.stage, "cdc");
+        assert_eq!(status.effective_stage(), "paused"); // state overrides stage
     }
 
     #[test]
     fn parse_daemon_status_minimal() {
-        // The daemon may return a minimal response during setup.
         let json = r#"{"stage": "setup"}"#;
         let status: DaemonStatus = serde_json::from_str(json).expect("parse failed");
         assert_eq!(status.stage, "setup");
         assert_eq!(status.uptime_secs, 0);
         assert_eq!(status.confirmed_lsn, "0/0");
         assert_eq!(status.events_total, 0);
-        assert!(!status.snapshot_active);
         assert!(status.error_detail.is_none());
     }
 

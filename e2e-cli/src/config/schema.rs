@@ -38,6 +38,7 @@ fn validate_pg_ident(value: &str, label: &str) -> Result<(), String> {
 // ── Source specs ────────────────────────────────────────────────────────────
 
 /// A PostgreSQL source database for CDC.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostgresSourceSpec {
@@ -72,6 +73,7 @@ fn default_publication() -> String {
 }
 
 impl PostgresSourceSpec {
+    #[allow(dead_code)]
     pub fn validate(&self) -> Result<(), String> {
         validate_pg_ident(&self.replication_slot, "replication_slot")?;
         validate_pg_ident(&self.publication, "publication")?;
@@ -95,6 +97,7 @@ impl PostgresSourceSpec {
 // ── Sink specs ─────────────────────────────────────────────────────────────
 
 /// A PostgreSQL sink database.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PostgresSinkSpec {
@@ -117,6 +120,7 @@ fn default_pg_schema() -> String {
 }
 
 /// A StarRocks sink.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StarRocksSinkSpec {
@@ -150,6 +154,7 @@ fn default_sr_user() -> String {
 /// A Snowflake sink (cloud-only).
 ///
 /// Custom `Debug` implementation to redact password.
+#[allow(dead_code)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnowflakeSinkSpec {
@@ -210,12 +215,14 @@ impl fmt::Debug for SnowflakeSinkSpec {
 
 // ── Type discriminators ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceType {
     Postgres,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SinkType {
@@ -368,6 +375,7 @@ impl SinkSpec {
         }
     }
 
+    #[allow(dead_code)]
     pub fn database(&self) -> &str {
         match self {
             SinkSpec::Postgres(s) => &s.database,
@@ -376,6 +384,7 @@ impl SinkSpec {
         }
     }
 
+    #[allow(dead_code)]
     pub fn url(&self) -> &str {
         match self {
             SinkSpec::Postgres(s) => &s.url,

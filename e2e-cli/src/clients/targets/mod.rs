@@ -26,8 +26,10 @@ pub struct ColumnInfo {
     /// Column name as stored in the target.
     pub name: String,
     /// Backend-normalized type name (INTEGER, BIGINT, TEXT, etc.).
+    #[allow(dead_code)]
     pub sql_type: String,
     /// Whether the column allows NULLs.
+    #[allow(dead_code)]
     pub nullable: bool,
 }
 
@@ -39,14 +41,18 @@ pub struct BackendCapabilities {
     /// True: DELETE removes the row physically. False: soft delete via is_deleted.
     pub supports_hard_delete: bool,
     /// True: ALTER TABLE ADD COLUMN is propagated automatically.
+    #[allow(dead_code)]
     pub supports_schema_evolution: bool,
     /// True: array types are supported.
+    #[allow(dead_code)]
     pub supports_arrays: bool,
     /// True: enum types are supported.
+    #[allow(dead_code)]
     pub supports_enum: bool,
     /// True: the sink maintains a `_dbmazz._metadata` table.
     pub has_metadata_table: bool,
     /// True: `hash_table()` uses native SQL aggregation.
+    #[allow(dead_code)]
     pub supports_hash_compare_sql: bool,
     /// Seconds to wait after a CDC operation before reading the target.
     pub post_cdc_settle_seconds: f64,
@@ -69,6 +75,7 @@ pub enum SqlValue {
 
 impl SqlValue {
     /// Return the inner value as an i64, or None if not an integer.
+    #[allow(dead_code)]
     pub fn as_i64(&self) -> Option<i64> {
         match self {
             SqlValue::Int(v) => Some(*v),
@@ -77,6 +84,7 @@ impl SqlValue {
     }
 
     /// Return the inner value as a string, or None if NULL.
+    #[allow(dead_code)]
     pub fn as_str(&self) -> Option<&str> {
         match self {
             SqlValue::Text(v) => Some(v),
@@ -89,6 +97,7 @@ impl SqlValue {
 
 /// Contract for target sinks used by the e2e verify and load runners.
 #[async_trait]
+#[allow(dead_code)]
 pub trait TargetBackend: Send + Sync {
     // ── lifecycle ────────────────────────────────────────────────────────
 

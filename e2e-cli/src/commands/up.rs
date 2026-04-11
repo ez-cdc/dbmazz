@@ -2,7 +2,7 @@ use std::path::Path;
 
 use console::style;
 
-use crate::commands::{load_store, resolve_pair};
+use crate::commands::load_store;
 use crate::compose::{builder, runner};
 use crate::tui::report::print_step;
 

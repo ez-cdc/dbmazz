@@ -1,12 +1,19 @@
 //! Full-screen ratatui TUI dashboard for the quickstart command.
 //!
-//! Displays pipeline status, throughput sparkline, table sync counts,
-//! and keybinding footer. Fetches data from the dbmazz HTTP API on a
-//! timer tick and renders using ratatui + crossterm.
+//! Layout inspired by btop/lazydocker: hero metrics up top, full-width
+//! sparkline, clean table, borderless keybind bar at the very bottom.
 
 use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+// Maximum time a single DB query (source count or target count) may take
+// before it is abandoned. Keeps the TUI responsive even when a backend is slow.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+// Minimum interval between consecutive source-PG reconnect attempts.
+// Prevents spamming the database with connection attempts every 500 ms tick.
+const RECONNECT_COOLDOWN: Duration = Duration::from_secs(5);
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
@@ -14,7 +21,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table};
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 
 use crate::clients::dbmazz::{DaemonStatus, DbmazzClient};
 use crate::clients::targets::TargetBackend;
@@ -26,6 +33,17 @@ use crate::load::TrafficGenerator;
 const HISTORY_LEN: usize = 60;
 const POLL_MS: u64 = 250;
 const TICK_MS: u64 = 500;
+
+// ── Brand colors ───────────────────────────────────────────────────────────
+
+const PRIMARY: Color = Color::Rgb(96, 165, 250); // #60A5FA
+const INFO: Color = Color::Rgb(59, 130, 246); // #3B82F6
+const SUCCESS: Color = Color::Rgb(16, 185, 129); // #10B981
+const ERROR: Color = Color::Rgb(239, 68, 68); // #EF4444
+const WARNING: Color = Color::Rgb(245, 158, 11); // #F59E0B
+const MUTED: Color = Color::Rgb(148, 163, 184); // #94A3B8
+const DIM: Color = Color::Rgb(100, 116, 139); // #64748B
+const BORDER: Color = Color::Rgb(71, 85, 105); // #475569
 
 // ── Data model ─────────────────────────────────────────────────────────────
 
@@ -51,8 +69,11 @@ pub struct QuickstartDashboard {
     traffic_running: bool,
     traffic_generator: Option<TrafficGenerator>,
     status_message: Option<(String, Instant)>,
-    last_events_total: u64,
-    last_tick: Instant,
+    // lazy source PG connection
+    source_client: Option<tokio_postgres::Client>,
+    /// Timestamp of the last connection attempt for the source PG client.
+    /// Used to enforce `RECONNECT_COOLDOWN` between retries.
+    last_connect_attempt: Option<Instant>,
 }
 
 impl QuickstartDashboard {
@@ -77,14 +98,13 @@ impl QuickstartDashboard {
             traffic_running: false,
             traffic_generator: None,
             status_message: None,
-            last_events_total: 0,
-            last_tick: Instant::now(),
+            source_client: None,
+            last_connect_attempt: None,
         }
     }
 
     /// Run the dashboard event loop. Blocks until the user quits.
     pub async fn run(&mut self) -> anyhow::Result<()> {
-        // Install panic hook that restores terminal.
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();
@@ -101,7 +121,6 @@ impl QuickstartDashboard {
 
         let result = self.event_loop(&mut terminal).await;
 
-        // Restore terminal.
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
         terminal.show_cursor()?;
@@ -116,7 +135,6 @@ impl QuickstartDashboard {
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_millis(TICK_MS);
 
-        // Initial fetch.
         self.fetch_data().await;
 
         loop {
@@ -151,7 +169,6 @@ impl QuickstartDashboard {
             }
         }
 
-        // Stop traffic generator if running.
         if let Some(ref mut gen) = self.traffic_generator {
             gen.stop().await;
         }
@@ -162,25 +179,21 @@ impl QuickstartDashboard {
     // ── Data fetching ──────────────────────────────────────────────────────
 
     async fn fetch_data(&mut self) {
-        // Fetch dbmazz status.
-        match self.dbmazz.status().await {
-            Ok(status) => {
-                // Compute throughput delta.
-                let elapsed = self.last_tick.elapsed().as_secs_f64().max(0.001);
-                let delta = status.events_total.saturating_sub(self.last_events_total);
-                let eps = (delta as f64 / elapsed) as u64;
+        // Bounded by QUERY_TIMEOUT so a slow/unreachable daemon can't freeze the TUI.
+        match tokio::time::timeout(QUERY_TIMEOUT, self.dbmazz.status()).await {
+            Ok(Ok(status)) => {
+                // Use the daemon's reported events_per_second as the authoritative
+                // throughput value rather than computing a local delta.
+                let eps = status.events_per_sec as u64;
 
                 self.throughput_history.push(eps);
                 if self.throughput_history.len() > HISTORY_LEN {
                     self.throughput_history.remove(0);
                 }
 
-                self.last_events_total = status.events_total;
                 self.last_status = Some(status);
-                self.last_tick = Instant::now();
             }
-            Err(_) => {
-                // Push zero throughput on error.
+            Ok(Err(_)) | Err(_) => {
                 self.throughput_history.push(0);
                 if self.throughput_history.len() > HISTORY_LEN {
                     self.throughput_history.remove(0);
@@ -188,15 +201,28 @@ impl QuickstartDashboard {
             }
         }
 
-        // Fetch table counts from target.
+        self.ensure_source_client().await;
+
         let mut counts = Vec::new();
-        for table in &self.tables {
-            let source_count = self.fetch_source_count(table).await.unwrap_or(-1);
-            let target_count = self
-                .target
-                .count_rows(table, true)
-                .await
-                .unwrap_or(-1);
+        for table in &self.tables.clone() {
+            // Both queries are bounded by QUERY_TIMEOUT so that a slow source or
+            // target cannot stall the 500 ms event loop tick.
+            let source_count = tokio::time::timeout(
+                QUERY_TIMEOUT,
+                self.fetch_source_count(table),
+            )
+            .await
+            .unwrap_or(Ok(-1))
+            .unwrap_or(-1);
+
+            let target_count = tokio::time::timeout(
+                QUERY_TIMEOUT,
+                self.target.count_rows(table, true),
+            )
+            .await
+            .unwrap_or(Ok(-1))
+            .unwrap_or(-1);
+
             counts.push(TableCount {
                 name: table.clone(),
                 source: source_count,
@@ -206,11 +232,62 @@ impl QuickstartDashboard {
         self.table_counts = counts;
     }
 
-    async fn fetch_source_count(&self, _table: &str) -> anyhow::Result<i64> {
-        // We report source counts from the daemon status or skip if unavailable.
-        // Since we don't hold a persistent source connection, use -1 as placeholder.
-        // The dashboard shows target counts which is the main value.
-        Ok(-1)
+    async fn ensure_source_client(&mut self) {
+        if self.source_client.is_some() {
+            return;
+        }
+
+        // Enforce a cooldown between reconnect attempts so a repeated failure
+        // does not hammer the database once every 500 ms tick.
+        if let Some(last) = self.last_connect_attempt {
+            if last.elapsed() < RECONNECT_COOLDOWN {
+                return;
+            }
+        }
+        self.last_connect_attempt = Some(Instant::now());
+
+        let dsn = self.source_dsn.clone();
+        // Bound the connection attempt itself so a network timeout can't freeze
+        // the TUI for the OS default TCP timeout (often 2 minutes).
+        match tokio::time::timeout(
+            QUERY_TIMEOUT,
+            tokio_postgres::connect(&dsn, tokio_postgres::NoTls),
+        )
+        .await
+        {
+            Ok(Ok((client, connection))) => {
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                self.source_client = Some(client);
+            }
+            Ok(Err(_)) | Err(_) => {
+                // Connection failed or timed out — will retry after RECONNECT_COOLDOWN.
+            }
+        }
+    }
+
+    async fn fetch_source_count(&mut self, table: &str) -> anyhow::Result<i64> {
+        let client = match self.source_client.as_ref() {
+            Some(c) => c,
+            None => return Ok(-1),
+        };
+
+        if table.contains('"') {
+            return Ok(-1);
+        }
+
+        let query = format!("SELECT COUNT(*) FROM \"{}\"", table);
+        match client.query_one(&query, &[]).await {
+            Ok(row) => {
+                let count: i64 = row.get(0);
+                Ok(count)
+            }
+            Err(_) => {
+                self.source_client = None;
+                Ok(-1)
+            }
+        }
     }
 
     // ── Actions ────────────────────────────────────────────────────────────
@@ -226,15 +303,15 @@ impl QuickstartDashboard {
             }
         }
 
-        let mut gen = TrafficGenerator::new(&self.source_dsn, 10.0);
+        let mut gen = TrafficGenerator::new(&self.source_dsn, 50.0);
         gen.start();
         self.traffic_generator = Some(gen);
         self.traffic_running = true;
-        self.set_status_message("Traffic started (~10 ops/s)");
+        self.set_status_message("Traffic started (~50 ops/s) — watch the counts update");
     }
 
     async fn toggle_pause(&mut self) {
-        match self.last_status.as_ref().map(|s| s.stage.as_str()) {
+        match self.last_status.as_ref().map(|s| s.effective_stage()) {
             Some("paused") => {
                 if self.dbmazz.resume().await.is_ok() {
                     self.set_status_message("Pipeline resumed");
@@ -259,12 +336,15 @@ impl QuickstartDashboard {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> anyhow::Result<()> {
-        // Leave alternate screen and raw mode for logs.
+        // The TUI is fully suspended (raw mode off, alternate screen left) before
+        // invoking runner::logs(), which uses a blocking std::process::Command with
+        // inherited stdio. This is intentional: the blocking call runs while the
+        // event loop is paused, so it does not stall the tokio runtime.
         disable_raw_mode()?;
         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
         if let Some(ref compose_file) = self.compose_file {
-            let _ = runner::logs(compose_file, None, true, 100);
+            let _ = runner::logs(compose_file, Some("dbmazz"), true, 100);
         } else {
             println!("No compose file available for logs.");
             println!("Press Enter to return...");
@@ -272,7 +352,6 @@ impl QuickstartDashboard {
             let _ = std::io::stdin().read_line(&mut input);
         }
 
-        // Re-enter alternate screen.
         execute!(terminal.backend_mut(), EnterAlternateScreen)?;
         enable_raw_mode()?;
         terminal.clear()?;
@@ -285,182 +364,195 @@ impl QuickstartDashboard {
     }
 
     // ── Rendering ──────────────────────────────────────────────────────────
+    //
+    //   1. Header          (1)  — brand + status + uptime
+    //   2. Separator        (1)
+    //   3. Metrics          (1)  — ev/s, lag, events, batches
+    //   4. Blank            (1)
+    //   5. Table header     (1)  — column labels
+    //   6. Table rows       (N)  — one per table: name, source, target, delta
+    //   7. Blank            (1)
+    //   8. Sparkline        (flex) — throughput history
+    //   9. Traffic bar      (1)
+    //  10. Status msg       (1)
+    //  11. Keybind bar      (1)
 
     fn render(&self, frame: &mut Frame) {
         let area = frame.area();
+        let n_tables = self.table_counts.len().max(1) as u16;
 
-        // Main layout: header | body | footer.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),  // header
-                Constraint::Min(8),    // body
-                Constraint::Length(5), // tables
-                Constraint::Length(3),  // footer
+                Constraint::Length(1),          // header
+                Constraint::Length(1),          // separator
+                Constraint::Length(1),          // metrics
+                Constraint::Length(1),          // blank
+                Constraint::Length(1),          // table header
+                Constraint::Min(n_tables),     // table rows (flex — gets extra space)
+                Constraint::Length(1),          // blank
+                Constraint::Length(5),          // sparkline (compact, fixed)
+                Constraint::Length(1),          // traffic bar
+                Constraint::Length(1),          // status msg
+                Constraint::Length(1),          // keybind bar
             ])
             .split(area);
 
         self.render_header(frame, chunks[0]);
-        self.render_body(frame, chunks[1]);
-        self.render_tables(frame, chunks[2]);
-        self.render_footer(frame, chunks[3]);
+        self.render_separator(frame, chunks[1]);
+        self.render_metrics(frame, chunks[2]);
+        // chunks[3] = blank
+        self.render_table_header(frame, chunks[4]);
+        self.render_table_rows(frame, chunks[5]);
+        // chunks[6] = blank
+        self.render_sparkline(frame, chunks[7]);
+        self.render_traffic(frame, chunks[8]);
+        self.render_status_msg(frame, chunks[9]);
+        self.render_keybinds(frame, chunks[10]);
     }
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let (stage, stage_style) = match &self.last_status {
-            Some(status) => {
-                let (label, style) = match status.stage.as_str() {
-                    "cdc" => ("\u{25CF} CDC running", Style::default().fg(Color::Green)),
-                    "snapshot" => ("\u{25CF} Snapshot", Style::default().fg(Color::Yellow)),
-                    "setup" => ("\u{25CB} Setting up", Style::default().fg(Color::Yellow)),
-                    "paused" => ("\u{23F8} Paused", Style::default().fg(Color::Yellow)),
-                    "stopped" => ("\u{25A0} Stopped", Style::default().fg(Color::Red)),
-                    other => (other, Style::default().fg(Color::Gray)),
-                };
-                // stage.as_str() borrows self.last_status which we can't move out of,
-                // so we use a &'static str for the known cases above.
-                (label.to_string(), style)
-            }
-            None => (
-                "Connecting...".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ),
+        let (status_text, status_style) = match &self.last_status {
+            Some(s) => stage_display(s.effective_stage()),
+            None => ("Connecting...".to_string(), Style::default().fg(DIM)),
         };
 
-        let header_text = Line::from(vec![
-            Span::styled("  ez-cdc ", Style::default().fg(Color::Cyan).bold()),
-            Span::styled("\u{00B7} ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&self.name, Style::default().fg(Color::White)),
-            Span::raw("  "),
-            // Right-align: fill with spaces, then status.
-            // For simplicity, just append the status with spacing.
-            Span::styled(
-                format!(
-                    "{:>width$}",
-                    &stage,
-                    width = area.width.saturating_sub(self.name.len() as u16 + 16) as usize,
-                ),
-                stage_style,
-            ),
-        ]);
+        let uptime = self
+            .last_status
+            .as_ref()
+            .map(|s| format_duration(s.uptime_secs))
+            .unwrap_or_default();
 
-        let header = Paragraph::new(header_text).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(header, area);
+        let error_span = match self.last_status.as_ref().and_then(|s| s.error_detail.as_ref()) {
+            Some(err) => {
+                let t = if err.len() > 30 { format!("{}...", &err[..30]) } else { err.clone() };
+                Span::styled(format!("  {t}"), Style::default().fg(ERROR))
+            }
+            None => Span::raw(""),
+        };
+
+        let right = format!("{status_text}  {uptime}");
+        let pad = area.width.saturating_sub(self.name.len() as u16 + right.len() as u16 + 12) as usize;
+
+        let line = Line::from(vec![
+            Span::styled(" EZ-CDC ", Style::default().fg(PRIMARY).bold()),
+            Span::styled(" ", Style::default().fg(BORDER)),
+            Span::styled(&self.name, Style::default().fg(Color::White)),
+            error_span,
+            Span::raw(" ".repeat(pad)),
+            Span::styled(status_text, status_style),
+            Span::styled(format!("  {uptime} "), Style::default().fg(MUTED)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn render_body(&self, frame: &mut Frame, area: Rect) {
-        // Split body into left (pipeline info) and right (sparkline).
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+    fn render_separator(&self, frame: &mut Frame, area: Rect) {
+        let rule = "\u{2500}".repeat(area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(rule, Style::default().fg(BORDER)))),
+            area,
+        );
+    }
+
+    /// One-line metrics: "  42 ev/s   12ms lag   5,234 events   18 batches   LSN 0/1A3F"
+    fn render_metrics(&self, frame: &mut Frame, area: Rect) {
+        let mut spans: Vec<Span> = vec![Span::raw("  ")];
+        if let Some(s) = &self.last_status {
+            spans.extend([
+                Span::styled(format!("{:.0}", s.events_per_sec), Style::default().fg(PRIMARY).bold()),
+                Span::styled(" ev/s", Style::default().fg(DIM)),
+                Span::raw("   "),
+                Span::styled(format!("{}ms", s.replication_lag_ms), Style::default().fg(lag_color(&self.last_status))),
+                Span::styled(" lag", Style::default().fg(DIM)),
+                Span::raw("   "),
+                Span::styled(format_number(s.events_total), Style::default().fg(Color::White)),
+                Span::styled(" events", Style::default().fg(DIM)),
+                Span::raw("   "),
+                Span::styled(format_number(s.batches_sent), Style::default().fg(Color::White)),
+                Span::styled(" batches", Style::default().fg(DIM)),
+                Span::raw("   "),
+                Span::styled("LSN ", Style::default().fg(DIM)),
+                Span::styled(&s.confirmed_lsn, Style::default().fg(MUTED)),
+            ]);
+        } else {
+            spans.push(Span::styled("Connecting...", Style::default().fg(DIM)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// Column header: "  TABLE              SOURCE       TARGET       DELTA"
+    fn render_table_header(&self, frame: &mut Frame, area: Rect) {
+        let s = Style::default().fg(DIM).bold();
+        let line = Line::from(vec![
+            Span::styled(format!("  {:<20}", "TABLE"), s),
+            Span::styled(format!("{:>12}", "SOURCE"), s),
+            Span::styled(format!("{:>12}", "TARGET"), s),
+            Span::styled(format!("{:>10}", "DELTA"), s),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    /// One row per table with live counts and delta.
+    fn render_table_rows(&self, frame: &mut Frame, area: Rect) {
+        if self.table_counts.is_empty() {
+            let line = Line::from(Span::styled("  Waiting for data...", Style::default().fg(DIM)));
+            frame.render_widget(Paragraph::new(line), area);
+            return;
+        }
+
+        let constraints: Vec<Constraint> = self.table_counts.iter()
+            .map(|_| Constraint::Length(1))
+            .collect();
+
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
             .split(area);
 
-        self.render_pipeline_info(frame, body_chunks[0]);
-        self.render_sparkline(frame, body_chunks[1]);
-    }
+        for (i, tc) in self.table_counts.iter().enumerate() {
+            if i >= rows.len() { break; }
 
-    fn render_pipeline_info(&self, frame: &mut Frame, area: Rect) {
-        let info = match &self.last_status {
-            Some(s) => {
-                let uptime = format_duration(s.uptime_secs);
-                let events_formatted = format_number(s.events_total);
-                let rate = format!("~{:.0}/s", s.events_per_sec);
-                let lag = format!("{}ms", s.replication_lag_ms);
-                let cpu_mem = format!("{}mc   RSS {:.1}MB", s.cpu_millicores, s.memory_rss_mb);
+            let src = if tc.source >= 0 { format_number(tc.source as u64) } else { "-".into() };
+            let tgt = if tc.target >= 0 { format_number(tc.target as u64) } else { "-".into() };
 
-                let traffic_status = if self.traffic_running {
-                    let stats = self
-                        .traffic_generator
-                        .as_ref()
-                        .map(|g| g.stats())
-                        .unwrap_or(crate::load::generator::StatsSnapshot {
-                            inserts: 0,
-                            updates: 0,
-                            deletes: 0,
-                            errors: 0,
-                        });
-                    format!(
-                        "ON (I:{} U:{} D:{})",
-                        stats.inserts, stats.updates, stats.deletes
-                    )
+            // Delta: source - target. Positive means target is behind.
+            let (delta_str, delta_style) = if tc.source >= 0 && tc.target >= 0 {
+                let diff = tc.source - tc.target;
+                if diff == 0 {
+                    ("\u{2713}".to_string(), Style::default().fg(SUCCESS).bold()) // ✓
+                } else if diff > 0 {
+                    (format!("+{}", diff), Style::default().fg(WARNING).bold()) // target behind
                 } else {
-                    "OFF".to_string()
-                };
+                    // target > source (deletes not yet reflected, or race)
+                    ("\u{2713}".to_string(), Style::default().fg(SUCCESS).bold())
+                }
+            } else {
+                ("...".to_string(), Style::default().fg(DIM))
+            };
 
-                vec![
-                    Line::from(vec![
-                        Span::styled("  Stage     ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("\u{25CF} {}", s.stage.to_uppercase()),
-                            Style::default().fg(Color::Green),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Uptime    ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(uptime, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  LSN       ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(&s.confirmed_lsn, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Events    ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(events_formatted, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Rate      ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(rate, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Lag       ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(lag, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  CPU/RSS   ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(cpu_mem, Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("  Traffic   ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            traffic_status,
-                            if self.traffic_running {
-                                Style::default().fg(Color::Green)
-                            } else {
-                                Style::default().fg(Color::DarkGray)
-                            },
-                        ),
-                    ]),
-                ]
-            }
-            None => {
-                vec![
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "  Connecting to dbmazz...",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ]
-            }
-        };
-
-        let block = Block::default()
-            .title(" Pipeline ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
-
-        let paragraph = Paragraph::new(info).block(block);
-        frame.render_widget(paragraph, area);
+            let line = Line::from(vec![
+                Span::styled(format!("  {:<20}", tc.name), Style::default().fg(Color::White)),
+                Span::styled(format!("{:>12}", src), Style::default().fg(MUTED)),
+                Span::styled(format!("{:>12}", tgt), Style::default().fg(Color::White).bold()),
+                Span::styled(format!("{:>10}", delta_str), delta_style),
+            ]);
+            frame.render_widget(Paragraph::new(line), rows[i]);
+        }
     }
 
     fn render_sparkline(&self, frame: &mut Frame, area: Rect) {
+        let current = self.throughput_history.last().copied().unwrap_or(0);
+        let peak = self.throughput_history.iter().copied().max().unwrap_or(0);
+        let title = if current > 0 || peak > 0 {
+            format!(" Events/sec: {current} (peak {peak}) ")
+        } else {
+            " Events/sec (no activity) ".to_string()
+        };
+
         let block = Block::default()
-            .title(" Throughput (events/sec) ")
+            .title(Span::styled(title, Style::default().fg(MUTED)))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray));
+            .border_style(Style::default().fg(BORDER));
 
         let data: Vec<u64> = if self.throughput_history.is_empty() {
             vec![0]
@@ -471,105 +563,173 @@ impl QuickstartDashboard {
         let sparkline = Sparkline::default()
             .block(block)
             .data(&data)
-            .style(Style::default().fg(Color::Cyan));
+            .style(Style::default().fg(PRIMARY));
 
         frame.render_widget(sparkline, area);
     }
 
-    fn render_tables(&self, frame: &mut Frame, area: Rect) {
-        let header = Row::new(vec![
-            Cell::from("  Table").style(Style::default().fg(Color::DarkGray)),
-            Cell::from("Target").style(Style::default().fg(Color::DarkGray)),
-            Cell::from("Status").style(Style::default().fg(Color::DarkGray)),
-        ]);
-
-        let rows: Vec<Row> = self
-            .table_counts
-            .iter()
-            .map(|tc| {
-                let target_str = if tc.target >= 0 {
-                    format_number(tc.target as u64)
-                } else {
-                    "-".to_string()
-                };
-
-                let (status, style) = if tc.target < 0 {
-                    ("...", Style::default().fg(Color::DarkGray))
-                } else if tc.target > 0 {
-                    ("\u{2713} synced", Style::default().fg(Color::Green))
-                } else {
-                    ("\u{25C6} waiting", Style::default().fg(Color::Yellow))
-                };
-
-                Row::new(vec![
-                    Cell::from(format!("  {}", tc.name)).style(Style::default().fg(Color::White)),
-                    Cell::from(target_str).style(Style::default().fg(Color::White)),
-                    Cell::from(status).style(style),
-                ])
-            })
-            .collect();
-
-        let widths = [
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Percentage(30),
-        ];
-
-        let table = Table::new(rows, widths)
-            .header(header)
-            .block(
-                Block::default()
-                    .title(" Tables ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            );
-
-        frame.render_widget(table, area);
+    fn render_traffic(&self, frame: &mut Frame, area: Rect) {
+        let line = if self.traffic_running {
+            let stats = self.traffic_generator.as_ref()
+                .map(|g| g.stats())
+                .unwrap_or(crate::load::generator::StatsSnapshot {
+                    inserts: 0, updates: 0, deletes: 0, errors: 0,
+                });
+            Line::from(vec![
+                Span::styled(
+                    format!("  Traffic ON   inserts:{} updates:{} deletes:{}   RSS {:.1}MB",
+                        stats.inserts, stats.updates, stats.deletes,
+                        self.last_status.as_ref().map(|s| s.memory_mb()).unwrap_or(0.0),
+                    ),
+                    Style::default().fg(SUCCESS),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled("  Traffic OFF", Style::default().fg(DIM)),
+                Span::styled(
+                    format!("   RSS {:.1}MB",
+                        self.last_status.as_ref().map(|s| s.memory_mb()).unwrap_or(0.0),
+                    ),
+                    Style::default().fg(DIM),
+                ),
+            ])
+        };
+        frame.render_widget(Paragraph::new(line), area);
     }
 
-    fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        // Status message (auto-dismiss after 3 seconds).
-        let status_line = match &self.status_message {
+    fn render_status_msg(&self, frame: &mut Frame, area: Rect) {
+        let line = match &self.status_message {
             Some((msg, ts)) if ts.elapsed() < Duration::from_secs(3) => {
-                Line::from(Span::styled(
-                    format!("  {msg}"),
-                    Style::default().fg(Color::Yellow),
-                ))
+                Line::from(Span::styled(format!("  {msg}"), Style::default().fg(WARNING)))
             }
             _ => Line::from(""),
         };
+        frame.render_widget(Paragraph::new(line), area);
+    }
 
-        let traffic_label = if self.traffic_running { "stop" } else { "start" };
-
-        let keybindings = Line::from(vec![
-            Span::styled("  [t]", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(
-                format!(" {traffic_label} traffic  "),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled("[p]", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(
-                " pause/resume  ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled("[l]", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(" logs  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[s]", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(" snapshot  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[q]", Style::default().fg(Color::Cyan).bold()),
-            Span::styled(" quit", Style::default().fg(Color::DarkGray)),
+    fn render_keybinds(&self, frame: &mut Frame, area: Rect) {
+        let key = Style::default().fg(Color::Black).bg(PRIMARY).bold();
+        let lbl = Style::default().fg(DIM);
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(" t ", key), Span::styled(" traffic  ", lbl),
+            Span::styled(" p ", key), Span::styled(" pause  ", lbl),
+            Span::styled(" l ", key), Span::styled(" logs  ", lbl),
+            Span::styled(" s ", key), Span::styled(" snapshot  ", lbl),
+            Span::styled(" q ", key), Span::styled(" quit", lbl),
         ]);
-
-        let footer = Paragraph::new(vec![status_line, keybindings]).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(footer, area);
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// Stage display text and color.
+fn stage_display(stage: &str) -> (String, Style) {
+    match stage {
+        "cdc" => (
+            "\u{25CF} REPLICATING".to_string(),
+            Style::default().fg(SUCCESS).bold(),
+        ),
+        "snapshot" => (
+            "\u{25CF} SNAPSHOT".to_string(),
+            Style::default().fg(WARNING).bold(),
+        ),
+        "setup" => (
+            "\u{25CB} SETTING UP".to_string(),
+            Style::default().fg(INFO).bold(),
+        ),
+        "paused" => (
+            "\u{23F8} PAUSED".to_string(),
+            Style::default().fg(MUTED).bold(),
+        ),
+        "stopped" => (
+            "\u{25A0} STOPPED".to_string(),
+            Style::default().fg(ERROR).bold(),
+        ),
+        other => (other.to_uppercase(), Style::default().fg(MUTED)),
+    }
+}
+
+/// Color for the lag metric — green if <100ms, yellow if <1000ms, red if >=1000ms.
+fn lag_color(status: &Option<DaemonStatus>) -> Color {
+    match status {
+        Some(s) if s.replication_lag_ms < 100 => SUCCESS,
+        Some(s) if s.replication_lag_ms < 1000 => WARNING,
+        Some(_) => ERROR,
+        None => DIM,
+    }
+}
+
+/// Compute sync percentage and color for a table row.
+///
+/// Returns (percentage 0-100, color). -1 means unknown.
+#[cfg(test)]
+fn sync_pct(source: i64, target: i64) -> (i64, Color) {
+    if source < 0 || target < 0 {
+        return (-1, DIM);
+    }
+    if source == 0 && target == 0 {
+        return (100, SUCCESS);
+    }
+    if source == 0 {
+        return (100, SUCCESS); // target has data, source empty (edge case)
+    }
+    let pct = ((target as f64 / source as f64) * 100.0).min(100.0) as i64;
+    let color = if pct >= 100 {
+        SUCCESS
+    } else if pct > 0 {
+        WARNING
+    } else {
+        ERROR
+    };
+    (pct, color)
+}
+
+/// Sync status label and style for a table row (used by tests).
+#[cfg(test)]
+fn sync_status(source: i64, target: i64) -> (String, Style) {
+    if source < 0 {
+        return if target < 0 {
+            ("...".to_string(), Style::default().fg(DIM))
+        } else if target == 0 {
+            (
+                "\u{25C6} waiting".to_string(),
+                Style::default().fg(WARNING),
+            )
+        } else {
+            (
+                "\u{2713} synced".to_string(),
+                Style::default().fg(SUCCESS),
+            )
+        };
+    }
+
+    if target == 0 {
+        return (
+            "\u{25C6} waiting".to_string(),
+            Style::default().fg(WARNING),
+        );
+    }
+
+    if target < source {
+        let pct = if source > 0 {
+            (target * 100) / source
+        } else {
+            0
+        };
+        return (
+            format!("\u{25C6} syncing {pct}%"),
+            Style::default().fg(WARNING),
+        );
+    }
+
+    (
+        "\u{2713} synced".to_string(),
+        Style::default().fg(SUCCESS),
+    )
+}
 
 fn format_duration(secs: u64) -> String {
     let hours = secs / 3600;
@@ -633,5 +793,123 @@ mod tests {
     #[test]
     fn format_number_millions() {
         assert_eq!(format_number(10000000), "10,000,000");
+    }
+
+    // ── sync_status tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn sync_status_source_unknown_target_zero() {
+        let (label, _) = sync_status(-1, 0);
+        assert_eq!(label, "\u{25C6} waiting");
+    }
+
+    #[test]
+    fn sync_status_source_unknown_target_positive() {
+        let (label, _) = sync_status(-1, 1000);
+        assert_eq!(label, "\u{2713} synced");
+    }
+
+    #[test]
+    fn sync_status_source_unknown_both_unknown() {
+        let (label, _) = sync_status(-1, -1);
+        assert_eq!(label, "...");
+    }
+
+    #[test]
+    fn sync_status_waiting() {
+        let (label, _) = sync_status(1000, 0);
+        assert_eq!(label, "\u{25C6} waiting");
+    }
+
+    #[test]
+    fn sync_status_syncing_pct() {
+        let (label, _) = sync_status(1000, 500);
+        assert_eq!(label, "\u{25C6} syncing 50%");
+    }
+
+    #[test]
+    fn sync_status_synced() {
+        let (label, _) = sync_status(1000, 1000);
+        assert_eq!(label, "\u{2713} synced");
+    }
+
+    #[test]
+    fn sync_status_target_exceeds_source() {
+        let (label, _) = sync_status(1000, 1001);
+        assert_eq!(label, "\u{2713} synced");
+    }
+
+    // ── stage_display tests ────────────────────────────────────────────────
+
+    #[test]
+    fn stage_cdc() {
+        let (text, _) = stage_display("cdc");
+        assert!(text.contains("REPLICATING"));
+    }
+
+    #[test]
+    fn stage_snapshot_progress() {
+        let (text, _) = stage_display("snapshot");
+        assert!(text.contains("SNAPSHOT"));
+    }
+
+    #[test]
+    fn stage_stopped() {
+        let (text, _) = stage_display("stopped");
+        assert!(text.contains("STOPPED"));
+    }
+
+    // ── lag_color tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn lag_green_under_100() {
+        let status = Some(DaemonStatus {
+            stage: "cdc".into(),
+            replication_lag_ms: 42,
+            ..default_status()
+        });
+        assert_eq!(lag_color(&status), SUCCESS);
+    }
+
+    #[test]
+    fn lag_yellow_under_1000() {
+        let status = Some(DaemonStatus {
+            stage: "cdc".into(),
+            replication_lag_ms: 500,
+            ..default_status()
+        });
+        assert_eq!(lag_color(&status), WARNING);
+    }
+
+    #[test]
+    fn lag_red_over_1000() {
+        let status = Some(DaemonStatus {
+            stage: "cdc".into(),
+            replication_lag_ms: 2000,
+            ..default_status()
+        });
+        assert_eq!(lag_color(&status), ERROR);
+    }
+
+    #[test]
+    fn lag_none() {
+        assert_eq!(lag_color(&None), DIM);
+    }
+
+    /// Helper to build a DaemonStatus with sane defaults for tests.
+    fn default_status() -> DaemonStatus {
+        DaemonStatus {
+            stage: "cdc".into(),
+            uptime_secs: 0,
+            confirmed_lsn: "0/0".into(),
+            current_lsn: "0/0".into(),
+            events_total: 0,
+            events_per_sec: 0.0,
+            batches_sent: 0,
+            replication_lag_ms: 0,
+            memory_bytes: 0,
+            state: "running".into(),
+            error_detail: None,
+        }
     }
 }

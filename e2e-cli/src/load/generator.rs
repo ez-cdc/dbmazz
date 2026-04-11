@@ -30,6 +30,7 @@ impl GeneratorStats {
         }
     }
 
+    #[allow(dead_code)]
     pub fn total_ops(&self) -> u64 {
         self.inserts.load(Ordering::Relaxed)
             + self.updates.load(Ordering::Relaxed)
@@ -50,6 +51,7 @@ pub struct StatsSnapshot {
     pub inserts: u64,
     pub updates: u64,
     pub deletes: u64,
+    #[allow(dead_code)]
     pub errors: u64,
 }
 
@@ -108,12 +110,14 @@ impl TrafficGenerator {
     }
 
     /// Toggle the paused flag.
+    #[allow(dead_code)]
     pub fn toggle(&self) {
         let prev = self.paused.load(Ordering::Relaxed);
         self.paused.store(!prev, Ordering::Relaxed);
     }
 
     /// Return true if the generator is paused.
+    #[allow(dead_code)]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
     }
@@ -134,6 +138,7 @@ impl TrafficGenerator {
     }
 
     /// Access the shared stats arc (for the dashboard to read totals).
+    #[allow(dead_code)]
     pub fn shared_stats(&self) -> Arc<GeneratorStats> {
         Arc::clone(&self.stats)
     }
@@ -229,55 +234,53 @@ async fn run_operations(
         let roll: f64 = rng.random();
 
         if roll < 0.70 {
-            // INSERT
-            let customer_id: i32 = rng.random_range(1..=1000);
-            let total: f64 = rng.random_range(10.0..=500.0);
+            // INSERT — use plain string SQL to avoid tokio-postgres type serialization issues
+            // with DECIMAL columns and parameter type inference.
+            // The `status` values come from a hardcoded ASCII array — no SQL injection risk.
+            let customer_id = rng.random_range(1..=1000);
+            let total = rng.random_range(10.0_f64..=500.0_f64);
             let status = statuses[rng.random_range(0..statuses.len())];
 
-            let result = client
-                .execute(
-                    "INSERT INTO orders (customer_id, total, status) VALUES ($1, $2, $3)",
-                    &[&customer_id, &total, &status],
-                )
-                .await;
+            // Use RETURNING to get the new id atomically — avoids the TOCTOU
+            // race of a separate "SELECT id … ORDER BY id DESC LIMIT 1".
+            // SERIAL / INT4 maps to i32 in tokio-postgres.
+            let sql = format!(
+                "INSERT INTO orders (customer_id, total, status) VALUES ({customer_id}, {total:.2}, '{status}') RETURNING id"
+            );
+            let result = client.query_opt(&sql as &str, &[]).await;
 
             match result {
-                Ok(_) => {
+                Ok(Some(row)) => {
                     stats.inserts.fetch_add(1, Ordering::Relaxed);
+                    let order_id: i32 = row.get(0);
 
-                    // Add 1-3 order_items for the last inserted order.
-                    let row = client
-                        .query_opt(
-                            "SELECT id FROM orders ORDER BY id DESC LIMIT 1",
-                            &[],
-                        )
-                        .await;
+                    // Add 1-3 order_items for the newly inserted order.
+                    let item_count = rng.random_range(1..=3);
+                    for _ in 0..item_count {
+                        let product_name = format!("Product-{}", rng.random_range(1..=500));
+                        let quantity = rng.random_range(1..=10);
+                        let price = rng.random_range(5.0_f64..=200.0_f64);
 
-                    if let Ok(Some(row)) = row {
-                        let order_id: i64 = row.get(0);
-                        let item_count = rng.random_range(1..=3);
-                        for _ in 0..item_count {
-                            let product_id: i32 = rng.random_range(1..=500);
-                            let quantity: i32 = rng.random_range(1..=10);
-                            let unit_price: f64 = rng.random_range(5.0..=200.0);
+                        let item_sql = format!(
+                            "INSERT INTO order_items (order_id, product_name, quantity, price) VALUES ({order_id}, '{product_name}', {quantity}, {price:.2})"
+                        );
+                        let item_result = client.execute(&item_sql as &str, &[]).await;
 
-                            let item_result = client
-                                .execute(
-                                    "INSERT INTO order_items (order_id, product_id, quantity, unit_price) VALUES ($1, $2, $3, $4)",
-                                    &[&order_id, &product_id, &quantity, &unit_price],
-                                )
-                                .await;
-
-                            match item_result {
-                                Ok(_) => {
-                                    stats.inserts.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Err(_) => {
-                                    stats.errors.fetch_add(1, Ordering::Relaxed);
-                                }
+                        match item_result {
+                            Ok(_) => {
+                                stats.inserts.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                stats.errors.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
+                }
+                Ok(None) => {
+                    // INSERT … RETURNING returned no row — table constraint violation
+                    // or the RETURNING clause was optimised away. Count as an error
+                    // and keep running (not fatal — no Err to propagate).
+                    stats.errors.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(e) => {
                     stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -287,12 +290,10 @@ async fn run_operations(
         } else if roll < 0.95 {
             // UPDATE — pick a random existing order and change its status.
             let new_status = statuses[rng.random_range(0..statuses.len())];
-            let result = client
-                .execute(
-                    "UPDATE orders SET status = $1 WHERE id = (SELECT id FROM orders ORDER BY random() LIMIT 1)",
-                    &[&new_status],
-                )
-                .await;
+            let sql = format!(
+                "UPDATE orders SET status = '{new_status}' WHERE id = (SELECT id FROM orders ORDER BY random() LIMIT 1)"
+            );
+            let result = client.execute(&sql as &str, &[]).await;
 
             match result {
                 Ok(_) => {

@@ -45,8 +45,10 @@ enum Commands {
     /// Run verification suite
     Verify {
         /// Source datasource name
+        #[arg(long)]
         source: Option<String>,
         /// Sink datasource name
+        #[arg(long)]
         sink: Option<String>,
         /// Run all source x sink combinations
         #[arg(long)]
@@ -73,8 +75,10 @@ enum Commands {
     /// Live monitoring dashboard
     Quickstart {
         /// Source datasource name
+        #[arg(long)]
         source: Option<String>,
         /// Sink datasource name
+        #[arg(long)]
         sink: Option<String>,
         /// Keep stack running after exit
         #[arg(long)]
@@ -105,8 +109,10 @@ enum Commands {
     /// Clean target database
     Clean {
         /// Source datasource name
+        #[arg(long)]
         source: Option<String>,
         /// Sink datasource name
+        #[arg(long)]
         sink: Option<String>,
         /// Skip confirmation prompt
         #[arg(long, short)]
@@ -454,6 +460,7 @@ fn wait_for_keypress() {
 use std::io::Write;
 
 /// Bridge anyhow::Result to color_eyre::Result.
+#[allow(dead_code)]
 async fn run_anyhow<F>(fut: F) -> color_eyre::Result<()>
 where
     F: std::future::Future<Output = anyhow::Result<()>>,

@@ -44,6 +44,7 @@ where
 /// Poll `producer` until it returns `Ok(expected)` or timeout expires.
 ///
 /// Returns `Ok(())` on match or `Err` with the last observed value on timeout.
+#[allow(dead_code)]
 pub async fn wait_until_with_value<F, Fut, T>(
     mut producer: F,
     expected: &T,

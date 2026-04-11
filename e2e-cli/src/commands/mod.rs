@@ -148,14 +148,14 @@ pub fn build_dbmazz_image() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Check that the cross-compiled Linux binary exists.
+/// Check that the pre-compiled Linux binary exists in `e2e-cli/bin/`.
 pub fn check_linux_binary() -> anyhow::Result<()> {
-    let bin = crate::paths::REPO_ROOT
-        .join("target/x86_64-unknown-linux-gnu/release/dbmazz");
+    let bin = &*crate::paths::LINUX_BINARY;
     if !bin.exists() {
         anyhow::bail!(
             "Linux binary not found at {}\n  \
-             Build it with: cross build --release --target x86_64-unknown-linux-gnu --features http-api",
+             Build it with: cross build --release --target x86_64-unknown-linux-gnu --features http-api\n  \
+             Then copy to: cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64",
             bin.display()
         );
     }

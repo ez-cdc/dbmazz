@@ -34,9 +34,12 @@ const CDC_STAGE_POLL_INTERVAL_MS: u64 = 2000;
 pub struct TestContext {
     pub source: Box<dyn SourceClient>,
     pub target: Box<dyn TargetBackend>,
+    #[allow(dead_code)]
     pub dbmazz: DbmazzClient,
     pub tables: Vec<String>,
+    #[allow(dead_code)]
     pub source_name: String,
+    #[allow(dead_code)]
     pub sink_name: String,
     /// Scratch storage for inter-check data.
     /// Use `Box<dyn Any + Send + Sync>` and downcast when reading.

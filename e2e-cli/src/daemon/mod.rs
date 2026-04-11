@@ -14,6 +14,7 @@ use crate::config::schema::*;
 use crate::paths;
 
 /// Locate the dbmazz binary. Prefers release, falls back to debug.
+#[allow(dead_code)]
 pub fn find_binary() -> Result<PathBuf, String> {
     let repo_root = paths::REPO_ROOT.to_path_buf();
 
@@ -38,6 +39,7 @@ pub fn find_binary() -> Result<PathBuf, String> {
 /// Build the environment variables for a dbmazz process from specs + settings.
 /// Unlike the Docker approach, URLs are NOT rewritten — dbmazz connects
 /// directly to localhost ports.
+#[allow(dead_code)]
 pub fn build_env(
     source: &SourceSpec,
     sink: &SinkSpec,
@@ -117,10 +119,12 @@ pub fn build_env(
 }
 
 /// A running dbmazz process.
+#[allow(dead_code)]
 pub struct DaemonProcess {
     child: Child,
 }
 
+#[allow(dead_code)]
 impl DaemonProcess {
     /// Spawn dbmazz as a local process with the given env vars.
     /// Logs go to a file in the cache dir.

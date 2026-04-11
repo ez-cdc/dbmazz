@@ -34,7 +34,6 @@ const SINK_SR_MYSQL_INT_PORT: u16 = 9030;
 const SINK_SR_SERVICE: &str = "sink-starrocks";
 
 const INFRA_PROJECT_NAME: &str = "ez-cdc-infra";
-const DBMAZZ_DOCKERFILE: &str = "e2e/Dockerfile";
 
 // ── URL helpers ────────────────────────────────────────────────────────────
 
@@ -411,11 +410,10 @@ fn build_dbmazz_service(source: &SourceSpec, sink: &SinkSpec) -> serde_json::Map
         SinkSpec::Snowflake(_) => {}
     }
 
-    // Mount the cross-compiled Linux binary into a minimal runtime container.
-    // Binary: target/x86_64-unknown-linux-gnu/release/dbmazz (built with `cross`)
+    // Mount the pre-compiled Linux binary into a minimal runtime container.
+    // Binary: e2e-cli/bin/dbmazz-linux-amd64 (shipped with the repo)
     // Image: ez-cdc-dbmazz:latest (just runtime libs, no build tools)
-    let linux_binary = paths::REPO_ROOT
-        .join("target/x86_64-unknown-linux-gnu/release/dbmazz");
+    let linux_binary = &*paths::LINUX_BINARY;
 
     let mut service = serde_json::Map::new();
     service.insert("image".into(), serde_json::json!("ez-cdc-dbmazz:latest"));

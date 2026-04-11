@@ -25,13 +25,17 @@ Clone the repo, install the `ez-cdc` CLI, and launch an interactive dashboard:
 ```bash
 git clone https://github.com/ez-cdc/dbmazz.git && cd dbmazz
 
-# First time only — install the test harness CLI
-python3 -m venv venv && source venv/bin/activate
-pip install -e e2e/
+# First time only — build the test harness CLI
+cargo build --release --manifest-path e2e-cli/Cargo.toml
+# Add to PATH or use the full path: ./e2e-cli/target/release/ez-cdc
+
+# First time only — cross-compile dbmazz for Linux (requires `cross` + Docker)
+cross build --release --target x86_64-unknown-linux-gnu --features http-api
+cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
 
 # Initialize config and start infrastructure
-ez-cdc                # interactive menu → "Init config" → creates ez-cdc.yaml
-ez-cdc up             # starts all infra containers (source PG + sinks)
+ez-cdc datasource init  # creates ez-cdc.yaml with demo datasources
+ez-cdc up               # starts all infra containers (source PG + sinks)
 
 # Launch dbmazz with a live dashboard
 ez-cdc quickstart --source demo-pg --sink demo-starrocks
@@ -42,7 +46,7 @@ and opens a live terminal dashboard showing stage, lag, throughput, and
 source → target row counts in real time. Press `q` or `Ctrl+C` to exit.
 
 > `ez-cdc.yaml` does not exist at clone time. It is created on first run
-> via the interactive menu or `ez-cdc init`.
+> via the interactive menu or `ez-cdc datasource init`.
 >
 > StarRocks takes ~60s to initialize on first run.
 
@@ -82,9 +86,9 @@ for the full list of checks.
 ### Run verify
 
 ```bash
-ez-cdc verify --source demo-pg --sink demo-starrocks          # full suite (tier 1 + 2)
+ez-cdc verify --source demo-pg --sink demo-starrocks          # full verification suite
 ez-cdc verify --source demo-pg --sink demo-pg-target          # PG target
-ez-cdc verify --source demo-pg --sink demo-starrocks --quick  # tier 1 only
+ez-cdc verify --source demo-pg --sink demo-starrocks --quick  # skip slow checks (TOAST, idempotency)
 ```
 
 ### Snowflake
@@ -100,13 +104,13 @@ ez-cdc up                                                # start all infra conta
 ez-cdc down                                              # stop all infra containers
 ez-cdc logs                                              # tail infra logs
 ez-cdc clean --source demo-pg --sink demo-starrocks      # clean target DB
-ez-cdc status --source demo-pg --sink demo-starrocks     # one-shot status
+ez-cdc status                                            # one-shot daemon status
 ez-cdc datasource list                                   # show configured datasources
 ez-cdc datasource add                                    # interactive wizard
 ez-cdc --help                                            # see everything
 ```
 
-> Adding a new sink? See [`e2e/README.md`](e2e/README.md) and
+> Adding a new sink? See [`e2e-cli/README.md`](e2e-cli/README.md) and
 > [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
 > for the step-by-step checklist.
 
@@ -245,7 +249,7 @@ ez-cdc up       # start all infra containers (source PG + sinks)
 ez-cdc down     # stop and destroy all containers + volumes
 ```
 
-Snapshot and pipeline settings are configured in `e2e/ez-cdc.yaml`
+Snapshot and pipeline settings are configured in `e2e-cli/ez-cdc.yaml`
 under the `settings:` section.
 
 </details>

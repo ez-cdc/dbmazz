@@ -35,24 +35,33 @@ pub static REPO_ROOT: Lazy<PathBuf> = Lazy::new(|| {
 pub static FIXTURES_DIR: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join("fixtures"));
 
 /// Compose cache directory (`<repo>/e2e-cli/.cache/compose/`).
+#[allow(dead_code)]
 pub static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join(".cache").join("compose"));
 
 /// PostgreSQL seed SQL file.
+#[allow(dead_code)]
 pub fn postgres_seed_sql() -> PathBuf {
     FIXTURES_DIR.join("postgres-seed.sql")
 }
 
 /// StarRocks init script.
+#[allow(dead_code)]
 pub fn starrocks_init_sh() -> PathBuf {
     FIXTURES_DIR.join("starrocks-init.sh")
 }
 
 /// Default config file path (`<repo>/e2e-cli/ez-cdc.yaml`).
+#[allow(dead_code)]
 pub fn default_config_path() -> PathBuf {
     CLI_DIR.join("ez-cdc.yaml")
 }
 
+/// Pre-compiled Linux binary shipped with the repo (`<repo>/e2e-cli/bin/dbmazz-linux-amd64`).
+/// Mounted into the Docker runtime container by the compose builder.
+pub static LINUX_BINARY: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join("bin").join("dbmazz-linux-amd64"));
+
 /// Path to the dbmazz daemon log file (`<repo>/e2e-cli/.cache/dbmazz.log`).
+#[allow(dead_code)]
 pub fn dbmazz_log_path() -> PathBuf {
     CLI_DIR.join(".cache").join("dbmazz.log")
 }

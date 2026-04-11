@@ -26,6 +26,7 @@ impl DatasourceStore {
     }
 
     /// Build an in-memory empty store without reading disk.
+    #[allow(dead_code)]
     pub fn empty(path: &Path) -> Self {
         Self {
             path: path.to_path_buf(),
@@ -35,6 +36,7 @@ impl DatasourceStore {
         }
     }
 
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -50,6 +52,7 @@ impl DatasourceStore {
     }
 
     /// Re-read from disk, discarding in-memory mutations.
+    #[allow(dead_code)]
     pub fn reload(&mut self) -> Result<(), DatasourceError> {
         self.load(true)
     }
@@ -73,6 +76,7 @@ impl DatasourceStore {
         Ok(self.data()?.has_any())
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&mut self) -> Result<bool, DatasourceError> {
         Ok(self.data()?.is_empty())
     }
