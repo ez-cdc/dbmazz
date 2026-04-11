@@ -314,7 +314,14 @@ mod tests {
             primary_keys: vec!["order_id".to_string(), "item_id".to_string()],
         };
 
-        let sql = generate_merge_range("_dbmazz._raw_job", "public", &schema, &["".to_string()], 0, 1);
+        let sql = generate_merge_range(
+            "_dbmazz._raw_job",
+            "public",
+            &schema,
+            &["".to_string()],
+            0,
+            1,
+        );
 
         // Composite PK in PARTITION BY
         assert!(sql
