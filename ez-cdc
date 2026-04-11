@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Wrapper to run the ez-cdc CLI from the repo root.
+# Priority: local release build > local debug build > downloaded binary > auto-download
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/e2e-cli/bin"
+CONFIG="$SCRIPT_DIR/e2e-cli/ez-cdc.yaml"
+REPO="ez-cdc/dbmazz"
+
+# 1. Local release build
+BIN="$SCRIPT_DIR/e2e-cli/target/release/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
+fi
+
+# 2. Local debug build
+BIN="$SCRIPT_DIR/e2e-cli/target/debug/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
+fi
+
+# 3. Pre-downloaded binary
+BIN="$BIN_DIR/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
+fi
+
+# 4. Auto-download from GitHub Releases
+echo "ez-cdc binary not found. Downloading from GitHub Releases..." >&2
+
+# Detect platform
+UNAME_S="$(uname -s)"
+UNAME_M="$(uname -m)"
+
+case "$UNAME_S" in
+    Darwin)
+        case "$UNAME_M" in
+            arm64) ASSET="ez-cdc-darwin-arm64" ;;
+            *)     echo "Unsupported macOS architecture: $UNAME_M" >&2; exit 1 ;;
+        esac
+        ;;
+    Linux)
+        case "$UNAME_M" in
+            x86_64) ASSET="ez-cdc-linux-amd64" ;;
+            *)      echo "Unsupported Linux architecture: $UNAME_M" >&2; exit 1 ;;
+        esac
+        ;;
+    *)
+        echo "Unsupported OS: $UNAME_S" >&2; exit 1
+        ;;
+esac
+
+mkdir -p "$BIN_DIR"
+
+# Download helper: tries curl, then wget
+download() {
+    local url="$1" dest="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fSL --progress-bar -o "$dest" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q --show-progress -O "$dest" "$url"
+    else
+        echo "Neither curl nor wget found. Install one and retry." >&2
+        exit 1
+    fi
+}
+
+# Get latest release tag from GitHub API (no auth needed for public repos)
+get_latest_tag() {
+    local api_url="https://api.github.com/repos/$REPO/releases/latest"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$api_url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$api_url" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/'
+    else
+        echo ""
+    fi
+}
+
+TAG="$(get_latest_tag)"
+if [ -z "$TAG" ]; then
+    echo "Could not determine latest release. Check https://github.com/$REPO/releases" >&2
+    exit 1
+fi
+
+BASE_URL="https://github.com/$REPO/releases/download/$TAG"
+
+echo "Latest release: $TAG" >&2
+echo "Downloading $ASSET..." >&2
+download "$BASE_URL/$ASSET" "$BIN_DIR/ez-cdc"
+chmod +x "$BIN_DIR/ez-cdc"
+
+# Also download dbmazz Linux binary if missing
+if [ ! -f "$BIN_DIR/dbmazz-linux-amd64" ]; then
+    echo "Downloading dbmazz-linux-amd64..." >&2
+    download "$BASE_URL/dbmazz-linux-amd64" "$BIN_DIR/dbmazz-linux-amd64"
+    chmod +x "$BIN_DIR/dbmazz-linux-amd64"
+fi
+
+echo "Done. Binaries saved to e2e-cli/bin/" >&2
+echo "" >&2
+exec "$BIN_DIR/ez-cdc" --config "$CONFIG" "$@"

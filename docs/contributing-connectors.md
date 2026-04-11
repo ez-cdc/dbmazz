@@ -727,31 +727,36 @@ mod tests {
 }
 ```
 
-### Integration Tests
+### End-to-End Tests (required for sink connectors)
 
-Create integration tests in `tests/integration_tests.rs` (or similar):
+All sink connectors are validated by the `ez-cdc` CLI test harness in
+`e2e-cli/`. The suite runs against real databases in Docker and verifies
+behavior end-to-end: snapshot correctness, CDC INSERT/UPDATE/DELETE,
+TOAST handling, schema consistency, and more.
 
-```rust
-#[cfg(feature = "integration-tests")]
-mod integration {
-    use dbmazz::connectors::sources::create_source;
+To add e2e coverage for a new sink:
 
-    #[tokio::test]
-    async fn test_mynewsource_end_to_end() {
-        // Test with real database connection
-    }
-}
-```
+1. **Add a TargetBackend** in `e2e-cli/src/clients/targets/my_sink.rs`:
+   implement the `TargetBackend` trait (see `starrocks.rs` or `postgres.rs`
+   for examples).
 
-Run with: `cargo test --features integration-tests`
+2. **Add a sink spec** in `e2e-cli/src/config/schema.rs`:
+   add a variant to `SinkSpec` and the corresponding inner struct.
 
-### Manual Testing
+3. **Add compose generation** in `e2e-cli/src/compose/builder.rs`:
+   add the container definition for your sink's database.
 
-1. Test with the demo environment (adapt `examples/` if needed)
-2. Verify all CDC operations: INSERT, UPDATE, DELETE
-3. Test schema evolution
-4. Test error handling and recovery
-5. Measure performance characteristics
+4. **Run the suite**:
+
+   ```bash
+   ez-cdc up
+   ez-cdc verify --source demo-pg --sink my-sink
+   ```
+
+   The verify runner exercises all Tier 1 validations automatically —
+   you don't write test functions, the framework provides them.
+
+See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
 
 ## Documentation Requirements
 
@@ -773,15 +778,11 @@ Each connector must include a comprehensive `README.md` with:
 
 ### Example README Template
 
-See `src/connectors/sources/_template/README.md` and `src/connectors/sinks/_template/README.md` for complete templates.
+See `src/connectors/sinks/_template/README.md` for the sink connector template.
 
 ### Main README Updates
 
-Update `/Users/dariomazzitelli/repos/db_mazz_project/dbmazz/README.md` to list the new connector:
-
-- Add to "Supported Sources" or "Supported Sinks"
-- Update the architecture diagram if needed
-- Link to the connector's README
+Update the top-level `README.md` "Supported databases" table to list the new connector.
 
 ## Examples to Follow
 

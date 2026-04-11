@@ -229,21 +229,15 @@ setup. SetupManager handles source-side setup only (replication
 slot, publication).
 ```
 
-### Testing (3 steps)
+### Testing
 
 ```
-1. Add a profile to deploy/docker-compose.yml:
-   - Target database service (with healthcheck)
-   - dbmazz-my-sink service (with SINK_TYPE + connection env vars)
-
-2. Add test_my_sink() to deploy/test-sink.sh:
-   - Verify snapshot replicated seed data
-   - Verify CDC INSERT, UPDATE, DELETE
-
-3. Run:
-   docker compose --profile my-sink up -d
-   deploy/test-sink.sh my-sink
+1. Add a sink definition in e2e-cli/ez-cdc.yaml
+2. Add a TargetBackend in e2e-cli/src/clients/targets/my_sink.rs
+3. Run: ez-cdc verify --source demo-pg --sink my-sink
 ```
+
+See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
 
 ## Concurrency Model
 
