@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes};
-use futures::SinkExt;
+use futures_util::SinkExt;
 use tokio::sync::mpsc;
 use tracing::error;
 
