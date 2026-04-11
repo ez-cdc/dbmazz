@@ -20,35 +20,25 @@ Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rus
 
 ## 🚀 Quickstart
 
-Clone the repo, install the `ez-cdc` CLI, and launch an interactive dashboard:
+Clone the repo and launch a live CDC dashboard in 3 commands:
 
 ```bash
 git clone https://github.com/ez-cdc/dbmazz.git && cd dbmazz
 
-# First time only — build the test harness CLI
-cargo build --release --manifest-path e2e-cli/Cargo.toml
-# Add to PATH or use the full path: ./e2e-cli/target/release/ez-cdc
-
-# First time only — cross-compile dbmazz for Linux (requires `cross` + Docker)
-cross build --release --target x86_64-unknown-linux-gnu --features http-api
-cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
-
-# Initialize config and start infrastructure
-ez-cdc datasource init  # creates ez-cdc.yaml with demo datasources
-ez-cdc up               # starts all infra containers (source PG + sinks)
-
-# Launch dbmazz with a live dashboard
-ez-cdc quickstart --source demo-pg --sink demo-starrocks
+./ez-cdc datasource init                                      # create demo config
+./ez-cdc quickstart --source demo-pg --sink demo-starrocks    # start everything + dashboard
 ```
 
-`ez-cdc quickstart` runs preflight checks, waits for replication to start,
-and opens a live terminal dashboard showing stage, lag, throughput, and
-source → target row counts in real time. Press `q` or `Ctrl+C` to exit.
+The `./ez-cdc` wrapper uses precompiled binaries. No Rust toolchain needed.
 
-> `ez-cdc.yaml` does not exist at clone time. It is created on first run
-> via the interactive menu or `ez-cdc datasource init`.
->
-> StarRocks takes ~60s to initialize on first run.
+`quickstart` starts the infra containers, launches the dbmazz daemon, runs
+snapshot + CDC replication, and opens a live terminal dashboard showing
+throughput, lag, and source/target row counts in real time. Press `t` to
+generate traffic, `q` to quit.
+
+> Docker Desktop must be running. StarRocks takes ~60s to initialize on
+> first run. See [e2e-cli/README.md](e2e-cli/README.md) for building from
+> source if precompiled binaries are not available.
 
 ### Use your own databases
 

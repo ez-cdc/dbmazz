@@ -27,96 +27,44 @@ It has two modes:
 ## Prerequisites
 
 - **Docker Desktop** with `docker compose` (V2). Must be running.
-- **Rust toolchain** (`cargo`), stable channel. Required to build the `ez-cdc`
-  binary itself.
-- **`cross`**: cross-compilation tool for building dbmazz as a Linux/amd64
-  binary on macOS. Install with:
-  ```
-  cargo install cross
-  ```
-  `cross` requires Docker to be running (it builds inside a container).
 
 ---
 
 ## Quick Start
 
-### 1. Build the ez-cdc CLI
-
 From the repository root:
 
-```
-cargo build --release --manifest-path e2e-cli/Cargo.toml
-```
+```bash
+# 1. Init demo datasources (creates ez-cdc.yaml with demo-pg + demo-starrocks)
+./ez-cdc datasource init
 
-Add the compiled binary to your PATH, or run it directly:
+# 2. Run the live dashboard (starts infra + dbmazz automatically)
+./ez-cdc quickstart --source demo-pg --sink demo-starrocks
 
-```
-./e2e-cli/target/release/ez-cdc
-```
-
-For convenience, copy it somewhere on your PATH:
-
-```
-cp e2e-cli/target/release/ez-cdc /usr/local/bin/ez-cdc
+# 3. Or run the verification suite directly
+./ez-cdc verify --source demo-pg --sink demo-starrocks
 ```
 
-### 2. Cross-compile dbmazz for Linux
+That's it. The `./ez-cdc` wrapper at the repo root runs the precompiled CLI.
+The precompiled dbmazz Linux binary at `e2e-cli/bin/dbmazz-linux-amd64` is
+mounted into the Docker container automatically.
 
-`ez-cdc` mounts the dbmazz binary into a minimal Docker runtime container.
-The binary must be a Linux/amd64 ELF executable, not a macOS binary.
+If the binaries are missing (fresh clone without releases), see
+[Building from source](#building-from-source) below.
 
-From the repository root:
+### Interactive mode
 
-```
-cross build --release \
-  --target x86_64-unknown-linux-gnu \
-  --features http-api
-```
+Run `./ez-cdc` with no arguments to open the interactive menu:
 
-### 3. Copy the binary to the expected location
-
-`ez-cdc` looks for the binary at `e2e-cli/bin/dbmazz-linux-amd64`:
-
-```
-cp target/x86_64-unknown-linux-gnu/release/dbmazz \
-   e2e-cli/bin/dbmazz-linux-amd64
+```bash
+./ez-cdc
 ```
 
-This path is checked before every `quickstart` and `verify` run. If it is
-missing, the command fails with a clear message showing the exact commands to
-fix it.
+The menu adapts to the current state: no config yet, stack stopped, stack
+running. It guides you through init, quickstart, verify, and datasource
+management.
 
-### 4. Initialize configuration
-
-```
-ez-cdc datasource init
-```
-
-This creates `e2e-cli/ez-cdc.yaml` with two demo datasources: `demo-pg`
-(PostgreSQL source) and `demo-starrocks` (StarRocks sink), pre-configured
-for the Docker-managed containers.
-
-Alternatively, run `ez-cdc` with no arguments to enter the interactive menu
-and select "Init config".
-
-### 5. Start infrastructure
-
-```
-ez-cdc up
-```
-
-Starts the Docker containers for the configured sources and sinks. The demo
-config starts a PostgreSQL source (port 15432) and a StarRocks instance
-(HTTP port 18030, MySQL port 19030). StarRocks takes approximately 60 seconds
-to initialize on the first run.
-
-### 6. Run the quickstart dashboard or verify
-
-```
-# Live monitoring dashboard
-ez-cdc quickstart --source demo-pg --sink demo-starrocks
-
-# Full verification suite
+### Run the full verification suite
 ez-cdc verify --source demo-pg --sink demo-starrocks
 ```
 
@@ -646,6 +594,38 @@ the Docker image. Instead:
 
 Environment variables for the pair (all `dbmazz` config) are written to a
 parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
+
+---
+
+## Building from Source
+
+Only needed if precompiled binaries are not available (fresh clone without
+GitHub release assets).
+
+### Build the ez-cdc CLI
+
+```bash
+cargo build --release --manifest-path e2e-cli/Cargo.toml
+```
+
+The `./ez-cdc` wrapper at the repo root automatically finds the binary at
+`e2e-cli/target/release/ez-cdc`.
+
+### Cross-compile dbmazz for Linux
+
+The dbmazz daemon runs inside a Docker container, so it needs to be a
+Linux/amd64 ELF binary. On macOS, use `cross`:
+
+```bash
+# Install cross (one-time)
+cargo install cross
+
+# Build
+cross build --release --target x86_64-unknown-linux-gnu --features http-api
+
+# Copy to the expected location
+cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
+```
 
 ---
 
