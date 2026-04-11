@@ -229,23 +229,15 @@ setup. SetupManager handles source-side setup only (replication
 slot, publication).
 ```
 
-### Testing (3 steps)
+### Testing
 
 ```
-1. Add a profile to e2e/compose.yml:
-   - Target database service (with healthcheck)
-   - dbmazz-my-sink service (with SINK_TYPE + connection env vars)
-
-2. Add a TargetBackend subclass in e2e/src/ez_cdc_e2e/backends/my_sink.py
-   and register the profile in e2e/src/ez_cdc_e2e/profiles.py.
-
-3. Run:
-   ez-cdc verify my-sink
+1. Add a sink definition in e2e-cli/ez-cdc.yaml
+2. Add a TargetBackend in e2e-cli/src/clients/targets/my_sink.rs
+3. Run: ez-cdc verify --source demo-pg --sink my-sink
 ```
 
-See [`e2e/README.md`](../e2e/README.md) and
-[`contributing-connectors.md`](contributing-connectors.md) for the
-full checklist.
+See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
 
 ## Concurrency Model
 

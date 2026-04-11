@@ -730,77 +730,33 @@ mod tests {
 ### End-to-End Tests (required for sink connectors)
 
 All sink connectors are validated by the `ez-cdc` CLI test harness in
-`e2e/`. Unlike unit tests, the e2e suite runs against real databases in
-Docker (or a real Snowflake account, for that sink) and verifies
+`e2e-cli/`. The suite runs against real databases in Docker and verifies
 behavior end-to-end: snapshot correctness, CDC INSERT/UPDATE/DELETE,
 TOAST handling, schema consistency, and more.
 
 To add e2e coverage for a new sink:
 
-1. **Add a TargetBackend** in `e2e/src/ez_cdc_e2e/backends/my_sink.py`:
+1. **Add a TargetBackend** in `e2e-cli/src/clients/targets/my_sink.rs`:
+   implement the `TargetBackend` trait (see `starrocks.rs` or `postgres.rs`
+   for examples).
 
-   ```python
-   from .base import BackendCapabilities, ColumnInfo, TargetBackend
+2. **Add a sink spec** in `e2e-cli/src/config/schema.rs`:
+   add a variant to `SinkSpec` and the corresponding inner struct.
 
-   class MySinkTarget(TargetBackend):
-       @property
-       def name(self) -> str:
-           return "my-sink"
-
-       @property
-       def capabilities(self) -> BackendCapabilities:
-           return BackendCapabilities(
-               supports_hard_delete=True,
-               supports_schema_evolution=True,
-               has_metadata_table=True,
-               post_cdc_settle_seconds=1.0,
-               # ... see backends/base.py for all fields
-           )
-
-       def expected_audit_columns(self) -> list[str]:
-           return ["dbmazz_op_type", "dbmazz_synced_at"]
-
-       # Implement the rest of the abstract methods (see base.py)
-   ```
-
-2. **Add a datasource spec** in `e2e/src/ez_cdc_e2e/datasources/schema.py`:
-
-   ```python
-   class MySinkSpec(BaseModel):
-       type: Literal["my-sink"] = "my-sink"
-       host: str
-       port: int = 9030
-       database: str
-       user: str = "root"
-       password: str = ""
-   ```
-
-   Register it in the `SinkSpec` discriminated union.
-
-3. **Add compose generation** in `e2e/src/ez_cdc_e2e/compose_builder.py`:
-
-   Add a `_sink_services_my_sink()` function that returns the docker
-   compose services dict for your sink (target container + init script
-   if needed).
+3. **Add compose generation** in `e2e-cli/src/compose/builder.rs`:
+   add the container definition for your sink's database.
 
 4. **Run the suite**:
 
    ```bash
-   ez-cdc up                                       # start all infra (Docker containers)
-   ez-cdc verify --source demo-pg --sink my-sink   # run preflight checks + e2e tests
+   ez-cdc up
+   ez-cdc verify --source demo-pg --sink my-sink
    ```
 
-   `ez-cdc verify` runs preflight checks (connectivity and schema
-   validation) before executing the test suite. The runner then
-   automatically exercises all Tier 1 validations against your
-   backend — you don't write any test functions yourself, the framework
-   provides them.
+   The verify runner exercises all Tier 1 validations automatically —
+   you don't write test functions, the framework provides them.
 
-   Every sink passes the same set of checks, so adding one is ~1 class
-   (~150 lines) and zero test code.
-
-See [`e2e/README.md`](../e2e/README.md) for the full list of validations
-currently in Tier 1, Tier 2, and the nightly roadmap.
+See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
 
 ## Documentation Requirements
 
