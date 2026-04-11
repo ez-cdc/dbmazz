@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
-use futures::SinkExt;
+use futures_util::SinkExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::Client;
 

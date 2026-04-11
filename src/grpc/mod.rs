@@ -6,7 +6,6 @@ use services::{control_service, health_service, metrics_service, status_service}
 use state::SharedState;
 use std::sync::Arc;
 use tonic::transport::Server;
-use tonic_reflection::server::Builder as ReflectionBuilder;
 use tracing::info;
 
 pub use state::{CdcConfig, CdcState, Stage};
@@ -20,19 +19,22 @@ pub async fn start_grpc_server(
 
     info!("gRPC server listening on {}", addr);
 
-    // Configure reflection service so grpcurl works without .proto files
-    let reflection_service = ReflectionBuilder::configure()
-        .register_encoded_file_descriptor_set(services::dbmazz::FILE_DESCRIPTOR_SET)
-        .build_v1()?;
-
-    Server::builder()
-        .add_service(reflection_service)
+    let router = Server::builder()
         .add_service(health_service(shared_state.clone()))
         .add_service(control_service(shared_state.clone()))
         .add_service(status_service(shared_state.clone()))
-        .add_service(metrics_service(shared_state.clone()))
-        .serve(addr)
-        .await?;
+        .add_service(metrics_service(shared_state.clone()));
+
+    // Configure reflection service so grpcurl works without .proto files
+    #[cfg(feature = "grpc-reflection")]
+    let router = {
+        let reflection_service = tonic_reflection::server::Builder::configure()
+            .register_encoded_file_descriptor_set(services::dbmazz::FILE_DESCRIPTOR_SET)
+            .build_v1()?;
+        router.add_service(reflection_service)
+    };
+
+    router.serve(addr).await?;
 
     Ok(())
 }
