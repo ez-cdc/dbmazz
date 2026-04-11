@@ -47,5 +47,8 @@ e2e/src/**/*.egg-info/
 e2e/**/*.pyc
 e2e/build/
 
+# Downloaded CLI binaries (auto-fetched by ./ez-cdc wrapper)
+e2e-cli/bin/
+
 # Misc
 *.old

@@ -1,13 +1,87 @@
 #!/usr/bin/env bash
 # Wrapper to run the ez-cdc CLI from the repo root.
-# Uses the release binary if available, otherwise dev.
+# Priority: local release build > local debug build > pre-downloaded binary > auto-download
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BIN_DIR="$SCRIPT_DIR/e2e-cli/bin"
+CONFIG="$SCRIPT_DIR/e2e-cli/ez-cdc.yaml"
+REPO="ez-cdc/dbmazz"
+
+# 1. Local release build
 BIN="$SCRIPT_DIR/e2e-cli/target/release/ez-cdc"
-if [ ! -x "$BIN" ]; then
-    BIN="$SCRIPT_DIR/e2e-cli/target/debug/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
 fi
-if [ ! -x "$BIN" ]; then
-    echo "ez-cdc binary not found. Run: cd e2e-cli && cargo build" >&2
+
+# 2. Local debug build
+BIN="$SCRIPT_DIR/e2e-cli/target/debug/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
+fi
+
+# 3. Pre-downloaded binary
+BIN="$BIN_DIR/ez-cdc"
+if [ -x "$BIN" ]; then
+    exec "$BIN" --config "$CONFIG" "$@"
+fi
+
+# 4. Auto-download from GitHub Releases
+echo "ez-cdc binary not found locally. Downloading from GitHub Releases..." >&2
+
+# Detect platform
+UNAME_S="$(uname -s)"
+UNAME_M="$(uname -m)"
+
+case "$UNAME_S" in
+    Darwin)
+        case "$UNAME_M" in
+            arm64) ASSET="ez-cdc-darwin-arm64" ;;
+            *)
+                echo "Unsupported macOS architecture: $UNAME_M" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    Linux)
+        case "$UNAME_M" in
+            x86_64) ASSET="ez-cdc-linux-amd64" ;;
+            *)
+                echo "Unsupported Linux architecture: $UNAME_M" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    *)
+        echo "Unsupported OS: $UNAME_S" >&2
+        exit 1
+        ;;
+esac
+
+mkdir -p "$BIN_DIR"
+
+if command -v gh >/dev/null 2>&1; then
+    echo "Downloading $ASSET via gh CLI..." >&2
+    gh release download --repo "$REPO" --pattern "$ASSET" --dir "$BIN_DIR" --clobber
+
+    # Also download dbmazz-linux-amd64 if missing
+    if [ ! -f "$BIN_DIR/dbmazz-linux-amd64" ]; then
+        echo "Downloading dbmazz-linux-amd64..." >&2
+        gh release download --repo "$REPO" --pattern "dbmazz-linux-amd64" --dir "$BIN_DIR" --clobber
+    fi
+
+    mv "$BIN_DIR/$ASSET" "$BIN_DIR/ez-cdc"
+    chmod +x "$BIN_DIR/ez-cdc"
+    chmod +x "$BIN_DIR/dbmazz-linux-amd64" 2>/dev/null || true
+else
+    RELEASE_URL="https://github.com/$REPO/releases/latest"
+    echo "" >&2
+    echo "gh CLI not found. Install it (https://cli.github.com) and retry, or download manually:" >&2
+    echo "  $RELEASE_URL" >&2
+    echo "" >&2
+    echo "Then place the binary at: $BIN_DIR/ez-cdc" >&2
     exit 1
 fi
-exec "$BIN" --config "$SCRIPT_DIR/e2e-cli/ez-cdc.yaml" "$@"
+
+echo "Download complete." >&2
+exec "$BIN_DIR/ez-cdc" --config "$CONFIG" "$@"
