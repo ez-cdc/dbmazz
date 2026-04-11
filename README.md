@@ -20,104 +20,89 @@ Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rus
 
 ## 🚀 Quickstart
 
-Clone and run — PostgreSQL, StarRocks, and sample data included:
+Clone the repo and launch a live CDC dashboard in 3 commands:
 
 ```bash
-git clone https://github.com/ez-cdc/dbmazz.git
-cd dbmazz
-docker compose -f deploy/docker-compose.yml --profile starrocks up -d
+git clone https://github.com/ez-cdc/dbmazz.git && cd dbmazz
+
+./ez-cdc datasource init                                      # create demo config
+./ez-cdc quickstart --source demo-pg --sink demo-starrocks    # start everything + dashboard
 ```
 
-Open **[http://localhost:8080](http://localhost:8080)** — you'll see a live dashboard with real-time metrics, throughput chart, and replication controls.
+The `./ez-cdc` wrapper uses precompiled binaries. No Rust toolchain needed.
 
-That's it. Data is already flowing from PostgreSQL to StarRocks.
+`quickstart` starts the infra containers, launches the dbmazz daemon, runs
+snapshot + CDC replication, and opens a live terminal dashboard showing
+throughput, lag, and source/target row counts in real time. Press `t` to
+generate traffic, `q` to quit.
 
-```bash
-# Verify it's running
-curl -s http://localhost:8080/healthz
-# {"status":"ok","stage":"cdc","uptime_secs":42}
-```
-
-> StarRocks takes ~60s to initialize on first run. The dashboard is available immediately.
+> Docker Desktop must be running. StarRocks takes ~60s to initialize on
+> first run. See [e2e-cli/README.md](e2e-cli/README.md) for building from
+> source if precompiled binaries are not available.
 
 ### Use your own databases
 
-Run without env vars and configure everything from the browser:
+Run the binary directly and configure everything from the web UI at
+`http://localhost:8080`:
 
 ```bash
 cargo build --release --features http-api
 ./target/release/dbmazz
 ```
 
-Open **[http://localhost:8080](http://localhost:8080)** — a setup wizard lets you test connections, discover tables, and start replication with one click. No config files needed.
+A setup wizard lets you test connections, discover tables, and start
+replication with one click. No config files needed. See
+[`docs/configuration.md`](docs/configuration.md) for the full list of
+environment variables if you prefer to configure via env vars.
 
 ---
 
 ## 🧪 Test a sink end-to-end
 
-Each sink has a docker-compose profile that spins up source DB + target + dbmazz with snapshot enabled. Two scripts handle validation:
+The `ez-cdc` CLI provides a single entry point for running the full
+e2e validation suite against any supported sink. It verifies snapshot,
+CDC (INSERT/UPDATE/DELETE), TOAST handling, schema consistency, and
+more — see [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
+for the full list of checks.
 
-- **`deploy/test-sink.sh`** — verifies snapshot + CDC correctness (INSERT, UPDATE, DELETE). Pass/fail.
-- **`deploy/load-test.py`** — generates sustained load and shows replication metrics in a live terminal dashboard.
+### Supported sinks
 
-| Profile | Source | Target | Requirements |
-|---------|--------|--------|--------------|
-| `starrocks` | PostgreSQL | StarRocks | Docker only |
-| `pg-target` | PostgreSQL | PostgreSQL | Docker only |
-| `snowflake` | PostgreSQL | Snowflake (cloud) | Snowflake account + [`snowsql`](https://docs.snowflake.com/en/user-guide/snowsql-install-config) |
+| Sink | Demo datasource | Requirements |
+|------|----------------|--------------|
+| StarRocks | `demo-starrocks` | Docker only |
+| PostgreSQL | `demo-pg-target` | Docker only |
+| Snowflake | (add via wizard) | Snowflake account |
 
-### PostgreSQL → PostgreSQL
-
-```bash
-# Start (builds dbmazz + source PG + target PG with seed data)
-docker compose -f deploy/docker-compose.yml --profile pg-target down -v
-docker compose -f deploy/docker-compose.yml --profile pg-target up -d
-
-# Verify snapshot + CDC
-bash deploy/test-sink.sh pg-target
-
-# Load test (optional — requires: pip install psycopg2-binary rich)
-python3 deploy/load-test.py pg-target --rate 1000 --duration 60
-
-# Cleanup
-docker compose -f deploy/docker-compose.yml --profile pg-target down -v
-```
-
-### PostgreSQL → StarRocks
+### Run verify
 
 ```bash
-# Start (StarRocks takes ~60s to initialize on first run)
-docker compose -f deploy/docker-compose.yml --profile starrocks down -v
-docker compose -f deploy/docker-compose.yml --profile starrocks up -d
-
-# Verify snapshot + CDC
-bash deploy/test-sink.sh starrocks
-
-# Cleanup
-docker compose -f deploy/docker-compose.yml --profile starrocks down -v
+ez-cdc verify --source demo-pg --sink demo-starrocks          # full verification suite
+ez-cdc verify --source demo-pg --sink demo-pg-target          # PG target
+ez-cdc verify --source demo-pg --sink demo-starrocks --quick  # skip slow checks (TOAST, idempotency)
 ```
 
-### PostgreSQL → Snowflake
+### Snowflake
 
-Snowflake is cloud-only — no Docker container. The profile runs source PG + dbmazz locally and connects to your Snowflake account. Free 30-day trial at [signup.snowflake.com](https://signup.snowflake.com).
+Snowflake is cloud-only — no Docker container. Add credentials interactively
+with `ez-cdc datasource add`, or edit `ez-cdc.yaml` directly. Free 30-day
+trial at [signup.snowflake.com](https://signup.snowflake.com).
+
+### Other commands
 
 ```bash
-# 1. Configure credentials (one-time)
-cp deploy/.env.snowflake.example deploy/.env.snowflake
-# Edit deploy/.env.snowflake with your account, warehouse, user, password
-
-# 2. Start (builds dbmazz + source PG, connects to Snowflake cloud)
-docker compose -f deploy/docker-compose.yml --profile snowflake down -v
-docker compose -f deploy/docker-compose.yml --profile snowflake up -d
-
-# 3. Verify snapshot + CDC (requires snowsql CLI)
-bash deploy/test-sink.sh snowflake
-
-# 4. Cleanup
-docker compose -f deploy/docker-compose.yml --profile snowflake down -v
+ez-cdc up                                                # start all infra containers
+ez-cdc down                                              # stop all infra containers
+ez-cdc logs                                              # tail infra logs
+ez-cdc clean --source demo-pg --sink demo-starrocks      # clean target DB
+ez-cdc status                                            # one-shot daemon status
+ez-cdc datasource list                                   # show configured datasources
+ez-cdc datasource add                                    # interactive wizard
+ez-cdc --help                                            # see everything
 ```
 
-> Adding a new sink? Add a profile to `deploy/docker-compose.yml` + a test function to `deploy/test-sink.sh`. See the [sink connector template](src/connectors/sinks/_template/README.md).
+> Adding a new sink? See [`e2e-cli/README.md`](e2e-cli/README.md) and
+> [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
+> for the step-by-step checklist.
 
 ---
 
@@ -245,41 +230,24 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 <details>
 <summary><strong>🐳 Docker deployment</strong></summary>
 
-### StarRocks (batteries included)
+The preferred way to run dbmazz locally is through the `ez-cdc` CLI
+(see the Quickstart at the top of this README). The `ez-cdc` CLI
+manages Docker compose under the hood:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --profile starrocks up -d
+ez-cdc up       # start all infra containers (source PG + sinks)
+ez-cdc down     # stop and destroy all containers + volumes
 ```
 
-### Production (bring your own databases)
-
-```bash
-cp deploy/.env.example deploy/.env    # fill in your connection details
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### With initial snapshot (backfill existing data)
-
-```bash
-# Add to your .env:
-DO_SNAPSHOT=true
-SNAPSHOT_CHUNK_SIZE=50000
-
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-### Stop
-
-```bash
-docker compose -f deploy/docker-compose.yml --profile starrocks down
-```
+Snapshot and pipeline settings are configured in `e2e-cli/ez-cdc.yaml`
+under the `settings:` section.
 
 </details>
 
 <details>
 <summary><strong>⚙️ Configuration</strong></summary>
 
-Configured via environment variables. See [`deploy/.env.example`](deploy/.env.example) for a full reference.
+Configured via environment variables. See [`docs/configuration.md`](docs/configuration.md) for a full reference with all variables organized by section.
 
 When built with `--features http-api`, all connection variables are optional — you can configure everything from the browser instead.
 

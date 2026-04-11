@@ -5,6 +5,8 @@
 # Note: Cargo.lock is committed for binary crates (reproducible builds).
 # Only gitignore Cargo.lock in library crates.
 
+/skills-lock.json
+
 # Byproducts
 *.log
 *.tmp
@@ -26,9 +28,27 @@ coverage/
 .plans/
 session-logs/
 
-# Deploy credentials
-deploy/.env
-deploy/.env.snowflake
+# e2e config file (datasources + pipeline settings)
+# ez-cdc.yaml may contain real user credentials (e.g. Snowflake) and
+# is created/edited by `ez-cdc datasource ...`. NEVER commit it.
+e2e/.env
+e2e/.env.snowflake
+e2e/ez-cdc.yaml
+e2e/ez-cdc.yaml.bak
+
+# Generated docker compose files (per source/sink pair, written by
+# compose_builder). Each cache dir contains a rendered .env with the
+# real credentials of the source/sink combo — NEVER commit them.
+e2e/.cache/
+
+# Python build artifacts (e2e/ is installed with pip install -e)
+e2e/src/**/__pycache__/
+e2e/src/**/*.egg-info/
+e2e/**/*.pyc
+e2e/build/
+
+# Downloaded CLI binaries (auto-fetched by ./ez-cdc wrapper)
+e2e-cli/bin/
 
 # Misc
 *.old

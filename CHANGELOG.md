@@ -68,7 +68,70 @@ All notable changes to dbmazz will be documented here.
 
 ---
 
-## [0.1.0] - 2025-12-11
+## [1.4.4] - 2026-04-09
+- docs: consolidate architecture docs under docs/ and remove stale version
+
+## [1.4.3] - 2026-04-09
+- chore: remove 5 unused dependencies from Cargo.toml
+
+## [1.4.2] - 2026-04-09
+- chore: commit Cargo.lock and declare MSRV (1.91.1)
+
+## [1.4.1] - 2026-04-09
+- docs: update CLAUDE.md and ARCHITECTURE.md to reflect current sink implementations
+
+## [1.4.0] - 2026-04-09
+- feat: add end-to-end testing profile for Snowflake sink
+- refactor: rename quickstart profile to starrocks
+
+## [1.3.0] - 2026-04-09
+- feat: Snowflake sink connector (Parquet, PUT, COPY INTO, MERGE)
+- fix: resolve end-to-end replication bugs in Snowflake sink
+
+## [1.2.7] - 2026-04-09
+- chore: strip debug symbols from release binary in Dockerfile
+
+## [1.2.6] - 2026-04-03
+- refactor: simplify CdcEngine by removing Option fields and deduplicating logic
+
+## [1.2.5] - 2026-04-02
+- refactor: replace SinkConfig Option fields with enum and remove legacy Config fields
+
+## [1.2.4] - 2026-04-02
+- refactor: unify sink factory with SinkMode enum
+
+## [1.2.3] - 2026-04-02
+- refactor: move sink setup into Sink::setup() trait method
+
+## [1.2.2] - 2026-04-01
+- fix: resolve PostgreSQL sink normalizer failures
+
+## [1.2.1] - 2026-03-23
+- docs: add PostgreSQL sink connector README
+
+## [1.2.0] - 2026-03-23
+- feat: add PostgreSQL sink connector (COPY + raw table + MERGE)
+- refactor: multi-sink architecture
+
+## [1.1.4] - 2026-03-13
+- fix: replace expect() with error handling, add SQL validation
+- refactor: remove dead code from incomplete connector migration
+
+## [1.1.3] - 2026-03-12
+- fix: move snapshot pause check inside spawned task
+
+## [1.1.2] - 2026-03-12
+- chore: unify release workflow
+
+## [1.1.1] - 2026-03-12
+- chore: unify release and auto-tag into single workflow
+
+## [1.1.0] - 2026-03-12
+- feat: add snapshot pause/resume gRPC controls and execution window support
+
+---
+
+## [1.0.0] - 2025-12-11
 
 ### Main Features
 

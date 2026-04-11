@@ -1,6 +1,46 @@
+# dbmazz .dockerignore
+#
+# Keeps Docker build context small — only Rust sources needed for `cargo build`.
+# Prevents unrelated changes from invalidating cached build layers.
+
+# Build artifacts
 target/
-.git/
-examples/
+**/target/
+**/*.rs.bk
+
+# e2e test harness — not needed for the Rust binary build
+e2e-cli/
+
+# Documentation (markdown, images) — not needed to build the binary
 docs/
+README.md
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE
 assets/
-*.md
+examples/
+
+# IDE / editor state
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.bak
+
+# Ephemeral / session state
+.plans/
+session-logs/
+.claude/
+
+# Git
+.git/
+.gitignore
+.github/
+
+# OS
+.DS_Store
+
+# Env files
+.env
+.env.*

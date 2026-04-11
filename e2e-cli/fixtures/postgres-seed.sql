@@ -1,5 +1,10 @@
 -- dbmazz: E-commerce Schema + Seed Data
--- Used by docker-compose.yml (all test profiles)
+-- Used by e2e/compose.yml (all test profiles)
+--
+-- The `description` TEXT column on orders exists so the verify runner can
+-- exercise the D4 TOAST test (tier 1): insert a >8KB description, then
+-- UPDATE a different column, and verify the large TEXT survives intact.
+-- Seed rows leave description NULL.
 
 -- Tables
 CREATE TABLE IF NOT EXISTS orders (
@@ -7,6 +12,7 @@ CREATE TABLE IF NOT EXISTS orders (
     customer_id INT NOT NULL,
     total DECIMAL(10,2) NOT NULL,
     status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    description TEXT,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );

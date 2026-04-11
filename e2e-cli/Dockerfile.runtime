@@ -1,0 +1,6 @@
+# Minimal runtime image for dbmazz e2e testing.
+# The Linux binary is mounted at runtime via docker-compose volume.
+# Build the binary with: cross build --release --target x86_64-unknown-linux-gnu --features http-api
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y libssl3 libcurl4 curl ca-certificates && rm -rf /var/lib/apt/lists/*
+ENTRYPOINT ["dbmazz"]
