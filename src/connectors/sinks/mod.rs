@@ -23,14 +23,20 @@
 //! sink.write_batch(records).await?;
 //! ```
 
+#[cfg(feature = "sink-postgres")]
 pub mod postgres;
+#[cfg(feature = "sink-snowflake")]
 pub mod snowflake;
+#[cfg(feature = "sink-starrocks")]
 pub mod starrocks;
 
 use anyhow::Result;
 
+#[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
+#[cfg(feature = "sink-snowflake")]
 use self::snowflake::SnowflakeSink;
+#[cfg(feature = "sink-starrocks")]
 use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::{Sink, SinkMode};
@@ -46,28 +52,36 @@ use crate::core::{Sink, SinkMode};
 /// * `mode` - `SinkMode::Primary` for the main CDC sink (runs background tasks),
 ///   `SinkMode::SnapshotWorker` for snapshot worker instances (skips background tasks)
 pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>> {
-    match config.sink_type {
+    match &config.sink_type {
+        #[cfg(feature = "sink-starrocks")]
         SinkType::StarRocks => {
             let sink = StarRocksSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
+        #[cfg(feature = "sink-postgres")]
         SinkType::Postgres => {
             let sink = PostgresSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
+        #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "Sink type '{}' is not compiled in this build. Rebuild with the appropriate feature flag (e.g. --features sink-starrocks)",
+            other
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PostgresSinkConfig, SinkConfig, SinkSpecificConfig, SinkType};
-    use serial_test::serial;
+    use crate::config::{SinkConfig, SinkSpecificConfig, SinkType};
 
+    #[cfg(feature = "sink-starrocks")]
     #[test]
     fn test_create_starrocks_sink() {
         let config = SinkConfig {
@@ -84,8 +98,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "sink-postgres")]
     #[test]
     fn test_create_postgres_sink() {
+        use crate::config::PostgresSinkConfig;
+
         let config = SinkConfig {
             sink_type: SinkType::Postgres,
             url: "postgres://localhost/test".to_string(),
@@ -103,9 +120,11 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[cfg(feature = "sink-snowflake")]
     #[test]
-    #[serial]
     fn test_create_snowflake_sink() {
+        use serial_test::serial;
+
         std::env::set_var("SINK_SNOWFLAKE_ACCOUNT", "test_account");
         std::env::set_var("SINK_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH");
 

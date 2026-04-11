@@ -10,7 +10,8 @@ use crate::grpc::state::{CdcState, SharedState, Stage};
 pub mod dbmazz {
     tonic::include_proto!("dbmazz");
 
-    // File descriptor set for reflection
+    // File descriptor set for reflection (only needed when grpc-reflection is enabled)
+    #[cfg(feature = "grpc-reflection")]
     pub const FILE_DESCRIPTOR_SET: &[u8] = tonic::include_file_descriptor_set!("descriptor");
 }
 
