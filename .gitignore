@@ -26,7 +26,10 @@ coverage/
 
 # Claude Code
 .plans/
+.claude/agents/
+.claude/skills/
 session-logs/
+skills-lock.json
 
 # e2e config file (datasources + pipeline settings)
 # ez-cdc.yaml may contain real user credentials (e.g. Snowflake) and
