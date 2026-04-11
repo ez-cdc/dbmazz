@@ -36,8 +36,9 @@ UNAME_M="$(uname -m)"
 case "$UNAME_S" in
     Darwin)
         case "$UNAME_M" in
-            arm64) ASSET="ez-cdc-darwin-arm64" ;;
-            *)     echo "Unsupported macOS architecture: $UNAME_M" >&2; exit 1 ;;
+            arm64)  ASSET="ez-cdc-darwin-arm64" ;;
+            x86_64) ASSET="ez-cdc-darwin-amd64" ;;
+            *)      echo "Unsupported macOS architecture: $UNAME_M" >&2; exit 1 ;;
         esac
         ;;
     Linux)
