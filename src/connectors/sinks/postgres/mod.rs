@@ -25,11 +25,16 @@ mod raw_table;
 mod setup;
 mod types;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::config::SinkConfig;
 use crate::core::position::SourcePosition;
@@ -53,8 +58,12 @@ pub struct PostgresSink {
     client: Option<Client>,
     /// Full name of the raw table (e.g., _dbmazz._raw_dbmazz_slot)
     raw_table_name: String,
-    /// Channel to notify normalizer of new batches
-    normalize_tx: Option<mpsc::Sender<i64>>,
+    /// Notify handle to wake the normalizer when new batches are written.
+    normalize_notify: Option<Arc<Notify>>,
+    /// Shutdown flag for the normalizer background task.
+    normalize_shutdown: Option<Arc<AtomicBool>>,
+    /// JoinHandle for the normalizer task — awaited in close().
+    normalizer_handle: Option<JoinHandle<()>>,
     /// Sink operating mode
     mode: SinkMode,
 }
@@ -90,7 +99,9 @@ impl PostgresSink {
             database: config.database.clone(),
             client: None,
             raw_table_name,
-            normalize_tx: None,
+            normalize_notify: None,
+            normalize_shutdown: None,
+            normalizer_handle: None,
             mode,
         })
     }
@@ -140,7 +151,7 @@ impl Sink for PostgresSink {
             .await
             .context("PostgresSink: connection validation failed")?;
 
-        tokio::spawn(async move {
+        let conn_handle = tokio::spawn(async move {
             let _ = connection.await;
         });
 
@@ -152,6 +163,8 @@ impl Sink for PostgresSink {
         let version_str: String = version_row.get(0);
         let version_num: i32 = version_str.trim().parse().unwrap_or(0);
         if version_num < 150000 {
+            drop(client);
+            conn_handle.abort();
             anyhow::bail!(
                 "PostgresSink requires PostgreSQL >= 15 for MERGE support (found version: {})",
                 version_str
@@ -162,6 +175,8 @@ impl Sink for PostgresSink {
             "PostgresSink: connection OK (version: {}, schema: {})",
             version_str, self.schema
         );
+        drop(client);
+        conn_handle.abort();
         Ok(())
     }
 
@@ -181,8 +196,10 @@ impl Sink for PostgresSink {
                 raw_table: self.raw_table_name.clone(),
                 table_schemas: source_schemas.to_vec(),
             };
-            let tx = normalizer::spawn_normalizer(normalizer_config);
-            self.normalize_tx = Some(tx);
+            let (notify, shutdown, handle) = normalizer::spawn_normalizer(normalizer_config);
+            self.normalize_notify = Some(notify);
+            self.normalize_shutdown = Some(shutdown);
+            self.normalizer_handle = Some(handle);
 
             info!(
                 "PostgresSink: setup complete ({} tables, normalizer started)",
@@ -230,9 +247,9 @@ impl Sink for PostgresSink {
         let (records_written, bytes_written) =
             raw_table::write_batch_to_raw(client, &raw_table, &job_name, lsn, &records).await?;
 
-        // Notify normalizer (non-blocking — if channel is full, normalizer will catch up)
-        if let Some(ref tx) = self.normalize_tx {
-            let _ = tx.try_send(0);
+        // Notify normalizer (non-blocking — if it's already awake it will catch up)
+        if let Some(ref notify) = self.normalize_notify {
+            notify.notify_one();
         }
 
         Ok(SinkResult {
@@ -245,12 +262,33 @@ impl Sink for PostgresSink {
     async fn close(&mut self) -> Result<()> {
         info!("PostgresSink: closing...");
 
-        // Drop normalizer channel → normalizer will drain pending and exit
-        self.normalize_tx = None;
+        // Signal normalizer to shut down and process remaining batches.
+        if let Some(ref shutdown) = self.normalize_shutdown {
+            shutdown.store(true, Ordering::Relaxed);
+        }
+        if let Some(ref notify) = self.normalize_notify {
+            notify.notify_one();
+        }
 
-        // Give normalizer a moment to process remaining batches
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        // Await normalizer completion with a 30-second timeout.
+        if let Some(handle) = self.normalizer_handle.take() {
+            match tokio::time::timeout(Duration::from_secs(30), handle).await {
+                Ok(Ok(())) => {
+                    info!("PostgresSink: normalizer shut down cleanly");
+                }
+                Ok(Err(e)) => {
+                    error!("PostgresSink: normalizer task panicked: {}", e);
+                }
+                Err(_) => {
+                    warn!(
+                        "PostgresSink: normalizer did not finish within 30s, proceeding with shutdown"
+                    );
+                }
+            }
+        }
 
+        self.normalize_notify = None;
+        self.normalize_shutdown = None;
         self.client = None;
         info!("PostgresSink: closed");
         Ok(())
