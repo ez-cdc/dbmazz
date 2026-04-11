@@ -227,7 +227,14 @@ pub async fn test_connection(
 ) -> impl IntoResponse {
     match req.db_type.as_str() {
         "postgres" => test_postgres(state, req).await,
+        #[cfg(feature = "sink-starrocks")]
         "starrocks" => test_starrocks(state, req).await,
+        #[cfg(not(feature = "sink-starrocks"))]
+        "starrocks" => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": "StarRocks sink not compiled in this build"})),
+        )
+            .into_response(),
         other => (
             StatusCode::BAD_REQUEST,
             Json(json!({"ok": false, "error": format!("Unknown type: {}", other)})),
@@ -309,6 +316,7 @@ async fn test_postgres(
         .into_response()
 }
 
+#[cfg(feature = "sink-starrocks")]
 async fn test_starrocks(
     state: Arc<HttpAppState>,
     req: TestConnectionRequest,
@@ -522,6 +530,7 @@ pub async fn start_replication(
     };
 
     // Auto-create StarRocks database and tables from PG schema
+    #[cfg(feature = "sink-starrocks")]
     if let Err(e) = ensure_starrocks_tables(&src, &sink, &req.tables).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -635,6 +644,7 @@ pub async fn stop_replication(State(state): State<Arc<HttpAppState>>) -> impl In
 // StarRocks table auto-creation from PostgreSQL schema
 // =============================================================================
 
+#[cfg(feature = "sink-starrocks")]
 fn pg_udt_to_starrocks(
     udt_name: &str,
     precision: Option<i32>,
@@ -673,6 +683,7 @@ fn pg_udt_to_starrocks(
     }
 }
 
+#[cfg(feature = "sink-starrocks")]
 async fn ensure_starrocks_tables(
     src: &SourceSetupConfig,
     sink: &SinkSetupConfig,

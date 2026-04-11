@@ -5,7 +5,7 @@ mod setup;
 pub mod snapshot;
 
 use anyhow::Result;
-use futures::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
