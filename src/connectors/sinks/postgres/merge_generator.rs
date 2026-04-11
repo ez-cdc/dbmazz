@@ -11,21 +11,27 @@
 use super::types::pg_oid_to_target_type;
 use crate::core::traits::SourceTableSchema;
 
-/// Generate a complete MERGE SQL statement for a single batch.
+/// Generate a complete MERGE SQL statement for a batch range.
+///
+/// Processes all batches in the half-open interval `(from_batch_id, to_batch_id]`.
+/// The ROW_NUMBER dedup (`PARTITION BY pk ORDER BY _timestamp DESC`) handles multiple
+/// batches correctly by keeping the most recent record per PK across the entire range.
 ///
 /// # Arguments
 /// * `raw_table` — full name of the raw table (e.g., `_dbmazz._raw_dbmazz_slot`)
 /// * `target_schema` — target table schema (e.g., `public`)
 /// * `source_schema` — source table schema with column definitions and PKs
-/// * `toast_combinations` — unique TOAST column combinations found in this batch
+/// * `toast_combinations` — unique TOAST column combinations found in this batch range
 ///   (e.g., `["", "big_col", "big_col,other_col"]`)
-/// * `batch_id` — the specific batch to process
-pub fn generate_merge(
+/// * `from_batch_id` — exclusive lower bound of the batch range
+/// * `to_batch_id` — inclusive upper bound of the batch range
+pub fn generate_merge_range(
     raw_table: &str,
     target_schema: &str,
     source_schema: &SourceTableSchema,
     toast_combinations: &[String],
-    batch_id: i64,
+    from_batch_id: i64,
+    to_batch_id: i64,
 ) -> String {
     let dst_table = format!("\"{}\".\"{}\"", target_schema, source_schema.name);
     let dst_qualified = format!("{}.{}", target_schema, source_schema.name);
@@ -94,7 +100,10 @@ pub fn generate_merge(
     sql.push_str("            ORDER BY _timestamp DESC\n");
     sql.push_str("        ) AS _rank\n");
     sql.push_str(&format!("    FROM {}\n", raw_table));
-    sql.push_str(&format!("    WHERE _batch_id = {}\n", batch_id));
+    sql.push_str(&format!(
+        "    WHERE _batch_id > {} AND _batch_id <= {}\n",
+        from_batch_id, to_batch_id
+    ));
     sql.push_str(&format!("      AND _dst_table = '{}'\n", dst_qualified));
     sql.push_str(")\n");
 
@@ -218,7 +227,14 @@ mod tests {
     #[test]
     fn test_generate_merge_basic() {
         let schema = test_schema();
-        let sql = generate_merge("_dbmazz._raw_job", "public", &schema, &["".to_string()], 1);
+        let sql = generate_merge_range(
+            "_dbmazz._raw_job",
+            "public",
+            &schema,
+            &["".to_string()],
+            0,
+            1,
+        );
 
         // Should contain MERGE INTO
         assert!(sql.contains("MERGE INTO \"public\".\"orders\" AS dst"));
@@ -227,8 +243,8 @@ mod tests {
         assert!(!sql.contains("RANK()"));
         // Should contain PK partition
         assert!(sql.contains("PARTITION BY (_data->>'id')::integer"));
-        // Should filter by single batch_id
-        assert!(sql.contains("_batch_id = 1"));
+        // Should filter by batch range
+        assert!(sql.contains("_batch_id > 0 AND _batch_id <= 1"));
         // Should contain ON clause
         assert!(sql.contains("ON dst.\"id\" = src.\"id\""));
         // Should contain INSERT
@@ -246,12 +262,13 @@ mod tests {
     #[test]
     fn test_generate_merge_with_toast() {
         let schema = test_schema();
-        let sql = generate_merge(
+        let sql = generate_merge_range(
             "_dbmazz._raw_job",
             "public",
             &schema,
             &["".to_string(), "amount".to_string()],
-            1,
+            41,
+            42,
         );
 
         // Should have two WHEN MATCHED UPDATE clauses
@@ -297,7 +314,14 @@ mod tests {
             primary_keys: vec!["order_id".to_string(), "item_id".to_string()],
         };
 
-        let sql = generate_merge("_dbmazz._raw_job", "public", &schema, &["".to_string()], 1);
+        let sql = generate_merge_range(
+            "_dbmazz._raw_job",
+            "public",
+            &schema,
+            &["".to_string()],
+            0,
+            1,
+        );
 
         // Composite PK in PARTITION BY
         assert!(sql
@@ -310,17 +334,35 @@ mod tests {
     #[test]
     fn test_generate_merge_single_batch() {
         let schema = test_schema();
-        let sql = generate_merge(
+        let sql = generate_merge_range(
             "_dbmazz._raw_slot",
             "public",
             &schema,
             &["".to_string()],
+            41,
             42,
         );
 
-        // Should filter by exact batch_id, not a range
-        assert!(sql.contains("_batch_id = 42"));
-        assert!(!sql.contains("_batch_id >"));
-        assert!(!sql.contains("_batch_id <="));
+        // Single-batch range: from_batch_id is one below to_batch_id
+        assert!(sql.contains("_batch_id > 41 AND _batch_id <= 42"));
+        assert!(!sql.contains("_batch_id = 42"));
+    }
+
+    #[test]
+    fn test_generate_merge_batch_range() {
+        let schema = test_schema();
+        let sql = generate_merge_range(
+            "_dbmazz._raw_slot",
+            "public",
+            &schema,
+            &["".to_string()],
+            5,
+            25,
+        );
+
+        // Wide range: WHERE clause must use the half-open interval (5, 25]
+        assert!(sql.contains("_batch_id > 5 AND _batch_id <= 25"));
+        // Must not contain any single-value batch filter
+        assert!(!sql.contains("_batch_id = "));
     }
 }
