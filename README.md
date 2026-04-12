@@ -11,49 +11,92 @@
 Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rust
 
 [![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
+[![GHCR](https://img.shields.io/badge/ghcr.io-ez--cdc%2Fdbmazz-0969da?logo=docker)](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz)
 
-[Quickstart](#-quickstart) · [Test a sink](#-test-a-sink-end-to-end) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Install the CLI](#-install-the-cli) · [Quickstart](#-quickstart) · [Run in production](#-run-in-production) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
 
 </div>
 
 ---
 
-## 🚀 Quickstart
+## 📦 Install the CLI
 
-Clone the repo and launch a live CDC dashboard in 3 commands:
+One-liner installer — no Rust toolchain, no clone, no compile:
 
 ```bash
-git clone https://github.com/ez-cdc/dbmazz.git && cd dbmazz
-
-./ez-cdc datasource init                                      # create demo config
-./ez-cdc quickstart --source demo-pg --sink demo-starrocks    # start everything + dashboard
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
 ```
 
-The `./ez-cdc` wrapper uses precompiled binaries. No Rust toolchain needed.
+Supports Linux and macOS on both amd64 and arm64. The binary is
+downloaded from the latest GitHub release, checksum-verified, and
+installed to `$HOME/.local/bin/ez-cdc` (or `/usr/local/bin` with sudo).
 
-`quickstart` starts the infra containers, launches the dbmazz daemon, runs
-snapshot + CDC replication, and opens a live terminal dashboard showing
-throughput, lag, and source/target row counts in real time. Press `t` to
-generate traffic, `q` to quit.
+Pin a specific version or change the install dir with:
 
-> Docker Desktop must be running. StarRocks takes ~60s to initialize on
-> first run. See [e2e-cli/README.md](e2e-cli/README.md) for building from
-> source if precompiled binaries are not available.
+```bash
+EZ_CDC_VERSION=v1.5.2 curl -sSL .../install.sh | sh
+EZ_CDC_INSTALL_DIR=/opt/bin curl -sSL .../install.sh | sh
+```
+
+---
+
+## 🚀 Quickstart
+
+Launch a live CDC dashboard in 2 commands:
+
+```bash
+ez-cdc datasource init                                      # create demo config
+ez-cdc quickstart --source demo-pg --sink demo-starrocks    # start everything + dashboard
+```
+
+`quickstart` pulls the official `ghcr.io/ez-cdc/dbmazz` image from
+GHCR, starts the infra containers, runs snapshot + CDC replication,
+and opens a live terminal dashboard showing throughput, lag, and
+source/target row counts in real time. Press `t` to generate traffic,
+`q` to quit.
+
+> Docker must be running. StarRocks takes ~60s to initialize on first
+> run. To test a patched daemon locally, set `DBMAZZ_IMAGE=my-tag:dev`
+> before running `ez-cdc`.
 
 ### Use your own databases
 
-Run the binary directly and configure everything from the web UI at
-`http://localhost:8080`:
+Run the daemon directly with Docker and configure everything from the
+web UI at `http://localhost:8080`:
 
 ```bash
-cargo build --release --features http-api
-./target/release/dbmazz
+docker run -d --name dbmazz \
+  -p 8080:8080 -p 50051:50051 \
+  ghcr.io/ez-cdc/dbmazz:latest
 ```
 
 A setup wizard lets you test connections, discover tables, and start
 replication with one click. No config files needed. See
 [`docs/configuration.md`](docs/configuration.md) for the full list of
 environment variables if you prefer to configure via env vars.
+
+---
+
+## 🐳 Run in production
+
+The production path is a Docker container with pinned version,
+restart policy, and secrets in an env file:
+
+```bash
+docker run -d \
+  --name dbmazz \
+  --restart unless-stopped \
+  -p 8080:8080 -p 50051:50051 \
+  --env-file /etc/dbmazz/env \
+  ghcr.io/ez-cdc/dbmazz:1.5.2
+```
+
+See [`docs/production-deployment.md`](docs/production-deployment.md)
+for full guidance on Docker Compose, AWS ECS Fargate, secrets
+management, Prometheus monitoring, and operations (pause/resume/drain).
+
+Running multiple pipelines? Need HA, auto-healing, and a web portal?
+See [EZ-CDC Cloud](https://ez-cdc.com).
 
 ---
 
@@ -230,17 +273,30 @@ But running CDC in production means managing multiple jobs, monitoring them, han
 <details>
 <summary><strong>🐳 Docker deployment</strong></summary>
 
-The preferred way to run dbmazz locally is through the `ez-cdc` CLI
-(see the Quickstart at the top of this README). The `ez-cdc` CLI
-manages Docker compose under the hood:
+The official image is published on every release to
+[GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz):
+
+```bash
+docker pull ghcr.io/ez-cdc/dbmazz:1.5.2   # pin to exact version
+docker pull ghcr.io/ez-cdc/dbmazz:1.5     # latest patch of 1.5
+docker pull ghcr.io/ez-cdc/dbmazz:1       # latest minor of 1
+docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
+```
+
+The image is multi-arch (`linux/amd64` + `linux/arm64`), runs as
+non-root, and ships with the web UI, Prometheus metrics, and gRPC
+control plane enabled by default.
+
+For local dev and e2e testing, the `ez-cdc` CLI wraps Docker Compose
+to spin up source + sinks + dbmazz together:
 
 ```bash
 ez-cdc up       # start all infra containers (source PG + sinks)
 ez-cdc down     # stop and destroy all containers + volumes
 ```
 
-Snapshot and pipeline settings are configured in `e2e-cli/ez-cdc.yaml`
-under the `settings:` section.
+See [`docs/production-deployment.md`](docs/production-deployment.md)
+for full deployment guidance (Compose, ECS, secrets, monitoring).
 
 </details>
 
@@ -249,7 +305,7 @@ under the `settings:` section.
 
 Configured via environment variables. See [`docs/configuration.md`](docs/configuration.md) for a full reference with all variables organized by section.
 
-When built with `--features http-api`, all connection variables are optional — you can configure everything from the browser instead.
+With the HTTP API enabled (default), all connection variables are optional — you can configure everything from the browser instead.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -390,8 +446,14 @@ See [docs/architecture.md](docs/architecture.md) for the full data flow, module 
 <summary><strong>🔨 Build from source</strong></summary>
 
 ```bash
-cargo build --release                    # Minimal binary (no HTTP)
-cargo build --release --features http-api # With web UI + HTTP API
+cargo build --release       # Default build: all 3 sinks + HTTP API + web UI
+```
+
+For an extra-minimal binary without the HTTP API:
+
+```bash
+cargo build --release --no-default-features \
+  --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"
 ```
 
 </details>

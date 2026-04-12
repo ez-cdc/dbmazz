@@ -55,7 +55,17 @@ See [docs/architecture.md](docs/architecture.md) for the full data flow, module 
 
 ## Feature Flags
 
-- `--features http-api` - Enables HTTP API + web UI on port 8080 (setup wizard, dashboard, REST endpoints)
+Default features: `sink-starrocks`, `sink-postgres`, `sink-snowflake`,
+`grpc-reflection`, **`http-api`**. `http-api` is now part of the default
+set so a single build serves both enterprise (gRPC) and self-host (HTTP
+API + web UI on port 8080).
+
+For an extra-minimal build without the HTTP API:
+
+```bash
+cargo build --release --no-default-features \
+  --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"
+```
 
 ## Snapshot / Backfill
 
@@ -146,12 +156,32 @@ Format: `vMAJOR.MINOR.PATCH` (e.g., `v1.3.2`). Tags only on `main`.
 ## Build & Test
 
 ```bash
-cargo build --release                    # Build
-cargo build --release --features http-api # With web UI
-cargo test                               # Test
-cargo fmt -- --check                     # Format check
-cargo clippy -- -D warnings              # Lint
+cargo build --release                                     # Default (all sinks + http-api)
+cargo build --release --no-default-features --features "..."  # Minimal build
+cargo test                                                # Unit + integration tests
+cargo fmt -- --check                                      # Format check
+cargo clippy -- -D warnings                               # Lint
 ```
+
+The release workflow builds `dbmazz-linux-amd64` and `dbmazz-linux-arm64`
+(both musl-static) and uploads them to S3/GCS (enterprise) and GitHub
+releases (self-host).
+
+## Docker Image
+
+The official multi-arch Docker image is published to GHCR on every
+release:
+
+```bash
+docker pull ghcr.io/ez-cdc/dbmazz:1.5.2   # immutable version
+docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
+```
+
+The `Dockerfile` at the repo root uses `debian:bookworm-slim` as base,
+runs as non-root (UID 65532), and copies the pre-compiled binary by
+`TARGETARCH` during a `docker buildx build --platform linux/amd64,
+linux/arm64`. See [`docs/production-deployment.md`](docs/production-deployment.md)
+for self-host deployment guidance.
 
 ## Review Rules
 
