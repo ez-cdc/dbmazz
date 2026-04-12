@@ -429,14 +429,21 @@ pub struct PipelineSettings {
     pub snowflake_flush_bytes: u64,
 }
 
+// NOTE: every default below must match the dbmazz daemon's own defaults
+// in src/config.rs of the daemon. The CLI is a front door that serializes
+// these values into env vars for the container — if they drift, the user
+// sees one thing in the yaml and a different thing at runtime.
+//
+// Daemon source of truth: see src/config.rs Config::from_env in the dbmazz
+// crate.
 fn default_flush_size() -> u32 {
-    2000
+    10_000
 }
 fn default_flush_interval() -> u32 {
-    2000
+    5_000
 }
 fn default_chunk_size() -> u32 {
-    10000
+    50_000
 }
 fn default_parallel_workers() -> u32 {
     2
@@ -445,7 +452,7 @@ fn default_rust_log() -> String {
     "info".into()
 }
 fn default_sf_flush_files() -> u32 {
-    1
+    20
 }
 fn default_sf_flush_bytes() -> u64 {
     104_857_600
@@ -456,7 +463,7 @@ impl Default for PipelineSettings {
         Self {
             flush_size: default_flush_size(),
             flush_interval_ms: default_flush_interval(),
-            do_snapshot: true,
+            do_snapshot: false,
             snapshot_chunk_size: default_chunk_size(),
             snapshot_parallel_workers: default_parallel_workers(),
             initial_snapshot_only: false,
@@ -672,11 +679,16 @@ sinks:
 
     #[test]
     fn pipeline_settings_defaults() {
+        // These defaults must match the dbmazz daemon (src/config.rs
+        // Config::from_env in the daemon crate). If you change one,
+        // change both.
         let settings = PipelineSettings::default();
-        assert_eq!(settings.flush_size, 2000);
-        assert_eq!(settings.flush_interval_ms, 2000);
-        assert!(settings.do_snapshot);
+        assert_eq!(settings.flush_size, 10_000);
+        assert_eq!(settings.flush_interval_ms, 5_000);
+        assert!(!settings.do_snapshot);
         assert!(!settings.initial_snapshot_only);
+        assert_eq!(settings.snapshot_chunk_size, 50_000);
+        assert_eq!(settings.snowflake_flush_files, 20);
         assert_eq!(settings.rust_log, "info");
     }
 
@@ -684,8 +696,8 @@ sinks:
     fn pipeline_to_env_lines() {
         let settings = PipelineSettings::default();
         let lines = settings.to_env_lines();
-        assert!(lines.contains(&"FLUSH_SIZE=2000".to_string()));
-        assert!(lines.contains(&"DO_SNAPSHOT=true".to_string()));
+        assert!(lines.contains(&"FLUSH_SIZE=10000".to_string()));
+        assert!(lines.contains(&"DO_SNAPSHOT=false".to_string()));
         assert!(lines.contains(&"RUST_LOG=info".to_string()));
     }
 

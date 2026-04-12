@@ -142,14 +142,13 @@ trial at [signup.snowflake.com](https://signup.snowflake.com).
 ### Other commands
 
 ```bash
-ez-cdc up                                                # start all infra containers
-ez-cdc down                                              # stop all infra containers
-ez-cdc logs                                              # tail infra logs
-ez-cdc clean --source demo-pg --sink demo-starrocks      # clean target DB
-ez-cdc status                                            # one-shot daemon status
-ez-cdc datasource list                                   # show configured datasources
-ez-cdc datasource add                                    # interactive wizard
-ez-cdc --help                                            # see everything
+ez-cdc status                                       # one-shot daemon status
+ez-cdc logs dbmazz                                  # tail dbmazz container logs
+ez-cdc clean --source <name> --sink <name>          # reset state between test runs
+ez-cdc datasource list                              # show configured datasources
+ez-cdc datasource add                               # interactive wizard
+ez-cdc datasource test <name>                       # validate connection
+ez-cdc --help                                       # see everything
 ```
 
 > Adding a new sink? See [`e2e-cli/README.md`](e2e-cli/README.md) and
@@ -296,16 +295,10 @@ The image is multi-arch (`linux/amd64` + `linux/arm64`), runs as
 non-root, and ships with the web UI, Prometheus metrics, and gRPC
 control plane enabled by default.
 
-For local dev and e2e testing, the `ez-cdc` CLI wraps Docker Compose
-to spin up source + sinks + dbmazz together:
-
-```bash
-ez-cdc up       # start all infra containers (source PG + sinks)
-ez-cdc down     # stop and destroy all containers + volumes
-```
-
-See [`docs/production-deployment.md`](docs/production-deployment.md)
-for full deployment guidance (Compose, ECS, secrets, monitoring).
+The `ez-cdc` CLI pulls this image automatically when you run
+`ez-cdc quickstart` or `ez-cdc verify`. If you want to run dbmazz
+directly without the CLI, use `docker run` / Docker Compose / ECS as
+documented in [`docs/production-deployment.md`](docs/production-deployment.md).
 
 </details>
 

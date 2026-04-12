@@ -17,7 +17,7 @@ pub async fn run_status() -> anyhow::Result<()> {
         println!();
         println!(
             "  Is the daemon running? Try {} first.",
-            style("ez-cdc up").bold()
+            style("ez-cdc quickstart").bold()
         );
         return Ok(());
     }

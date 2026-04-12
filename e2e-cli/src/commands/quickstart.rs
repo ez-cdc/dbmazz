@@ -36,8 +36,8 @@ pub async fn run_quickstart(
     print_step("Testing connectivity...");
     if !preflight::check_connectivity(&src_spec, &sk_spec, &src_name, &sk_name).await {
         anyhow::bail!(
-            "source or sink unreachable. Make sure your databases are running \
-             (use `ez-cdc up` for Docker-managed ones) and check the connection URLs."
+            "source or sink unreachable. Make sure your databases are \
+             running and the URLs in your ez-cdc.yaml are correct."
         );
     }
 

@@ -56,12 +56,25 @@ pub struct VerifyRunner {
     sk_spec: SinkSpec,
     quick: bool,
     skip_ids: HashSet<String>,
+    /// Whether the daemon was configured to run the initial snapshot.
+    /// When false, the snapshot-dependent checks (B1, B1b, B2) are
+    /// auto-skipped with a clear reason instead of failing.
+    do_snapshot: bool,
 }
+
+/// Tier 1 check IDs that compare source and target row counts and
+/// therefore require the initial snapshot to have run. When the daemon
+/// was started with `do_snapshot: false`, these checks are not
+/// meaningful and are reported as SKIP with an explanation.
+const SNAPSHOT_DEPENDENT_CHECKS: &[&str] = &["B1", "B1b", "B2"];
 
 impl VerifyRunner {
     /// Create a new runner.
     ///
-    /// `skip_ids` contains check IDs like "C3", "D7" to skip.
+    /// `skip_ids` contains check IDs like "C3", "D7" to skip explicitly.
+    /// `do_snapshot` should mirror `PipelineSettings.do_snapshot` from
+    /// the config file — it determines whether snapshot-dependent
+    /// checks are executed or auto-skipped.
     pub fn new(
         src_name: String,
         src_spec: SourceSpec,
@@ -69,6 +82,7 @@ impl VerifyRunner {
         sk_spec: SinkSpec,
         quick: bool,
         skip_ids: HashSet<String>,
+        do_snapshot: bool,
     ) -> Self {
         Self {
             src_name,
@@ -77,6 +91,7 @@ impl VerifyRunner {
             sk_spec,
             quick,
             skip_ids,
+            do_snapshot,
         }
     }
 
@@ -332,7 +347,9 @@ impl VerifyRunner {
     // ── Check execution ─────────────────────────────────────────────────
 
     /// Run a single check. Catches panics/errors and converts to FAIL.
-    /// Handles --skip by returning SKIP status.
+    /// Handles --skip by returning SKIP status, and auto-skips
+    /// snapshot-dependent checks (B1, B1b, B2) when the daemon is
+    /// running with `do_snapshot: false`.
     async fn run_check(
         &self,
         id: &str,
@@ -340,13 +357,28 @@ impl VerifyRunner {
         check_fn: &CheckFn,
         ctx: &mut TestContext,
     ) -> CheckResult {
-        // Handle --skip
+        // Handle --skip (explicit user request)
         if self.skip_ids.contains(id) {
             return CheckResult {
                 id: id.into(),
                 description: description.into(),
                 status: CheckStatus::Skip,
                 detail: "skipped by --skip".into(),
+                error: None,
+                duration_ms: None,
+            };
+        }
+
+        // Auto-skip snapshot-dependent checks when the daemon did not
+        // run the initial snapshot. Running them produces nonsensical
+        // failures (target = 0 rows, baselines missing) and obscures
+        // real regressions.
+        if !self.do_snapshot && SNAPSHOT_DEPENDENT_CHECKS.contains(&id) {
+            return CheckResult {
+                id: id.into(),
+                description: description.into(),
+                status: CheckStatus::Skip,
+                detail: "do_snapshot=false in config".into(),
                 error: None,
                 duration_ms: None,
             };

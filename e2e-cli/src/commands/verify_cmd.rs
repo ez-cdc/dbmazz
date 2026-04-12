@@ -45,7 +45,7 @@ pub async fn run_verify(
     if !preflight::check_connectivity(&src_spec, &sk_spec, &src_name, &sk_name).await {
         anyhow::bail!(
             "source or sink unreachable. Make sure your databases are running \
-             (use `ez-cdc up` for Docker-managed ones) and check the connection URLs."
+             and the URLs in your ez-cdc.yaml are correct."
         );
     }
 
@@ -99,7 +99,13 @@ pub async fn run_verify(
     print_tier_header(&format!("Verify: {} → {}", src_name, sk_name));
 
     let mut verify_runner = VerifyRunner::new(
-        src_name.clone(), src_spec, sk_name.clone(), sk_spec, quick, skip_ids,
+        src_name.clone(),
+        src_spec,
+        sk_name.clone(),
+        sk_spec,
+        quick,
+        skip_ids,
+        data.settings.do_snapshot,
     );
     let report = verify_runner.run().await;
 

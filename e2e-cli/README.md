@@ -180,31 +180,13 @@ When run without a TTY (e.g. in a pipe or CI), `ez-cdc` prints help and exits.
 
 ---
 
-### `ez-cdc up [--rebuild]`
+### Bring Your Own Infrastructure
 
-Start all infrastructure containers (sources and sinks) defined in the config.
-Waits for containers to become healthy before returning.
-
-```
-ez-cdc up
-ez-cdc up --rebuild   # force re-pull of the dbmazz image from GHCR
-```
-
-Uses the Docker-managed datasources only. Containers are defined dynamically
-based on what is in `ez-cdc.yaml` — only the databases you have configured
-are started.
-
----
-
-### `ez-cdc down [--keep-volumes]`
-
-Stop and remove all infrastructure containers. Volumes are destroyed by
-default (which resets database state).
-
-```
-ez-cdc down
-ez-cdc down --keep-volumes   # stop containers but preserve data volumes
-```
+The CLI does **not** manage source / sink containers. You bring the
+source PostgreSQL and sink (StarRocks / Postgres / Snowflake) already
+running — either your own infrastructure, or your own Docker Compose
+setup. The CLI only manages the `dbmazz` daemon container, which it
+pulls from GHCR on demand.
 
 ---
 
@@ -292,15 +274,13 @@ progress if active.
 Tail container logs. Defaults to following all infra containers.
 
 ```
-ez-cdc logs                   # all containers, follow
-ez-cdc logs dbmazz            # dbmazz daemon logs only
-ez-cdc logs source-pg         # source PostgreSQL logs
-ez-cdc logs sink-starrocks    # StarRocks logs
+ez-cdc logs dbmazz            # dbmazz daemon logs, follow
 ez-cdc logs dbmazz --tail 50  # last 50 lines, no follow
 ```
 
-The service name corresponds to the Docker compose service name. Run
-`ez-cdc up` first — logs require the containers to be running.
+Only the `dbmazz` service is managed by the CLI. For source / sink
+containers (running under your own Docker Compose or infra), use
+`docker logs <container>` directly.
 
 ---
 
@@ -599,16 +579,14 @@ from GitHub Container Registry:
 
 ### Compose file generation
 
-`builder.rs` generates two types of compose files:
+`builder.rs` generates one compose file per (source, sink) pair under
+`.cache/compose/<src>__<sink>__<hash>/compose.yml`. The file contains
+a single `dbmazz` service referencing the official
+`ghcr.io/ez-cdc/dbmazz:<version>` image. Source and sink containers
+(if any) are expected to be managed outside the CLI.
 
-- **Infra compose** (`ez-cdc up`/`ez-cdc down`): contains only the source and
-  sink containers. Stored at `.cache/compose/_infra/compose.yml`.
-- **Pair compose** (`quickstart`/`verify`): contains a single `dbmazz` service
-  with the correct environment variables for the chosen source/sink pair.
-  Stored at `.cache/compose/<src>__<sink>__<hash>/compose.yml`.
-
-Environment variables for the pair (all `dbmazz` config) are written to a
-parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
+Environment variables for the pair (all `dbmazz` config) are written
+to a parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
 
 ---
 
@@ -686,21 +664,16 @@ installed services:
 | dbmazz HTTP API | 8080 |
 | dbmazz gRPC | 50051 |
 
-If another process is using one of these ports, `ez-cdc up` will fail. Stop
-the conflicting process or edit the URLs in `ez-cdc.yaml` to use different
-ports, then rebuild the compose file by running `ez-cdc up` again.
+If another process is using one of these ports, start your source or
+sink on different ports and update the URLs in `ez-cdc.yaml`
+accordingly.
 
 ### "source or sink unreachable"
 
-The preflight connectivity check in `quickstart` and `verify` connects to
-the source and sink before starting dbmazz. If infra is not running:
-
-```
-ez-cdc up
-```
-
-If using external (non-Docker) databases, verify the connection URL in
-`ez-cdc.yaml` with:
+The preflight connectivity check in `quickstart` and `verify` connects
+to the source and sink before starting dbmazz. Start your source /
+sink infrastructure first (docker-compose, cloud, whatever), then
+verify each connection with:
 
 ```
 ez-cdc datasource test <name>
@@ -708,14 +681,10 @@ ez-cdc datasource test <name>
 
 ### StarRocks takes too long to start
 
-StarRocks initializes internal metadata on first run, which typically takes
-60-90 seconds. If `ez-cdc verify` fails at the P1 health check with a
-timeout, run `ez-cdc up` first and wait for StarRocks to become healthy before
-running verify. Check progress with:
-
-```
-ez-cdc logs sink-starrocks
-```
+StarRocks initializes internal metadata on first run, which typically
+takes 60-90 seconds. Wait for it to become healthy before running
+`ez-cdc verify`, then check progress with `docker logs` against your
+StarRocks container.
 
 ### Daemon does not reach CDC stage (P4 timeout)
 

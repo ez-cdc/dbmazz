@@ -1,10 +1,8 @@
 pub mod clean;
 pub mod datasource;
-pub mod down;
 pub mod logs;
 pub mod quickstart;
 pub mod status;
-pub mod up;
 pub mod verify_cmd;
 
 use std::path::Path;

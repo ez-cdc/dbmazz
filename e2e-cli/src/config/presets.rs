@@ -1,7 +1,10 @@
-//! Bundled demo datasources.
+//! Bundled demo datasources (in-repo dev only).
 //!
-//! Provides ready-to-use datasources that work out of the box with
-//! `ez-cdc up`. Used by `ez-cdc datasource init` and the first-run menu.
+//! Ready-to-use datasources for the in-repo dev workflow — they point
+//! at well-known localhost ports (15432, 18030, 25432) that the
+//! project's own docker-compose stack exposes. Used by
+//! `ez-cdc datasource init --template demo`. Not useful for standalone
+//! installs.
 
 use super::schema::*;
 use super::store::DatasourceStore;
