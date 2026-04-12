@@ -1,9 +1,10 @@
 # Configuration Reference
 
 This document lists every environment variable the `dbmazz` daemon reads.
-All variables are optional when built with `--features http-api` (you can
-configure everything from the web UI at `http://localhost:8080`); when built
-without that feature, variables marked **required** must be provided.
+The HTTP API (with web UI at `http://localhost:8080`) is part of the default
+build, so all variables are optional — you can configure everything from the
+browser. For minimal builds made with `--no-default-features` (no HTTP API),
+variables marked **required** must be provided via environment.
 
 ## Source (PostgreSQL)
 
@@ -61,7 +62,7 @@ without that feature, variables marked **required** must be provided.
 | Variable | Default | Description |
 |---|---|---|
 | `GRPC_PORT` | `50051` | gRPC server port (`HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`). |
-| `HTTP_API_PORT` | `8080` | HTTP API port. Only active when built with `--features http-api`. Serves the dashboard UI and REST endpoints. |
+| `HTTP_API_PORT` | `8080` | HTTP API port. Serves the dashboard UI, Prometheus metrics, and REST endpoints. Enabled by default; disabled only when built with `--no-default-features`. |
 
 ## Logging
 

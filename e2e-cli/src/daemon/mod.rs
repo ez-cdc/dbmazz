@@ -31,7 +31,7 @@ pub fn find_binary() -> Result<PathBuf, String> {
 
     Err(
         "dbmazz binary not found. Build it with:\n  \
-         cargo build --release --features http-api"
+         cargo build --release"
             .into(),
     )
 }

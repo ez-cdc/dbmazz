@@ -326,7 +326,7 @@ With the HTTP API enabled (default), all connection variables are optional — y
 | `FLUSH_SIZE` | `10000` | Max events per batch |
 | `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing a batch |
 | `GRPC_PORT` | `50051` | gRPC server port |
-| `HTTP_API_PORT` | `8080` | HTTP API port (`--features http-api`) |
+| `HTTP_API_PORT` | `8080` | HTTP API port |
 | `RUST_LOG` | `info` | Log level |
 | `DO_SNAPSHOT` | `false` | Enable initial snapshot/backfill of existing data |
 | `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk (min: 1) |
@@ -337,7 +337,7 @@ With the HTTP API enabled (default), all connection variables are optional — y
 <details>
 <summary><strong>🌐 HTTP API</strong></summary>
 
-Build with `--features http-api` to enable the web UI and HTTP endpoints.
+The web UI and HTTP endpoints are enabled by default. To opt out, build with `--no-default-features`.
 
 | Method | Path | Description |
 |--------|------|-------------|

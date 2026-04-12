@@ -187,7 +187,7 @@ Waits for containers to become healthy before returning.
 
 ```
 ez-cdc up
-ez-cdc up --rebuild   # force rebuild of the dbmazz Docker image
+ez-cdc up --rebuild   # force re-pull of the dbmazz image from GHCR
 ```
 
 Uses the Docker-managed datasources only. Containers are defined dynamically
@@ -221,12 +221,12 @@ ez-cdc quickstart --source demo-pg --sink demo-starrocks --keep-up
 
 Steps performed:
 1. Connectivity preflight check against source and sink.
-2. Verify that `e2e-cli/bin/dbmazz-linux-amd64` exists.
-3. Build the `ez-cdc-dbmazz:latest` Docker image (cached after first build).
-4. Start the dbmazz container via Docker compose.
-5. Wait for dbmazz HTTP health check to pass.
-6. Open the dashboard (blocks until `q` or Ctrl+C).
-7. Stop and remove the dbmazz container on exit (unless `--keep-up`).
+2. Pull the official `ghcr.io/ez-cdc/dbmazz:<version>` image from GHCR
+   if not already present locally (or `$DBMAZZ_IMAGE` if overridden).
+3. Start the dbmazz container via Docker compose.
+4. Wait for dbmazz HTTP health check to pass.
+5. Open the dashboard (blocks until `q` or Ctrl+C).
+6. Stop and remove the dbmazz container on exit (unless `--keep-up`).
 
 If `--source` or `--sink` are omitted and only one is configured, it is
 auto-selected. If multiple are configured and not on a TTY, the command
@@ -259,7 +259,7 @@ Flags:
 | `--json-report FILE` | Write a JSON report to the specified file |
 | `--no-up` | Skip infra/dbmazz startup; assume the daemon is already running |
 | `--keep-up` | Do not stop the dbmazz container after verify completes |
-| `--rebuild` | Force rebuild of the `ez-cdc-dbmazz:latest` Docker image |
+| `--rebuild` | Force `docker pull` of the dbmazz image even if present locally |
 
 The command exits with a non-zero status if any check fails, making it
 suitable for CI pipelines. The JSON report preserves the full check list with
@@ -562,25 +562,23 @@ e2e-cli/
 ├── fixtures/
 │   ├── postgres-seed.sql   Schema + 500 seed orders + 1500 order items
 │   └── starrocks-init.sh   StarRocks database creation script
-├── bin/
-│   └── dbmazz-linux-amd64  Pre-compiled Linux binary (not in git, built locally)
-├── Dockerfile.runtime       Minimal runtime image (libs only; binary is mounted)
 └── ez-cdc.yaml             Generated config (not in git)
 ```
 
 ### How the daemon is containerized
 
-`ez-cdc quickstart` and `ez-cdc verify` do not bake the dbmazz binary into
-the Docker image. Instead:
+`ez-cdc quickstart` and `ez-cdc verify` pull the official `dbmazz` image
+from GitHub Container Registry:
 
-1. The `Dockerfile.runtime` builds a minimal Debian-slim image with only the
-   runtime libraries (OpenSSL, CA certificates). This image is tagged
-   `ez-cdc-dbmazz:latest` and cached — it only needs to be rebuilt when
-   system dependencies change.
-2. The `compose/builder.rs` generates a Docker compose file that bind-mounts
-   `e2e-cli/bin/dbmazz-linux-amd64` into the container at runtime.
-3. This means updating the binary (after a `cross build`) is instant — no
-   Docker rebuild required, just copy the new binary to `bin/`.
+1. The image reference is `ghcr.io/ez-cdc/dbmazz:<CLI version>`. The CLI
+   version is pinned at compile time via `env!("CARGO_PKG_VERSION")`, and
+   the release workflow patches `e2e-cli/Cargo.toml` before building to
+   keep daemon and CLI versions aligned.
+2. `compose/builder.rs` generates a Docker compose file that references
+   the image directly — no bind-mounts, no cross-compile loop.
+3. To test a locally-patched daemon, set `DBMAZZ_IMAGE=my-tag:dev` and
+   the CLI will use that image instead of the GHCR one. Build it with
+   `docker build -t my-tag:dev <path-to-dbmazz>` from the root Dockerfile.
 
 ### Compose file generation
 
@@ -599,49 +597,53 @@ parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
 
 ## Building from Source
 
-Only needed if precompiled binaries are not available (fresh clone without
-GitHub release assets).
+The preferred way to install the CLI is via the one-liner installer
+documented in the repo root README:
 
-### Build the ez-cdc CLI
+```bash
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+```
+
+This installer downloads the pre-built binary from the latest GitHub
+release. Only build from source if you are developing the CLI itself:
 
 ```bash
 cargo build --release --manifest-path e2e-cli/Cargo.toml
 ```
 
-The `./ez-cdc` wrapper at the repo root automatically finds the binary at
-`e2e-cli/target/release/ez-cdc`.
+The resulting binary is at `e2e-cli/target/release/ez-cdc`. You can run
+it directly or symlink it into your PATH.
 
-### Cross-compile dbmazz for Linux
+### Developing against a patched dbmazz daemon
 
-The dbmazz daemon runs inside a Docker container, so it needs to be a
-Linux/amd64 ELF binary. On macOS, use `cross`:
+The CLI pulls `ghcr.io/ez-cdc/dbmazz:<CLI version>` by default. To test
+the CLI against a local daemon build:
 
 ```bash
-# Install cross (one-time)
-cargo install cross
+# From the repo root, build the daemon and the Docker image locally
+cargo build --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/dbmazz dbmazz-linux-amd64
+docker build -t dbmazz-dev:local .
 
-# Build
-cross build --release --target x86_64-unknown-linux-gnu --features http-api
-
-# Copy to the expected location
-cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
+# Point the CLI at the local image
+DBMAZZ_IMAGE=dbmazz-dev:local ez-cdc quickstart --source demo-pg --sink demo-starrocks
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Linux binary not found"
+### `docker pull` fails with "unauthorized" or "manifest unknown"
 
-```
-Error: Linux binary not found at e2e-cli/bin/dbmazz-linux-amd64
-  Build it with: cross build --release --target x86_64-unknown-linux-gnu --features http-api
-  Then copy to: cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
-```
+The CLI pulls `ghcr.io/ez-cdc/dbmazz:<version>` from GHCR. If the image
+is not publicly accessible or the tag does not exist:
 
-The `e2e-cli/bin/` directory is not committed to git. You must build the
-binary locally before running `quickstart` or `verify`. Follow the exact
-commands in the message.
+- Verify your CLI version matches a published release:
+  `ez-cdc --version`, then check
+  https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz
+- Override with a known-good image: `DBMAZZ_IMAGE=ghcr.io/ez-cdc/dbmazz:latest`
+- Build locally as shown in the "Developing against a patched dbmazz
+  daemon" section above.
 
 ### "Docker not running" or compose command fails
 

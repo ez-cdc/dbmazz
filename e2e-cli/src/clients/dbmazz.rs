@@ -1,7 +1,7 @@
 //! HTTP client for the dbmazz daemon.
 //!
 //! The daemon exposes `/healthz`, `/status`, `/pause`, `/resume` endpoints
-//! when built with `--features http-api`. All test profiles use that build.
+//! via the HTTP API (part of the default features).
 //!
 //! This client is async (reqwest + tokio) and supports polling helpers
 //! (`wait_for_stage`, `wait_healthy`) for the verify runner.
