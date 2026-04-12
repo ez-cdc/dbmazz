@@ -1,12 +1,19 @@
-//! Programmatic docker-compose YAML generation for a (source, sink) pair.
+//! Programmatic docker-compose YAML generation for a single (source, sink) pair.
 //!
-//! Infers which Docker containers to create based on well-known localhost
-//! ports in spec URLs:
+//! The CLI only manages the `dbmazz` daemon container. Source and sink
+//! infrastructure is brought by the user (native on the host, their own
+//! docker-compose, or a remote cloud endpoint).
 //!
-//!   localhost:15432 source → source-pg container
-//!   localhost:18030 sink   → sink-starrocks container
-//!   localhost:25432 sink   → sink-pg container
-//!   remote URLs            → only dbmazz container
+//! Networking model:
+//!
+//! - The dbmazz container is started via docker-compose using the default
+//!   bridge network, plus `extra_hosts: ["host.docker.internal:host-gateway"]`
+//!   so the same hostname resolves to the host on macOS, Linux, and Windows.
+//! - URLs the user writes as `localhost:<port>` in `ez-cdc.yaml` are
+//!   translated to `host.docker.internal:<port>` when the `.env` file is
+//!   generated, so the container reaches the host loopback transparently.
+//! - Remote URLs (anything that is not `localhost` / `127.0.0.1` /
+//!   `0.0.0.0`) pass through unchanged.
 
 use std::path::PathBuf;
 
@@ -16,43 +23,40 @@ use url::Url;
 use crate::config::schema::*;
 use crate::paths;
 
-// ── Well-known localhost ports ─────────────────────────────────────────────
-
-const SOURCE_PG_EXT_PORT: u16 = 15432;
-const SOURCE_PG_INT_PORT: u16 = 5432;
-const SOURCE_PG_SERVICE: &str = "source-pg";
-
-const SINK_PG_EXT_PORT: u16 = 25432;
-const SINK_PG_INT_PORT: u16 = 5432;
-const SINK_PG_SERVICE: &str = "sink-pg";
-
-const SINK_SR_HTTP_EXT_PORT: u16 = 18030;
-const SINK_SR_HTTP_INT_PORT: u16 = 8030;
-const SINK_SR_MYSQL_INT_PORT: u16 = 9030;
-const SINK_SR_SERVICE: &str = "sink-starrocks";
-
-const INFRA_PROJECT_NAME: &str = "ez-cdc-infra";
-
 // ── URL helpers ────────────────────────────────────────────────────────────
 
-fn extract_port(url_str: &str) -> Option<u16> {
-    Url::parse(url_str).ok().and_then(|u| u.port())
-}
-
-fn rewrite_url_for_docker(url_str: &str, ext_port: u16, int_port: u16, service: &str) -> String {
+/// Rewrite a local-loopback URL so that a process running inside a
+/// Docker container can reach the same service on the host.
+///
+/// `localhost`, `127.0.0.1`, and `0.0.0.0` all become
+/// `host.docker.internal`. Any other host is returned unchanged. Port,
+/// path, query, and credentials are preserved. The trailing-slash
+/// shape of the original URL is preserved (url::Url::to_string always
+/// appends `/` when the path is empty, which breaks StarRocks Stream
+/// Load POSTs that expect `<url>/api/...`).
+fn rewrite_url_for_docker(url_str: &str) -> String {
     let Ok(parsed) = Url::parse(url_str) else {
         return url_str.to_string();
     };
-
-    let is_local = matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1"));
-    if !is_local || parsed.port() != Some(ext_port) {
+    let is_local = matches!(
+        parsed.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("0.0.0.0")
+    );
+    if !is_local {
         return url_str.to_string();
     }
+    let mut rewritten = parsed;
+    let _ = rewritten.set_host(Some("host.docker.internal"));
+    let out = rewritten.to_string();
+    if !url_str.ends_with('/') && out.ends_with('/') {
+        return out.trim_end_matches('/').to_string();
+    }
+    out
+}
 
-    let mut rewritten = parsed.clone();
-    let _ = rewritten.set_host(Some(service));
-    let _ = rewritten.set_port(Some(int_port));
-    rewritten.to_string()
+#[allow(dead_code)]
+fn extract_port(url_str: &str) -> Option<u16> {
+    Url::parse(url_str).ok().and_then(|u| u.port())
 }
 
 // ── Cache layout ───────────────────────────────────────────────────────────
@@ -73,10 +77,13 @@ pub fn cache_dir_for(source_name: &str, sink_name: &str) -> PathBuf {
 
 // ── Top-level builders ─────────────────────────────────────────────────────
 
-/// Generate compose.yml + .env for a (source, sink) pair.
+/// Generate compose.yml + .env for a single (source, sink) pair.
 ///
-/// The compose contains **only the dbmazz service**, connected to the
-/// infra network. Returns `(compose_path, env_path)`.
+/// The compose contains only the `dbmazz` daemon service. It uses the
+/// default docker-compose bridge network with `extra_hosts` set so that
+/// the container can reach services running on the host (native or
+/// in sibling containers that publish ports) via
+/// `host.docker.internal`. Returns `(compose_path, env_path)`.
 pub fn build_compose_for_pair(
     source_name: &str,
     source: &SourceSpec,
@@ -93,25 +100,12 @@ pub fn build_compose_for_pair(
         .take(50)
         .collect::<String>();
 
-    let infra_network = format!("{INFRA_PROJECT_NAME}_dbmazz");
-
-    // Build dbmazz service.
-    let mut dbmazz_service = build_dbmazz_service(source, sink);
-    // Override network to use infra compose's network.
-    dbmazz_service.insert(
-        "networks".into(),
-        serde_json::json!([&infra_network]),
-    );
-    // Remove depends_on — infra services live in a different compose.
-    dbmazz_service.remove("depends_on");
+    let dbmazz_service = build_dbmazz_service();
 
     let compose_dict = serde_json::json!({
         "name": project_name,
         "services": {
             "dbmazz": dbmazz_service,
-        },
-        "networks": {
-            &infra_network: { "external": true },
         },
     });
 
@@ -124,7 +118,7 @@ pub fn build_compose_for_pair(
     // Write compose.yml.
     let compose_path = cache.join("compose.yml");
     let compose_yaml = format!(
-        "# ez-cdc generated docker compose — dbmazz only (infra is separate)\n\
+        "# ez-cdc generated docker compose — dbmazz daemon only\n\
          # source: {source_name}\n\
          # sink:   {sink_name}\n\
          # Generated by ez-cdc — do not edit by hand.\n\n{}",
@@ -138,48 +132,26 @@ pub fn build_compose_for_pair(
 
 // ── Service builders ───────────────────────────────────────────────────────
 
-fn build_dbmazz_service(source: &SourceSpec, sink: &SinkSpec) -> serde_json::Map<String, serde_json::Value> {
-    let mut depends_on = serde_json::Map::new();
-
-    match source {
-        SourceSpec::Postgres(inner) => {
-            if extract_port(&inner.url) == Some(SOURCE_PG_EXT_PORT) {
-                depends_on.insert(
-                    "source-pg".into(),
-                    serde_json::json!({"condition": "service_healthy"}),
-                );
-            }
-        }
-    }
-
-    match sink {
-        SinkSpec::Starrocks(sr) => {
-            if extract_port(&sr.url) == Some(SINK_SR_HTTP_EXT_PORT) {
-                depends_on.insert(
-                    "sink-starrocks-init".into(),
-                    serde_json::json!({"condition": "service_completed_successfully"}),
-                );
-            }
-        }
-        SinkSpec::Postgres(pg) => {
-            if extract_port(&pg.url) == Some(SINK_PG_EXT_PORT) {
-                depends_on.insert(
-                    "sink-pg".into(),
-                    serde_json::json!({"condition": "service_healthy"}),
-                );
-            }
-        }
-        SinkSpec::Snowflake(_) => {}
-    }
-
-    // Use the official dbmazz image from GHCR. The version is pinned to
-    // the CLI's own CARGO_PKG_VERSION, overridable via the DBMAZZ_IMAGE
-    // env var for local-dev testing of patched daemons.
+/// Build the compose service definition for the dbmazz daemon.
+///
+/// Uses the official image from GHCR, pinned to the CLI's own
+/// `CARGO_PKG_VERSION` (overridable with the `DBMAZZ_IMAGE` env var for
+/// local-dev testing of patched daemons). Adds `extra_hosts` so the
+/// container can reach services on the host via `host.docker.internal`
+/// on every supported platform.
+fn build_dbmazz_service() -> serde_json::Map<String, serde_json::Value> {
     let mut service = serde_json::Map::new();
     service.insert("image".into(), serde_json::json!(crate::commands::dbmazz_image()));
     service.insert("ports".into(), serde_json::json!(["8080:8080", "50051:50051"]));
     service.insert("env_file".into(), serde_json::json!([".env"]));
     service.insert("restart".into(), serde_json::json!("unless-stopped"));
+    // `host-gateway` is a Docker reserved string that resolves to the
+    // host IP from inside the container. It works natively on Docker
+    // Desktop (macOS/Windows) and on Docker Engine 20.10+ on Linux.
+    service.insert(
+        "extra_hosts".into(),
+        serde_json::json!(["host.docker.internal:host-gateway"]),
+    );
     service.insert("healthcheck".into(), serde_json::json!({
         "test": ["CMD", "curl", "-sf", "http://localhost:8080/healthz"],
         "interval": "5s",
@@ -187,11 +159,6 @@ fn build_dbmazz_service(source: &SourceSpec, sink: &SinkSpec) -> serde_json::Map
         "retries": 12,
         "start_period": "10s",
     }));
-    service.insert("networks".into(), serde_json::json!(["dbmazz"]));
-    if !depends_on.is_empty() {
-        service.insert("depends_on".into(), serde_json::Value::Object(depends_on));
-    }
-
     service
 }
 
@@ -206,12 +173,7 @@ fn build_env_file(source: &SourceSpec, sink: &SinkSpec, settings: &PipelineSetti
     // Source vars.
     match source {
         SourceSpec::Postgres(inner) => {
-            let mut source_url = rewrite_url_for_docker(
-                &inner.url,
-                SOURCE_PG_EXT_PORT,
-                SOURCE_PG_INT_PORT,
-                SOURCE_PG_SERVICE,
-            );
+            let mut source_url = rewrite_url_for_docker(&inner.url);
             if !source_url.contains("replication=database") {
                 let sep = if source_url.contains('?') { "&" } else { "?" };
                 source_url = format!("{source_url}{sep}replication=database");
@@ -229,33 +191,17 @@ fn build_env_file(source: &SourceSpec, sink: &SinkSpec, settings: &PipelineSetti
     // Sink vars.
     match sink {
         SinkSpec::Postgres(pg) => {
-            let sink_url = rewrite_url_for_docker(
-                &pg.url,
-                SINK_PG_EXT_PORT,
-                SINK_PG_INT_PORT,
-                SINK_PG_SERVICE,
-            );
+            let sink_url = rewrite_url_for_docker(&pg.url);
             lines.push("SINK_TYPE=postgres".into());
             lines.push(format!("SINK_URL={sink_url}"));
             lines.push(format!("SINK_DATABASE={}", pg.database));
             lines.push(format!("SINK_SCHEMA={}", pg.schema_name));
         }
         SinkSpec::Starrocks(sr) => {
-            let sink_url = rewrite_url_for_docker(
-                &sr.url,
-                SINK_SR_HTTP_EXT_PORT,
-                SINK_SR_HTTP_INT_PORT,
-                SINK_SR_SERVICE,
-            );
-            // If URL was rewritten, use internal MySQL port.
-            let mysql_port = if sink_url != sr.url {
-                SINK_SR_MYSQL_INT_PORT
-            } else {
-                sr.mysql_port
-            };
+            let sink_url = rewrite_url_for_docker(&sr.url);
             lines.push("SINK_TYPE=starrocks".into());
             lines.push(format!("SINK_URL={sink_url}"));
-            lines.push(format!("SINK_PORT={mysql_port}"));
+            lines.push(format!("SINK_PORT={}", sr.mysql_port));
             lines.push(format!("SINK_DATABASE={}", sr.database));
             lines.push(format!("SINK_USER={}", sr.user));
             lines.push(format!("SINK_PASSWORD={}", sr.password));
@@ -322,36 +268,51 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_localhost_url() {
+    fn rewrite_localhost_url_preserves_port_and_path() {
         let result = rewrite_url_for_docker(
-            "postgres://postgres:postgres@localhost:15432/dbmazz",
-            15432,
-            5432,
-            "source-pg",
+            "postgres://postgres:postgres@localhost:5432/dbmazz?replication=database",
         );
-        assert!(result.contains("source-pg"));
-        assert!(result.contains(":5432"));
-        assert!(!result.contains("localhost"));
+        assert_eq!(
+            result,
+            "postgres://postgres:postgres@host.docker.internal:5432/dbmazz?replication=database"
+        );
+    }
+
+    #[test]
+    fn rewrite_127_0_0_1_and_0_0_0_0() {
+        assert_eq!(
+            rewrite_url_for_docker("http://127.0.0.1:8030"),
+            "http://host.docker.internal:8030"
+        );
+        assert_eq!(
+            rewrite_url_for_docker("http://0.0.0.0:9999/api"),
+            "http://host.docker.internal:9999/api"
+        );
     }
 
     #[test]
     fn no_rewrite_remote_url() {
         let url = "postgres://user:pass@remote.host:5432/db";
-        let result = rewrite_url_for_docker(url, 15432, 5432, "source-pg");
-        assert_eq!(result, url);
+        assert_eq!(rewrite_url_for_docker(url), url);
+    }
+
+    #[test]
+    fn no_rewrite_cloud_hostname() {
+        let url = "https://xy12345.us-east-1.snowflakecomputing.com";
+        assert_eq!(rewrite_url_for_docker(url), url);
     }
 
     #[test]
     fn env_file_postgres_sink() {
         let source = SourceSpec::Postgres(PostgresSourceInner {
-            url: "postgres://postgres:postgres@localhost:15432/dbmazz".into(),
+            url: "postgres://postgres:postgres@localhost:5432/dbmazz".into(),
             seed: None,
             replication_slot: "dbmazz_slot".into(),
             publication: "dbmazz_pub".into(),
             tables: vec!["orders".into(), "order_items".into()],
         });
         let sink = SinkSpec::Postgres(PostgresSinkInner {
-            url: "postgres://postgres:postgres@localhost:25432/dbmazz_target".into(),
+            url: "postgres://postgres:postgres@localhost:5433/dbmazz_target".into(),
             database: "dbmazz_target".into(),
             schema_name: "public".into(),
         });
@@ -359,10 +320,10 @@ mod tests {
         let env = build_env_file(&source, &sink, &settings);
 
         assert!(env.contains("SOURCE_TYPE=postgres"));
-        assert!(env.contains("source-pg:5432"));
+        assert!(env.contains("host.docker.internal:5432"));
         assert!(env.contains("replication=database"));
         assert!(env.contains("SINK_TYPE=postgres"));
-        assert!(env.contains("sink-pg:5432"));
+        assert!(env.contains("host.docker.internal:5433"));
         assert!(env.contains("TABLES=orders,order_items"));
         assert!(env.contains("FLUSH_SIZE=10000"));
     }
@@ -370,15 +331,15 @@ mod tests {
     #[test]
     fn env_file_starrocks_sink() {
         let source = SourceSpec::Postgres(PostgresSourceInner {
-            url: "postgres://localhost:15432/db".into(),
+            url: "postgres://localhost:5432/db".into(),
             seed: None,
             replication_slot: "slot".into(),
             publication: "pub".into(),
             tables: vec!["t1".into()],
         });
         let sink = SinkSpec::Starrocks(StarRocksSinkInner {
-            url: "http://localhost:18030".into(),
-            mysql_port: 19030,
+            url: "http://localhost:8030".into(),
+            mysql_port: 9030,
             database: "dbmazz".into(),
             user: "root".into(),
             password: "".into(),
@@ -387,7 +348,7 @@ mod tests {
         let env = build_env_file(&source, &sink, &settings);
 
         assert!(env.contains("SINK_TYPE=starrocks"));
-        assert!(env.contains("sink-starrocks:8030"));
-        assert!(env.contains(&format!("SINK_PORT={SINK_SR_MYSQL_INT_PORT}")));
+        assert!(env.contains("SINK_URL=http://host.docker.internal:8030"));
+        assert!(env.contains("SINK_PORT=9030"));
     }
 }

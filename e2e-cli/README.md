@@ -577,16 +577,51 @@ from GitHub Container Registry:
    the CLI will use that image instead of the GHCR one. Build it with
    `docker build -t my-tag:dev <path-to-dbmazz>` from the root Dockerfile.
 
+### Networking model
+
+The `dbmazz` container runs on the default docker-compose bridge
+network with one extra host entry:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+This makes `host.docker.internal` resolve to the host machine on
+macOS, Windows, and Linux (Docker Engine 20.10+). When the CLI
+generates the `.env` file for the container, it automatically
+rewrites any `localhost`, `127.0.0.1`, or `0.0.0.0` host in your
+datasource URLs to `host.docker.internal`, preserving the port and
+the rest of the URL. This means you can write:
+
+```yaml
+sources:
+  my-pg:
+    url: postgres://user:pass@localhost:5432/mydb
+```
+
+...in your `ez-cdc.yaml`, and the container will reach a postgres
+running on the host (either native on the host OS, or in another
+container that publishes port 5432). Remote hostnames
+(`prod-db.internal`, `xy12345.snowflakecomputing.com`, etc.) are
+passed through unchanged.
+
+**Edge case**: if your source or sink lives in another container on
+a private docker bridge *without* publishing its port to the host,
+`host.docker.internal` cannot reach it. Publish the port with
+`-p <host>:<container>` so it becomes visible on the host loopback.
+
 ### Compose file generation
 
 `builder.rs` generates one compose file per (source, sink) pair under
 `.cache/compose/<src>__<sink>__<hash>/compose.yml`. The file contains
 a single `dbmazz` service referencing the official
-`ghcr.io/ez-cdc/dbmazz:<version>` image. Source and sink containers
-(if any) are expected to be managed outside the CLI.
+`ghcr.io/ez-cdc/dbmazz:<version>` image, plus the `extra_hosts` entry
+described above.
 
 Environment variables for the pair (all `dbmazz` config) are written
-to a parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
+to a parallel `.env` file derived from `PipelineSettings.to_env_lines()`,
+with localhost URLs rewritten to `host.docker.internal`.
 
 ---
 

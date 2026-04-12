@@ -58,15 +58,20 @@ opens a live terminal dashboard showing throughput, lag, and
 source/target row counts in real time. Press `t` to generate traffic,
 `q` to quit.
 
-> Docker must be running. StarRocks takes ~60s to initialize on first
-> run. To test a patched daemon locally, set `DBMAZZ_IMAGE=my-tag:dev`
-> before running `ez-cdc`.
+> Docker must be running. To test a patched daemon locally, set
+> `DBMAZZ_IMAGE=my-tag:dev` before running `ez-cdc`.
 >
 > Config location: `$XDG_CONFIG_HOME/ez-cdc/config.yaml` (or
 > `~/.config/ez-cdc/config.yaml`). Override with `--config PATH` or
 > `$EZ_CDC_CONFIG`. If you are running from inside a clone of this
 > repo, `./ez-cdc.yaml` in the working directory still works as a
 > fallback.
+>
+> Networking: the `dbmazz` container reaches the host via
+> `host.docker.internal`. `localhost`/`127.0.0.1` hosts in your
+> datasource URLs are rewritten automatically, so you can keep using
+> `localhost:5432` in the yaml whether your source/sink is native on
+> the host or in another container that publishes its port.
 
 ### Use your own databases
 
