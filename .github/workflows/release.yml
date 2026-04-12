@@ -8,17 +8,28 @@ env:
   COMPONENT: dbmazz
   S3_BUCKET: ez-cdc-releases
   GCS_BUCKET: ez-cdc-releases-gcp
+  GHCR_IMAGE: ghcr.io/ez-cdc/dbmazz
 
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------
+  # Job 1: version
+  # Calculates the next semver from conventional commits. All other jobs
+  # consume these outputs. Skips the whole pipeline if no relevant commits.
+  # ---------------------------------------------------------------------
+  version:
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{ steps.version.outputs.TAG }}
-      skip: ${{ steps.version.outputs.SKIP }}
+      version: ${{ steps.calc.outputs.VERSION }}
+      tag: ${{ steps.calc.outputs.TAG }}
+      bump: ${{ steps.calc.outputs.BUMP }}
+      skip: ${{ steps.calc.outputs.SKIP }}
+      changelog: ${{ steps.calc.outputs.CHANGELOG }}
+      is_prerelease: ${{ steps.calc.outputs.IS_PRERELEASE }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -27,20 +38,17 @@ jobs:
           fetch-tags: true
 
       - name: Calculate version from conventional commits
-        id: version
+        id: calc
         run: |
-          # Get latest semver tag
           LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG="v0.0.0"
           fi
           echo "Latest tag: $LATEST_TAG"
 
-          # Parse current version
           VERSION=${LATEST_TAG#v}
           IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
 
-          # Get commit subjects since last tag
           COMMITS=$(git log "$LATEST_TAG"..HEAD --pretty=format:"%s" 2>/dev/null)
 
           if [ -z "$COMMITS" ]; then
@@ -53,8 +61,6 @@ jobs:
           echo "$COMMITS"
           echo ""
 
-          # Determine bump type from conventional commits
-          # Priority: major > minor > patch
           BUMP="none"
           while IFS= read -r msg; do
             if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:'; then
@@ -83,7 +89,6 @@ jobs:
             exit 0
           fi
 
-          # Calculate new version
           case "$BUMP" in
             major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
             minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
@@ -92,14 +97,21 @@ jobs:
 
           NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           NEW_TAG="v${NEW_VERSION}"
+
+          # Pre-release detection: currently always false. If we introduce
+          # -rc.N / -beta.N / -alpha.N via commit convention later, compute
+          # it here and set IS_PRERELEASE=true so docker-publish skips the
+          # latest/X.Y/X mutable tags.
+          IS_PRERELEASE="false"
+
           echo "Bump type: $BUMP"
           echo "New version: $NEW_VERSION (tag: $NEW_TAG)"
           echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "TAG=$NEW_TAG" >> "$GITHUB_OUTPUT"
           echo "BUMP=$BUMP" >> "$GITHUB_OUTPUT"
           echo "SKIP=false" >> "$GITHUB_OUTPUT"
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
 
-          # Build changelog
           {
             echo "CHANGELOG<<CHANGELOG_EOF"
             git log "$LATEST_TAG"..HEAD --pretty=format:"- %s" 2>/dev/null
@@ -107,174 +119,36 @@ jobs:
             echo "CHANGELOG_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust
-        if: steps.version.outputs.SKIP != 'true'
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Install protoc and musl tools
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y protobuf-compiler musl-tools pkg-config libssl-dev perl make jq
-
-      - name: Cache cargo registry
-        if: steps.version.outputs.SKIP != 'true'
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        if: steps.version.outputs.SKIP != 'true'
-        uses: actions/cache@v5
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        if: steps.version.outputs.SKIP != 'true'
-        uses: actions/cache@v5
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build dbmazz for musl
-        if: steps.version.outputs.SKIP != 'true'
-        env:
-          CARGO_TERM_COLOR: always
-        run: cargo build --release --target x86_64-unknown-linux-musl --verbose
-
-      - name: Configure AWS credentials
-        if: steps.version.outputs.SKIP != 'true'
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-west-2
-
-      - name: Calculate checksum
-        if: steps.version.outputs.SKIP != 'true'
-        id: checksum
-        run: |
-          CHECKSUM=$(sha256sum target/x86_64-unknown-linux-musl/release/dbmazz | cut -d' ' -f1)
-          echo "CHECKSUM=$CHECKSUM" >> $GITHUB_OUTPUT
-
-      - name: Upload versioned binary to S3
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
-
-          echo "${{ steps.checksum.outputs.CHECKSUM }}  dbmazz-linux-amd64" > checksum.txt
-          aws s3 cp checksum.txt \
-            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
-
-      - name: Update latest binary in S3
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          aws s3 cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
-
-          echo "${{ steps.version.outputs.VERSION }}" > version.txt
-          aws s3 cp version.txt \
-            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
-
-      # Upload to GCS (GCP)
-      - name: Authenticate to GCP
-        if: steps.version.outputs.SKIP != 'true'
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: projects/657615647135/locations/global/workloadIdentityPools/github-ci/providers/github
-          service_account: github-ci@ez-cdc-platform.iam.gserviceaccount.com
-
-      - name: Set up Cloud SDK
-        if: steps.version.outputs.SKIP != 'true'
-        uses: google-github-actions/setup-gcloud@v3
-
-      - name: Upload versioned binary to GCS
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          gcloud storage cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64"
-
-          echo "${{ steps.checksum.outputs.CHECKSUM }}  dbmazz-linux-amd64" > checksum.txt
-          gcloud storage cp checksum.txt \
-            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/SHA256SUMS"
-
-      - name: Update latest binary in GCS
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          gcloud storage cp target/x86_64-unknown-linux-musl/release/dbmazz \
-            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
-
-          echo "${{ steps.version.outputs.VERSION }}" > version.txt
-          gcloud storage cp version.txt \
-            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
-
-      # Create git tag after successful upload
-      - name: Create and push git tag
-        if: steps.version.outputs.SKIP != 'true'
-        env:
-          NEW_TAG: ${{ steps.version.outputs.TAG }}
-          BUMP: ${{ steps.version.outputs.BUMP }}
-          CHANGELOG: ${{ steps.version.outputs.CHANGELOG }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "$NEW_TAG ($BUMP)
-
-          $CHANGELOG"
-          git push origin "$NEW_TAG"
-          echo "Created and pushed tag: $NEW_TAG"
-
-      # Create GitHub Release with dbmazz binary as asset
-      - name: Create GitHub Release
-        if: steps.version.outputs.SKIP != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp target/x86_64-unknown-linux-musl/release/dbmazz dbmazz-linux-amd64
-          gh release create "${{ steps.version.outputs.TAG }}" \
-            dbmazz-linux-amd64 \
-            --title "${{ steps.version.outputs.TAG }}" \
-            --notes "${{ steps.version.outputs.CHANGELOG }}"
-
-      - name: Summary
-        if: steps.version.outputs.SKIP != 'true'
-        run: |
-          echo "## Release: ${{ env.COMPONENT }} ${{ steps.version.outputs.TAG }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Bump:** ${{ steps.version.outputs.BUMP }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Checksum:** ${{ steps.checksum.outputs.CHECKSUM }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Binaries" >> "$GITHUB_STEP_SUMMARY"
-          echo "- AWS: \`s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- GCP: \`gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ steps.version.outputs.VERSION }}/dbmazz-linux-amd64\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- GitHub: \`${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.version.outputs.TAG }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Changelog" >> "$GITHUB_STEP_SUMMARY"
-          echo "${{ steps.version.outputs.CHANGELOG }}" >> "$GITHUB_STEP_SUMMARY"
-
-  # Build ez-cdc CLI for Linux and macOS, upload as release assets
-  build-ez-cdc:
-    needs: build
-    if: needs.build.outputs.skip != 'true'
+  # ---------------------------------------------------------------------
+  # Job 2: build-dbmazz
+  # Compiles dbmazz for linux amd64 and arm64 (both musl static).
+  # Uploads each binary as an artifact consumed by docker-publish and release.
+  #
+  # Runner notes:
+  #   - amd64 uses ubuntu-latest (native)
+  #   - arm64 uses ubuntu-24.04-arm (native GitHub-hosted ARM runner)
+  #   - If ubuntu-24.04-arm is not available in the org, fallback is
+  #     `cross` + QEMU on ubuntu-latest. Swap the matrix entry to:
+  #        runner: ubuntu-latest
+  #     and add a step that runs
+  #        cargo install cross --git https://github.com/cross-rs/cross
+  #        cross build --release --target aarch64-unknown-linux-musl
+  #     Slower (~10 min extra) but works anywhere.
+  # ---------------------------------------------------------------------
+  build-dbmazz:
+    needs: version
+    if: needs.version.outputs.skip != 'true'
     strategy:
+      fail-fast: true
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            asset: ez-cdc-linux-amd64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            asset: ez-cdc-darwin-arm64
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset: ez-cdc-darwin-amd64
-    runs-on: ${{ matrix.os }}
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            arch: amd64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -284,16 +158,335 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Linux dependencies
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler musl-tools pkg-config perl make jq
+          # Note: libssl-dev is NOT needed because openssl-sys is vendored
+          # and curl uses static-curl (see Cargo.toml). The whole dbmazz
+          # binary is fully static with musl libc.
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v5
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.arch }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build dbmazz
+        env:
+          CARGO_TERM_COLOR: always
+        run: cargo build --release --target ${{ matrix.target }} --verbose
+
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/dbmazz dbmazz-linux-${{ matrix.arch }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbmazz-linux-${{ matrix.arch }}
+          path: dbmazz-linux-${{ matrix.arch }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # Job 3: build-ez-cdc
+  # Compiles the ez-cdc CLI for 4 targets (linux amd64/arm64 musl +
+  # darwin amd64/arm64). The Linux targets are musl now (previously gnu)
+  # for portability across distros.
+  #
+  # IMPORTANT: this job patches e2e-cli/Cargo.toml with the calculated
+  # release version before compiling, so env!("CARGO_PKG_VERSION") at
+  # runtime returns the right tag for the `docker pull` in the CLI.
+  # ---------------------------------------------------------------------
+  build-ez-cdc:
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            asset: ez-cdc-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            asset: ez-cdc-linux-arm64
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            asset: ez-cdc-darwin-amd64
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            asset: ez-cdc-darwin-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools pkg-config libssl-dev
+
+      - name: Sync CLI version with release version
+        shell: bash
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" e2e-cli/Cargo.toml
+          rm e2e-cli/Cargo.toml.bak
+          echo "e2e-cli/Cargo.toml version after sync:"
+          grep "^version" e2e-cli/Cargo.toml
 
       - name: Build ez-cdc CLI
         run: cargo build --release --target ${{ matrix.target }} --manifest-path e2e-cli/Cargo.toml
 
-      - name: Upload release asset
+      - name: Rename binary
+        shell: bash
+        run: cp e2e-cli/target/${{ matrix.target }}/release/ez-cdc ${{ matrix.asset }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # Job 4: docker-publish
+  # Builds the multi-arch Docker image from pre-compiled binaries and
+  # pushes to GHCR. Runs only after both dbmazz architectures are built.
+  # ---------------------------------------------------------------------
+  docker-publish:
+    needs: [version, build-dbmazz]
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Download dbmazz binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dbmazz-linux-*
+          merge-multiple: true
+
+      - name: Verify binaries
+        run: |
+          ls -lh dbmazz-linux-amd64 dbmazz-linux-arm64
+          file dbmazz-linux-amd64 dbmazz-linux-arm64
+          # The Dockerfile runs `chmod +x` on them after COPY, no need here.
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # We split X.Y.Z into components so metadata-action can emit the
+      # mutable X.Y and X tags. metadata-action's `type=semver` only
+      # parses from git refs, but our version comes from a computed
+      # output — so we pre-compute the parts here and use `type=raw`.
+      - name: Split version into components
+        id: verparts
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          echo "major=$MAJOR" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR.$MINOR" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=${{ steps.verparts.outputs.major_minor }},enable=${{ needs.version.outputs.is_prerelease == 'false' }}
+            type=raw,value=${{ steps.verparts.outputs.major }},enable=${{ needs.version.outputs.is_prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.is_prerelease == 'false' }}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.source=https://github.com/ez-cdc/dbmazz
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Elastic-2.0
+            org.opencontainers.image.description=Real-time CDC daemon for PostgreSQL to StarRocks, PostgreSQL, and Snowflake
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  # ---------------------------------------------------------------------
+  # Job 5: release
+  # Final job. Uploads enterprise binaries to S3 + GCS (unchanged path),
+  # creates the git tag, and publishes a GitHub Release with all assets.
+  # Runs only after every build and the docker publish succeeded.
+  # ---------------------------------------------------------------------
+  release:
+    needs: [version, build-dbmazz, build-ez-cdc, docker-publish]
+    if: needs.version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dbmazz-linux-* ez-cdc-*
+
+      - name: Calculate dbmazz checksums
+        run: |
+          sha256sum dbmazz-linux-amd64 > SHA256SUMS
+          sha256sum dbmazz-linux-arm64 >> SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-2
+
+      - name: Upload versioned binaries to S3
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          aws s3 cp dbmazz-linux-amd64 \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/dbmazz-linux-amd64"
+          aws s3 cp dbmazz-linux-arm64 \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/dbmazz-linux-arm64"
+          aws s3 cp SHA256SUMS \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/SHA256SUMS"
+
+      - name: Update latest binaries in S3
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          aws s3 cp dbmazz-linux-amd64 \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
+          aws s3 cp dbmazz-linux-arm64 \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-arm64"
+          echo "${VERSION}" > version.txt
+          aws s3 cp version.txt \
+            "s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/657615647135/locations/global/workloadIdentityPools/github-ci/providers/github
+          service_account: github-ci@ez-cdc-platform.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Upload versioned binaries to GCS
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          gcloud storage cp dbmazz-linux-amd64 \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/dbmazz-linux-amd64"
+          gcloud storage cp dbmazz-linux-arm64 \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/dbmazz-linux-arm64"
+          gcloud storage cp SHA256SUMS \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${VERSION}/SHA256SUMS"
+
+      - name: Update latest binaries in GCS
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          gcloud storage cp dbmazz-linux-amd64 \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-amd64"
+          gcloud storage cp dbmazz-linux-arm64 \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/dbmazz-linux-arm64"
+          echo "${VERSION}" > version.txt
+          gcloud storage cp version.txt \
+            "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
+
+      - name: Create and push git tag
+        env:
+          NEW_TAG: ${{ needs.version.outputs.tag }}
+          BUMP: ${{ needs.version.outputs.bump }}
+          CHANGELOG: ${{ needs.version.outputs.changelog }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "$NEW_TAG ($BUMP)
+
+          $CHANGELOG"
+          git push origin "$NEW_TAG"
+          echo "Created and pushed tag: $NEW_TAG"
+
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          CHANGELOG: ${{ needs.version.outputs.changelog }}
         run: |
-          cp e2e-cli/target/${{ matrix.target }}/release/ez-cdc ${{ matrix.asset }}
-          gh release upload "${{ needs.build.outputs.tag }}" "${{ matrix.asset }}" --clobber
+          # CHANGELOG is passed via env (not direct ${{ }} interpolation)
+          # to avoid shell injection when commit messages contain quotes,
+          # backticks, $(...), etc.
+          gh release create "$TAG" \
+            dbmazz-linux-amd64 \
+            dbmazz-linux-arm64 \
+            ez-cdc-linux-amd64 \
+            ez-cdc-linux-arm64 \
+            ez-cdc-darwin-amd64 \
+            ez-cdc-darwin-arm64 \
+            SHA256SUMS \
+            --title "$TAG" \
+            --notes "$CHANGELOG"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Release: ${{ env.COMPONENT }} ${{ needs.version.outputs.tag }}"
+            echo ""
+            echo "**Version:** ${{ needs.version.outputs.version }}"
+            echo "**Bump:** ${{ needs.version.outputs.bump }}"
+            echo ""
+            echo "### Enterprise binaries (S3 + GCS)"
+            echo "- \`s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ needs.version.outputs.version }}/dbmazz-linux-{amd64,arm64}\`"
+            echo "- \`gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ needs.version.outputs.version }}/dbmazz-linux-{amd64,arm64}\`"
+            echo ""
+            echo "### Docker image (GHCR, multi-arch)"
+            echo "- \`${{ env.GHCR_IMAGE }}:${{ needs.version.outputs.version }}\`"
+            echo "- \`${{ env.GHCR_IMAGE }}:latest\`"
+            echo ""
+            echo "### GitHub Release"
+            echo "- ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.version.outputs.tag }}"
+            echo ""
+            echo "### Changelog"
+            echo "${{ needs.version.outputs.changelog }}"
+          } >> "$GITHUB_STEP_SUMMARY"
