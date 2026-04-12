@@ -111,8 +111,22 @@ pub fn load_store(config_path: &Path) -> anyhow::Result<DatasourceStore> {
     Ok(store)
 }
 
-/// The fixed image name for the dbmazz daemon container.
-pub const DBMAZZ_IMAGE: &str = "ez-cdc-dbmazz:latest";
+/// Returns the dbmazz image reference to use.
+///
+/// By default this pins the image to the CLI's own version so a
+/// `v1.6.0` CLI always pulls `ghcr.io/ez-cdc/dbmazz:1.6.0`. The
+/// workflow patches `e2e-cli/Cargo.toml` with the calculated release
+/// version before building, so `CARGO_PKG_VERSION` is always aligned
+/// with the image tag that docker-publish has already pushed.
+///
+/// For local dev without a matching release (e.g. testing a patched
+/// daemon), set `DBMAZZ_IMAGE=my-local-image:dev` to override.
+pub fn dbmazz_image() -> String {
+    std::env::var("DBMAZZ_IMAGE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("ghcr.io/ez-cdc/dbmazz:{}", env!("CARGO_PKG_VERSION")))
+}
 
 /// Check if a Docker image exists locally.
 pub fn docker_image_exists(image: &str) -> bool {
@@ -125,50 +139,35 @@ pub fn docker_image_exists(image: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the minimal runtime Docker image (just libs, no compiler).
-/// The dbmazz binary is mounted at runtime, not baked into the image.
-/// This takes ~5s on first run, instant afterwards (cached).
-pub fn build_dbmazz_image() -> anyhow::Result<()> {
-    let dockerfile = crate::paths::CLI_DIR.join("Dockerfile.runtime");
-
+/// Pull the dbmazz image from its registry.
+fn pull_dbmazz_image(image: &str) -> anyhow::Result<()> {
     let status = std::process::Command::new("docker")
-        .args([
-            "build",
-            "-t", DBMAZZ_IMAGE,
-            "-f", &dockerfile.to_string_lossy(),
-            // Context is the Dockerfile dir (no source code needed)
-            &crate::paths::CLI_DIR.to_string_lossy(),
-        ])
+        .args(["pull", image])
         .status()
-        .map_err(|e| anyhow::anyhow!("failed to run docker build: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to run docker pull: {e}"))?;
 
     if !status.success() {
-        anyhow::bail!("docker build failed (exit {:?})", status.code());
-    }
-    Ok(())
-}
-
-/// Check that the pre-compiled Linux binary exists in `e2e-cli/bin/`.
-pub fn check_linux_binary() -> anyhow::Result<()> {
-    let bin = &*crate::paths::LINUX_BINARY;
-    if !bin.exists() {
         anyhow::bail!(
-            "Linux binary not found at {}\n  \
-             Build it with: cross build --release --target x86_64-unknown-linux-gnu --features http-api\n  \
-             Then copy to: cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64",
-            bin.display()
+            "docker pull {} failed (exit {:?}).\n  \
+             If you are testing a local image, set DBMAZZ_IMAGE to its tag.",
+            image,
+            status.code()
         );
     }
     Ok(())
 }
 
-/// Ensure the dbmazz image exists, building it if needed.
-/// Returns Ok(true) if a build was triggered, Ok(false) if cached.
-pub fn ensure_dbmazz_image(force_rebuild: bool) -> anyhow::Result<bool> {
-    if !force_rebuild && docker_image_exists(DBMAZZ_IMAGE) {
+/// Ensure the dbmazz image is available locally, pulling it if needed.
+///
+/// Returns `Ok(true)` if a pull was triggered, `Ok(false)` if the image
+/// was already present. When `force_pull` is true, always pulls even
+/// when the image exists locally.
+pub fn ensure_dbmazz_image(force_pull: bool) -> anyhow::Result<bool> {
+    let image = dbmazz_image();
+    if !force_pull && docker_image_exists(&image) {
         return Ok(false);
     }
-    build_dbmazz_image()?;
+    pull_dbmazz_image(&image)?;
     Ok(true)
 }
 

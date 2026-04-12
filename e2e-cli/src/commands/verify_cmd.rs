@@ -5,7 +5,7 @@ use std::time::Duration;
 use console::style;
 
 use crate::clients::dbmazz::DbmazzClient;
-use crate::commands::{check_linux_binary, ensure_dbmazz_image, load_store, resolve_pair};
+use crate::commands::{dbmazz_image, ensure_dbmazz_image, load_store, resolve_pair};
 use crate::compose::{builder, runner};
 use crate::preflight;
 use crate::tui::report::{print_report_summary, print_step, print_tier_header, report_to_json};
@@ -51,11 +51,14 @@ pub async fn run_verify(
 
     // Step 2: ensure the dbmazz Docker image exists, then start the container.
     let compose_path = if !no_up {
-        // Ensure Linux binary exists (cross-compiled) and runtime image is ready.
-        check_linux_binary()?;
-        let built = ensure_dbmazz_image(rebuild)?;
-        if built {
-            println!("    {} dbmazz runtime image built", style("✓").green());
+        // Ensure the official dbmazz image is available locally.
+        let pulled = ensure_dbmazz_image(rebuild)?;
+        if pulled {
+            println!(
+                "    {} dbmazz image pulled ({})",
+                style("✓").green(),
+                dbmazz_image(),
+            );
         }
 
         let (compose_path, _env_path) = builder::build_compose_for_pair(

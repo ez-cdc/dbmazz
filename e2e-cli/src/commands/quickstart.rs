@@ -4,7 +4,7 @@ use std::time::Duration;
 use console::style;
 
 use crate::clients::dbmazz::DbmazzClient;
-use crate::commands::{check_linux_binary, ensure_dbmazz_image, load_store, resolve_pair};
+use crate::commands::{dbmazz_image, ensure_dbmazz_image, load_store, resolve_pair};
 use crate::compose::{builder, runner};
 use crate::instantiate::instantiate_backend;
 use crate::preflight;
@@ -41,11 +41,14 @@ pub async fn run_quickstart(
         );
     }
 
-    // Step 2: ensure image + start container.
-    check_linux_binary()?;
-    let built = ensure_dbmazz_image(rebuild)?;
-    if built {
-        println!("    {} dbmazz runtime image built", style("✓").green());
+    // Step 2: ensure the dbmazz image is available, then start the container.
+    let pulled = ensure_dbmazz_image(rebuild)?;
+    if pulled {
+        println!(
+            "    {} dbmazz image pulled ({})",
+            style("✓").green(),
+            dbmazz_image(),
+        );
     }
 
     let (compose_path, _env_path) = builder::build_compose_for_pair(

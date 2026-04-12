@@ -410,16 +410,11 @@ fn build_dbmazz_service(source: &SourceSpec, sink: &SinkSpec) -> serde_json::Map
         SinkSpec::Snowflake(_) => {}
     }
 
-    // Mount the pre-compiled Linux binary into a minimal runtime container.
-    // Binary: e2e-cli/bin/dbmazz-linux-amd64 (shipped with the repo)
-    // Image: ez-cdc-dbmazz:latest (just runtime libs, no build tools)
-    let linux_binary = &*paths::LINUX_BINARY;
-
+    // Use the official dbmazz image from GHCR. The version is pinned to
+    // the CLI's own CARGO_PKG_VERSION, overridable via the DBMAZZ_IMAGE
+    // env var for local-dev testing of patched daemons.
     let mut service = serde_json::Map::new();
-    service.insert("image".into(), serde_json::json!("ez-cdc-dbmazz:latest"));
-    service.insert("volumes".into(), serde_json::json!([
-        format!("{}:/usr/local/bin/dbmazz:ro", linux_binary.display()),
-    ]));
+    service.insert("image".into(), serde_json::json!(crate::commands::dbmazz_image()));
     service.insert("ports".into(), serde_json::json!(["8080:8080", "50051:50051"]));
     service.insert("env_file".into(), serde_json::json!([".env"]));
     service.insert("restart".into(), serde_json::json!("unless-stopped"));
