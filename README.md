@@ -42,22 +42,31 @@ EZ_CDC_INSTALL_DIR=/opt/bin curl -sSL .../install.sh | sh
 
 ## 🚀 Quickstart
 
-Launch a live CDC dashboard in 2 commands:
-
 ```bash
-ez-cdc datasource init                                      # create demo config
-ez-cdc quickstart --source demo-pg --sink demo-starrocks    # start everything + dashboard
+ez-cdc datasource init                  # write ~/.config/ez-cdc/config.yaml
+ez-cdc datasource add                   # guided wizard to add a source and a sink
+ez-cdc quickstart --source <name> --sink <name>
 ```
 
+`datasource init` writes a blank config with every dbmazz option
+documented inline and comments for every source/sink type. You can
+edit it by hand or use the `datasource add` wizard.
+
 `quickstart` pulls the official `ghcr.io/ez-cdc/dbmazz` image from
-GHCR, starts the infra containers, runs snapshot + CDC replication,
-and opens a live terminal dashboard showing throughput, lag, and
+GHCR, starts the containers, runs snapshot + CDC replication, and
+opens a live terminal dashboard showing throughput, lag, and
 source/target row counts in real time. Press `t` to generate traffic,
 `q` to quit.
 
 > Docker must be running. StarRocks takes ~60s to initialize on first
 > run. To test a patched daemon locally, set `DBMAZZ_IMAGE=my-tag:dev`
 > before running `ez-cdc`.
+>
+> Config location: `$XDG_CONFIG_HOME/ez-cdc/config.yaml` (or
+> `~/.config/ez-cdc/config.yaml`). Override with `--config PATH` or
+> `$EZ_CDC_CONFIG`. If you are running from inside a clone of this
+> repo, `./ez-cdc.yaml` in the working directory still works as a
+> fallback.
 
 ### Use your own databases
 

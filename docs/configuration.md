@@ -6,6 +6,12 @@ build, so all variables are optional — you can configure everything from the
 browser. For minimal builds made with `--no-default-features` (no HTTP API),
 variables marked **required** must be provided via environment.
 
+If you are using the `ez-cdc` CLI, most of these variables are set for you
+from an `ez-cdc.yaml` file. Run `ez-cdc datasource init` to create one with
+every option documented inline. The default location is
+`$XDG_CONFIG_HOME/ez-cdc/config.yaml` (on macOS and Linux). Override with
+`--config PATH` or `$EZ_CDC_CONFIG`.
+
 ## Source (PostgreSQL)
 
 | Variable | Default | Description |

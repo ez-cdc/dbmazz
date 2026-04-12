@@ -230,7 +230,31 @@ main() {
         info "Verifying installation"
         "$BINARY_NAME" --version || warn "'$BINARY_NAME --version' did not succeed — binary may still work"
     fi
-    info "Done. Run '${BINARY_NAME} --help' to get started."
+
+    # --- Next steps -----------------------------------------------------
+    # Default config path follows XDG: $XDG_CONFIG_HOME/ez-cdc/config.yaml
+    # (falls back to $HOME/.config/ez-cdc/config.yaml when the env var is
+    # unset). Keep this message in sync with `resolve_config_path` in
+    # `e2e-cli/src/main.rs`.
+    xdg_base="${XDG_CONFIG_HOME:-${HOME}/.config}"
+    config_path="${xdg_base}/ez-cdc/config.yaml"
+
+    printf '\n'
+    printf '\033[1;32m==>\033[0m Next steps\n'
+    printf '\n'
+    printf '    1. Create a starter config with every dbmazz option documented:\n'
+    printf '       \033[36mez-cdc datasource init\033[0m\n'
+    printf '       → writes %s\n' "$config_path"
+    printf '\n'
+    printf '    2. Either edit the file by hand, or add datasources interactively:\n'
+    printf '       \033[36mez-cdc datasource add\033[0m\n'
+    printf '\n'
+    printf '    3. Validate a connection and run a pipeline end-to-end:\n'
+    printf '       \033[36mez-cdc datasource test <name>\033[0m\n'
+    printf '       \033[36mez-cdc quickstart --source <name> --sink <name>\033[0m\n'
+    printf '\n'
+    printf '    Docs: https://github.com/%s\n' "$GITHUB_REPO"
+    printf '\n'
 }
 
 main "$@"

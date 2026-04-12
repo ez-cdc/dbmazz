@@ -219,6 +219,12 @@ ez-cdc quickstart                          # interactive prompts if TTY
 ez-cdc quickstart --source demo-pg --sink demo-starrocks --keep-up
 ```
 
+Config file location (unless overridden with `--config PATH` or
+`$EZ_CDC_CONFIG`):
+- `$XDG_CONFIG_HOME/ez-cdc/config.yaml`, or
+- `~/.config/ez-cdc/config.yaml`, or
+- `./ez-cdc.yaml` in the current directory (legacy in-repo dev fallback)
+
 Steps performed:
 1. Connectivity preflight check against source and sink.
 2. Pull the official `ghcr.io/ez-cdc/dbmazz:<version>` image from GHCR
@@ -365,15 +371,26 @@ ez-cdc datasource remove my-old-sink
 ez-cdc datasource remove my-old-sink --yes
 ```
 
-#### `ez-cdc datasource init`
+#### `ez-cdc datasource init [--template {blank|demo}]`
 
-Populate `ez-cdc.yaml` with the two demo datasources (`demo-pg` and
-`demo-starrocks`) pre-configured for the Docker-managed containers. Safe
-to run on an existing config — existing entries are not overwritten.
+Create a starter config file at the resolved config path (default
+`$XDG_CONFIG_HOME/ez-cdc/config.yaml`). Refuses to overwrite an
+existing file.
 
 ```
-ez-cdc datasource init
+ez-cdc datasource init                     # default: blank template
+ez-cdc datasource init --template blank    # explicit blank
+ez-cdc datasource init --template demo     # in-repo demos (dev/e2e)
 ```
+
+`--template blank` (default) writes a fully commented template with
+every dbmazz option inline plus commented examples for PostgreSQL,
+StarRocks, PostgreSQL target, and Snowflake sinks. Edit it by hand
+or follow up with `ez-cdc datasource add` for a guided wizard.
+
+`--template demo` adds the in-repo `demo-pg` + `demo-starrocks`
+(or `demo-pg-target`) datasources used by the e2e test harness.
+Only useful when running inside a clone of this repo.
 
 ---
 

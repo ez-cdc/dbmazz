@@ -12,7 +12,7 @@ pub async fn run_up(config_path: &Path, rebuild: bool) -> anyhow::Result<()> {
 
     if !data.has_any() {
         anyhow::bail!(
-            "no datasources configured. Run `ez-cdc datasource init` to add demo datasources."
+            "no datasources configured. Run `ez-cdc datasource init` for a starter config, then `ez-cdc datasource add` to add one."
         );
     }
 

@@ -23,9 +23,62 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Path to config file
-    #[arg(long, global = true, default_value = "ez-cdc.yaml")]
-    config: std::path::PathBuf,
+    /// Path to config file (overrides $EZ_CDC_CONFIG and the default
+    /// location at `$XDG_CONFIG_HOME/ez-cdc/config.yaml`).
+    #[arg(long, short = 'c', global = true)]
+    config: Option<std::path::PathBuf>,
+}
+
+/// Resolve the config file path using this precedence:
+///
+/// 1. `--config PATH` flag (explicit)
+/// 2. `$EZ_CDC_CONFIG` env var
+/// 3. `$XDG_CONFIG_HOME/ez-cdc/config.yaml` (or `$HOME/.config/ez-cdc/config.yaml`)
+/// 4. `./ez-cdc.yaml` in the current working directory — only as a
+///    fallback when nothing else is defined, for backwards
+///    compatibility with the in-repo dev workflow.
+///
+/// Note: the path is returned regardless of whether the file exists.
+/// Callers that need the file present must check existence themselves.
+fn resolve_config_path(flag: Option<std::path::PathBuf>) -> std::path::PathBuf {
+    if let Some(p) = flag {
+        return p;
+    }
+    if let Ok(env) = std::env::var("EZ_CDC_CONFIG") {
+        if !env.is_empty() {
+            return std::path::PathBuf::from(env);
+        }
+    }
+    let xdg_path = xdg_config_path();
+    let cwd_path = std::path::PathBuf::from("ez-cdc.yaml");
+    // Backwards compat: if we are running inside a clone of the repo
+    // and there is already a local `ez-cdc.yaml` but no XDG one, keep
+    // using the local file so existing in-repo workflows are not
+    // disrupted. Once the XDG file exists, it takes precedence.
+    if cwd_path.exists() && !xdg_path.exists() {
+        return cwd_path;
+    }
+    xdg_path
+}
+
+/// Compute the XDG-style default config path.
+///
+/// Follows the XDG Base Directory Specification on Linux, and uses
+/// the same `$HOME/.config/...` layout on macOS (matching `gh`,
+/// `fly`, `pulumi`, and other modern CLIs).
+fn xdg_config_path() -> std::path::PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("ez-cdc").join("config.yaml")
 }
 
 #[derive(Subcommand)]
@@ -147,8 +200,24 @@ enum DsCommands {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Initialize demo datasources
-    Init,
+    /// Create a starter ez-cdc.yaml. Default writes a fully-commented
+    /// template; use `--template demo` to add the in-repo demo
+    /// datasources instead.
+    Init {
+        /// Which template to write.
+        #[arg(long, value_enum, default_value = "blank")]
+        template: TemplateKind,
+    },
+}
+
+#[derive(Clone, Debug, clap::ValueEnum)]
+enum TemplateKind {
+    /// Empty template with all dbmazz variables documented and
+    /// commented examples for every supported source and sink type.
+    Blank,
+    /// In-repo demo datasources (postgres + starrocks/postgres target)
+    /// used by the e2e test harness.
+    Demo,
 }
 
 #[tokio::main]
@@ -156,7 +225,7 @@ async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
     let cli = Cli::parse();
-    let config_path = cli.config;
+    let config_path = resolve_config_path(cli.config);
 
     match cli.command {
         Some(cmd) => {
@@ -225,8 +294,12 @@ async fn main() -> color_eyre::Result<()> {
                     DsCommands::Remove { name, yes } => {
                         commands::datasource::run_ds_remove(&config_path, &name, yes)
                     }
-                    DsCommands::Init => {
-                        commands::datasource::run_ds_init(&config_path)
+                    DsCommands::Init { template } => {
+                        let kind = match template {
+                            TemplateKind::Blank => commands::datasource::InitTemplate::Blank,
+                            TemplateKind::Demo => commands::datasource::InitTemplate::Demo,
+                        };
+                        commands::datasource::run_ds_init(&config_path, kind)
                     }
                 },
                 Commands::Status => {
@@ -339,7 +412,10 @@ async fn run_interactive_menu(config_path: &std::path::Path) -> color_eyre::Resu
 
         let result: anyhow::Result<()> = match choice.as_str() {
             "init" => {
-                let r = commands::datasource::run_ds_init(config_path);
+                let r = commands::datasource::run_ds_init(
+                    config_path,
+                    commands::datasource::InitTemplate::Blank,
+                );
                 // After init, loop back to show the updated menu.
                 if r.is_ok() {
                     println!();
@@ -387,7 +463,7 @@ async fn run_datasource_submenu(config_path: &std::path::Path) -> anyhow::Result
         ("show".into(), "Show details".into(), "View config of a datasource".into()),
         ("test".into(), "Test connection".into(), "Verify connectivity to a datasource".into()),
         ("remove".into(), "Remove datasource".into(), "Delete a datasource".into()),
-        ("init".into(), "Init demos".into(), "Create demo datasources (StarRocks + PG)".into()),
+        ("init".into(), "Init config".into(), "Create a blank ez-cdc.yaml with all options documented".into()),
     ];
 
     let ds_choice = match tui::prompts::select("Datasource management:", ds_choices) {
@@ -398,7 +474,10 @@ async fn run_datasource_submenu(config_path: &std::path::Path) -> anyhow::Result
     match ds_choice.as_str() {
         "list" => commands::datasource::run_ds_list(config_path)?,
         "add" => commands::datasource::run_ds_add(config_path)?,
-        "init" => commands::datasource::run_ds_init(config_path)?,
+        "init" => commands::datasource::run_ds_init(
+            config_path,
+            commands::datasource::InitTemplate::Blank,
+        )?,
         "show" => {
             let name = pick_datasource(config_path, "Show which datasource?")?;
             if let Some(name) = name {

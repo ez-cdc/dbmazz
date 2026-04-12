@@ -17,8 +17,9 @@ pub fn run_ds_list(config_path: &Path) -> anyhow::Result<()> {
     if data.is_empty() {
         println!("  No datasources configured.");
         println!(
-            "  Run {} to add demo datasources.",
-            style("ez-cdc datasource init").bold()
+            "  Edit {} or run {} for a wizard.",
+            style(config_path.display()).bold(),
+            style("ez-cdc datasource add").cyan()
         );
         return Ok(());
     }
@@ -485,8 +486,67 @@ pub fn run_ds_remove(config_path: &Path, name: &str, yes: bool) -> anyhow::Resul
 }
 
 /// `ez-cdc datasource init`
-pub fn run_ds_init(config_path: &Path) -> anyhow::Result<()> {
+/// Which template `ez-cdc datasource init` should write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitTemplate {
+    /// Empty template with every dbmazz variable documented inline.
+    Blank,
+    /// In-repo demo datasources (used by the e2e test harness).
+    Demo,
+}
+
+/// The embedded blank template written by `datasource init --template blank`.
+/// Shipped inside the binary via `include_str!` so the CLI is self-contained
+/// even when installed from a GitHub release.
+const BLANK_TEMPLATE: &str = include_str!("../../templates/config-blank.yaml");
+
+fn write_blank_template(config_path: &Path) -> anyhow::Result<()> {
+    if config_path.exists() {
+        anyhow::bail!(
+            "config file already exists at {}\n  \
+             refusing to overwrite. Edit it by hand or run \
+             `ez-cdc datasource add` to extend it.",
+            config_path.display()
+        );
+    }
+    if let Some(parent) = config_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("failed to create config dir {}: {e}", parent.display())
+            })?;
+        }
+    }
+    std::fs::write(config_path, BLANK_TEMPLATE).map_err(|e| {
+        anyhow::anyhow!("failed to write template to {}: {e}", config_path.display())
+    })?;
+    Ok(())
+}
+
+pub fn run_ds_init(config_path: &Path, template: InitTemplate) -> anyhow::Result<()> {
     use crate::config::presets::DemoSink;
+
+    if template == InitTemplate::Blank {
+        write_blank_template(config_path)?;
+        println!();
+        println!(
+            "  {} Config written to {}",
+            style("✓").green().bold(),
+            style(config_path.display()).bold()
+        );
+        println!();
+        println!("  Next steps:");
+        println!(
+            "    {} Edit the file by hand, or",
+            style("→").dim()
+        );
+        println!(
+            "    {} Run {} for an interactive wizard",
+            style("→").dim(),
+            style("ez-cdc datasource add").cyan()
+        );
+        println!();
+        return Ok(());
+    }
 
     let mut store = load_store_or_empty(config_path)?;
 

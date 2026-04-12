@@ -29,12 +29,12 @@ pub fn resolve_pair(
 
     if src_names.is_empty() {
         anyhow::bail!(
-            "no sources configured. Run `ez-cdc datasource init` to add demo datasources."
+            "no sources configured. Run `ez-cdc datasource init` for a starter config, then `ez-cdc datasource add` to add one."
         );
     }
     if sk_names.is_empty() {
         anyhow::bail!(
-            "no sinks configured. Run `ez-cdc datasource init` to add demo datasources."
+            "no sinks configured. Run `ez-cdc datasource init` for a starter config, then `ez-cdc datasource add` to add one."
         );
     }
 

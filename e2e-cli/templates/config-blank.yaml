@@ -1,0 +1,251 @@
+# ez-cdc configuration
+#
+# This file is managed by `ez-cdc datasource` commands. You can also
+# edit it by hand — `${VAR}` interpolation is supported for credentials.
+#
+# Full documentation:
+#   https://github.com/ez-cdc/dbmazz/blob/main/docs/configuration.md
+#   https://github.com/ez-cdc/dbmazz/blob/main/docs/production-deployment.md
+#
+# Every field below includes the name of the dbmazz environment variable
+# it maps to, so you can cross-reference with the upstream daemon docs.
+
+# ─────────────────────────────────────────────────────────────────────
+# Pipeline settings
+#
+# These values are applied globally to every pipeline started by the
+# CLI. They map 1:1 to environment variables the dbmazz daemon reads
+# on startup.
+# ─────────────────────────────────────────────────────────────────────
+settings:
+
+  # ── Batching ────────────────────────────────────────────────────────
+  # How many events to buffer before flushing to the sink. Lower values
+  # reduce latency; higher values improve throughput on fast sinks.
+  # Maps to FLUSH_SIZE.
+  flush_size: 10000
+
+  # Max time (ms) a batch can accumulate before being flushed, even if
+  # `flush_size` is not reached. The smaller of the two wins.
+  # Maps to FLUSH_INTERVAL_MS.
+  flush_interval_ms: 5000
+
+  # ── Snapshot / backfill ─────────────────────────────────────────────
+  # Run a full initial snapshot of the source tables before entering
+  # CDC mode. Required on the first run if the target is empty; safe
+  # to leave true afterwards thanks to watermark-based dedup.
+  # Maps to DO_SNAPSHOT.
+  do_snapshot: true
+
+  # Number of rows per snapshot chunk. Larger chunks = fewer round
+  # trips but more memory per worker. Tune for wide tables.
+  # Maps to SNAPSHOT_CHUNK_SIZE.
+  snapshot_chunk_size: 50000
+
+  # Parallel snapshot workers. Each worker holds one PG connection
+  # and its own sink instance. Reserved for future concurrent impl;
+  # snapshots are currently sequential regardless of this value.
+  # Maps to SNAPSHOT_PARALLEL_WORKERS.
+  snapshot_parallel_workers: 2
+
+  # If true, dbmazz exits after snapshot completes — no CDC phase.
+  # Useful for one-off backfills. Normally false.
+  # Maps to INITIAL_SNAPSHOT_ONLY.
+  initial_snapshot_only: false
+
+  # ── Logging ─────────────────────────────────────────────────────────
+  # Log level. Accepts env_logger / tracing_subscriber syntax:
+  #   info, debug, warn, error, trace
+  #   dbmazz=trace,tokio_postgres=warn   (per-crate filters)
+  # Maps to RUST_LOG.
+  rust_log: info
+
+  # ── Snowflake tuning (only used when a sink.type == snowflake) ──────
+  # Trigger a COPY INTO after this many Parquet files have accumulated.
+  # Lower values = more frequent loads, higher overhead. Raise for
+  # bulk throughput on stable pipelines.
+  # Maps to SINK_SNOWFLAKE_FLUSH_FILES.
+  # snowflake_flush_files: 20
+
+  # Trigger a COPY INTO after this many bytes have accumulated across
+  # staged files. Default is 100 MB. Whichever threshold hits first
+  # wins (files or bytes).
+  # Maps to SINK_SNOWFLAKE_FLUSH_BYTES.
+  # snowflake_flush_bytes: 104857600
+
+# ─────────────────────────────────────────────────────────────────────
+# Sources — what we read FROM
+#
+# Currently supported source types:
+#   - postgres   (logical replication via pgoutput)
+#
+# Uncomment the example below, rename it, and edit to match your source.
+# You can define multiple sources; pick one per pipeline with
+# `ez-cdc quickstart --source <name> ...`.
+# ─────────────────────────────────────────────────────────────────────
+sources: {}
+
+# Example PostgreSQL source — copy, uncomment, and edit:
+#
+# sources:
+#   my-pg:
+#     type: postgres
+#
+#     # PostgreSQL connection URL. Must include `?replication=database`
+#     # so the driver opens a replication connection for pgoutput.
+#     # Use ${VAR} to avoid hardcoding credentials — the CLI expands
+#     # env vars at launch time.
+#     # Maps to SOURCE_URL.
+#     url: postgres://app_user:${PG_PASSWORD}@db.internal:5432/mydb?replication=database
+#
+#     # Tables to replicate. Each must exist in the source schema; the
+#     # daemon verifies this on startup and fails fast if any is missing.
+#     # Maps to TABLES (comma-joined).
+#     tables:
+#       - orders
+#       - order_items
+#       - customers
+#
+#     # Logical replication slot name. Auto-created if it does not
+#     # exist. Renaming after the first run will trigger a fresh start
+#     # (and lose position unless you also migrate the slot manually).
+#     # Maps to SOURCE_SLOT_NAME.
+#     replication_slot: dbmazz_slot
+#
+#     # Publication name. Auto-created if it does not exist. Contains
+#     # the tables listed above.
+#     # Maps to SOURCE_PUBLICATION_NAME.
+#     publication: dbmazz_pub
+
+# ─────────────────────────────────────────────────────────────────────
+# Sinks — what we write TO
+#
+# Supported sink types:
+#   - starrocks  (Stream Load HTTP API + libcurl)
+#   - postgres   (COPY → raw table → MERGE normalizer)
+#   - snowflake  (Parquet → PUT stage → COPY INTO → MERGE normalizer)
+#
+# Uncomment the example for the sink you want and edit it. You can
+# define multiple sinks of different types in the same file.
+# ─────────────────────────────────────────────────────────────────────
+sinks: {}
+
+# ── Example: StarRocks sink ──────────────────────────────────────────
+#
+# sinks:
+#   my-starrocks:
+#     type: starrocks
+#
+#     # StarRocks FE HTTP URL. Stream Load requests are posted here
+#     # and may be redirected (HTTP 307) to a BE internally — dbmazz
+#     # follows those redirects automatically.
+#     # Maps to SINK_URL.
+#     url: http://starrocks-fe.internal:8030
+#
+#     # StarRocks FE MySQL protocol port. Used for DDL (CREATE TABLE,
+#     # ALTER TABLE) and schema inspection. Not used for row writes.
+#     # Maps to SINK_PORT.
+#     mysql_port: 9030
+#
+#     # Target database name. Must already exist, or the daemon will
+#     # create the tables inside whatever database exists.
+#     # Maps to SINK_DATABASE.
+#     database: analytics
+#
+#     # Credentials. Use ${VAR} for secrets.
+#     # Maps to SINK_USER / SINK_PASSWORD.
+#     user: root
+#     password: ${SR_PASSWORD}
+
+# ── Example: PostgreSQL target sink ──────────────────────────────────
+#
+# sinks:
+#   my-pg-target:
+#     type: postgres
+#
+#     # Target PostgreSQL connection URL. Plain connection (no
+#     # replication). The user needs CREATE TABLE + SELECT/INSERT/
+#     # UPDATE/DELETE on the target schema.
+#     # Maps to SINK_URL.
+#     url: postgres://etl_user:${PG_TARGET_PASSWORD}@warehouse.internal:5432/analytics
+#
+#     # Target database name.
+#     # Maps to SINK_DATABASE.
+#     database: analytics
+#
+#     # Target schema. Defaults to `public`.
+#     # Maps to SINK_SCHEMA.
+#     schema: public
+
+# ── Example: Snowflake sink ──────────────────────────────────────────
+#
+# sinks:
+#   my-snowflake:
+#     type: snowflake
+#
+#     # Snowflake account identifier. Either just the ID
+#     # (e.g. `xy12345.us-east-1`) or the full hostname
+#     # (e.g. `xy12345.us-east-1.snowflakecomputing.com`). dbmazz
+#     # normalizes both forms.
+#     # Maps to SINK_SNOWFLAKE_ACCOUNT.
+#     account: xy12345.us-east-1
+#
+#     # Warehouse that will run the COPY INTO and MERGE statements.
+#     # A small warehouse is enough for typical pipelines; scale up
+#     # only if MERGE becomes the bottleneck.
+#     # Maps to SINK_SNOWFLAKE_WAREHOUSE.
+#     warehouse: LOAD_WH
+#
+#     # Target database. Snowflake is case-sensitive by default;
+#     # using uppercase matches the Snowflake convention.
+#     # Maps to SINK_DATABASE.
+#     database: ANALYTICS
+#
+#     # Target schema for the final tables. Raw tables live in a
+#     # separate TRANSIENT schema created automatically.
+#     # Maps to SINK_SCHEMA.
+#     schema: PUBLIC
+#
+#     # Role to assume with USE ROLE on every session. Optional.
+#     # Maps to SINK_SNOWFLAKE_ROLE.
+#     # role: LOAD_ROLE
+#
+#     # ── Authentication ────────────────────────────────────────────
+#     # Preferred: JWT key-pair auth. Generate with:
+#     #   openssl genrsa 2048 | openssl pkcs8 -topk8 -v2 des3 -out snowflake.p8
+#     # and register the public key on the Snowflake user. Then set:
+#     # Maps to SINK_SNOWFLAKE_PRIVATE_KEY_PATH.
+#     # private_key_path: /etc/ez-cdc/snowflake.p8
+#     #
+#     # If the key is encrypted, also set the passphrase via
+#     # environment variable (no YAML mapping):
+#     #   SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=...
+#
+#     # Fallback: username + password. Not recommended for production.
+#     # Maps to SINK_USER / SINK_PASSWORD.
+#     user: LOAD_USER
+#     password: ${SF_PASSWORD}
+#
+#     # Soft delete: true = deletes become rows marked
+#     # `_DBMAZZ_IS_DELETED=true`; false = rows are physically removed
+#     # via MERGE DELETE. Soft delete is friendlier for downstream
+#     # analytics. Default: true.
+#     # Maps to SINK_SNOWFLAKE_SOFT_DELETE.
+#     soft_delete: true
+
+# ─────────────────────────────────────────────────────────────────────
+# Advanced — environment-only variables (no YAML mapping)
+#
+# The following dbmazz variables cannot be set via this file. Export
+# them in the environment where you run `ez-cdc` and they will be
+# passed through to the dbmazz container.
+#
+#   SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE  Passphrase for an encrypted
+#                                          Snowflake private key.
+#   SINK_SNOWFLAKE_MERGE_INTERVAL_MS       Normalizer MERGE polling
+#                                          interval (default 30000).
+#   GRPC_PORT                              dbmazz gRPC port
+#                                          (default 50051).
+#   HTTP_API_PORT                          dbmazz HTTP API port
+#                                          (default 8080).
+# ─────────────────────────────────────────────────────────────────────
