@@ -35,6 +35,7 @@ How dbmazz compares to other open-source CDC tools on **resource footprint** and
 |  | **dbmazz** | Debezium (standard) | PeerDB | Airbyte | Sequin |
 |---|---|---|---|---|---|
 | **Language / runtime** | Rust (static binary) | Java / JVM | Go + Temporal | Java / Python | Elixir / BEAM |
+| **Replication mode** | **Real-time CDC** (sub-second WAL streaming) | Real-time CDC (sub-second WAL streaming) | Near-real-time (~10 s freshness at high throughput) | **Batch ETL** (scheduled syncs, minutes – hours) | Real-time CDC (~55 ms p50) |
 | **Components for one PG → sink pipeline** | **1** (single binary) | 2–7 (JVM + Kafka + …) | 3–4 (Server + Postgres + Temporal) | 7–10+ (microservices) | 2 (Container + Postgres) |
 | **External dependencies** | **none** | Kafka, ZooKeeper | Temporal, MinIO / S3 | Postgres, Temporal, scheduler | Postgres |
 | **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 48–64 GB (enterprise tier) | 8 GB+ minimum recommended | not published |
@@ -52,7 +53,7 @@ Each tool optimizes for different things — see [where dbmazz is *not* the righ
 
 ## What is dbmazz?
 
-dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in near-real time. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry.
+dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
 
 The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
 
@@ -76,6 +77,7 @@ dbmazz is the alternative to running a streaming platform: a single Rust binary 
 
 ### Where dbmazz wins
 
+- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. Most tools that *call themselves* "Postgres replication" — Airbyte, Fivetran, Stitch — are actually batch ETL with sync windows of minutes or hours. If freshness matters to your downstream, that's the difference between an *operational replica* and a *day-old data lake*.
 - **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
 - **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between.
 - **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
