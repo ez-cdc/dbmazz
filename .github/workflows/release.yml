@@ -184,6 +184,15 @@ jobs:
           path: target
           key: ${{ runner.os }}-${{ matrix.arch }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Sync dbmazz version with release version
+        shell: bash
+        run: |
+          VERSION=${{ needs.version.outputs.version }}
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
+          rm Cargo.toml.bak
+          echo "Cargo.toml version after sync:"
+          grep "^version" Cargo.toml
+
       - name: Build dbmazz
         env:
           CARGO_TERM_COLOR: always

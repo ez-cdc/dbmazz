@@ -4,6 +4,12 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-04-13
+
+### Fixed
+- **Release pipeline now patches the root `Cargo.toml`** with the calculated release version before compiling `dbmazz`, mirroring the existing behavior for `e2e-cli/Cargo.toml`. Previously the dbmazz binary always reported `1.4.4` (the last manually-bumped version) regardless of the release tag, causing a drift between `git tag`, the GHCR Docker image tag, and `CARGO_PKG_VERSION` baked into the binary.
+- **Synced both `Cargo.toml` files to `1.6.3`** to align source-of-truth with the latest published release tag (`v1.6.2`). After this PR, every release patches the version at build time, so manual sync is no longer required.
+
 ### Added
 - **Official Docker image on GHCR** (`ghcr.io/ez-cdc/dbmazz`)
   - Multi-arch manifest with `linux/amd64` and `linux/arm64`
