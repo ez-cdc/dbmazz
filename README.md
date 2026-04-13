@@ -184,11 +184,23 @@ We published a partial TPC-DS 1 TB snapshot run alongside the source code so you
 
 **Where's the bottleneck?** All 8 vCPUs of the worker are saturated on JSON serialization and gzip compression — the bottleneck is *worker compute*, not PostgreSQL or StarRocks. Larger instances scale further until you hit the source DB's read IOPS ceiling (typically ~12 K IOPS on RDS gp3).
 
-### CDC streaming
+### CDC streaming — per-daemon footprint
 
-We don't publish a formal CDC streaming benchmark **yet**. The architecture is deliberately simple — single replication connection, small in-memory channel, batched sink writes — and steady-state operation is dominated by sink-write latency, not by the daemon.
+In a 3-day production load test, **40 dbmazz daemons ran concurrently on a single ~t3.medium worker** (2 vCPU / 4 GB RAM), split across three workload tiers that differed by 4 orders of magnitude in configured insert rate. Per-daemon footprint was nearly constant across all three tiers:
 
-A reproducible CDC streaming benchmark is on the roadmap and tracked in [issue #71](https://github.com/ez-cdc/dbmazz/issues/71). We'd rather ship a real report than a marketing number.
+| Tier | Configured rate (per source) | Jobs | CPU avg | RSS avg |
+|---|---|:---:|:---:|:---:|
+| **High-rate** | 500–1 000 inserts/sec | 10 | **11.3 millicores** | **11.0 MB** |
+| **Moderate-rate** | 50–100 inserts/sec | 20 | **10.7 millicores** | **10.7 MB** |
+| **Low-rate** | 1–5 inserts/min | 10 | **12.3 millicores** | **10.7 MB** |
+
+> **The headline finding**: dbmazz overhead is **fixed-cost per daemon**, not load-dependent. Whether the source is producing 1 000 inserts/sec or 1 insert/minute, a daemon converges on roughly **1 % of one CPU core and ~11 MB of RSS**. The cost is dominated by holding the replication slot, parsing pgoutput, and maintaining the sink connection — the marginal cost per event is invisible at this scale.
+
+The same worker reported **15 % total CPU and 522 MB total RAM used (12.7 % of capacity)** with all 40 daemons running. dbmazz scales horizontally on a single host: each daemon is an independent Unix process with its own replication slot and sink connection.
+
+Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benchmarks/2026-04-13-cdc-footprint-multitenant.md`](benchmarks/2026-04-13-cdc-footprint-multitenant.md).
+
+**What this does NOT measure**: maximum sustained throughput per daemon (no daemon was anywhere close to saturated), end-to-end lag percentiles (the workload was light enough that lag stayed below the metric's reporting threshold), or behaviour under a sink slowdown. A reproducible single-daemon throughput benchmark with `pgbench`-driven sustained load is tracked in [issue #71](https://github.com/ez-cdc/dbmazz/issues/71).
 
 ---
 
