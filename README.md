@@ -65,11 +65,7 @@ Each tool optimizes for different things. dbmazz optimizes for **resource effici
 
 ## 🤔 Why dbmazz?
 
-### The problem
-
-You need to replicate PostgreSQL into an analytical warehouse, lakehouse, or another database. The incumbent tool — **[Debezium](https://debezium.io/)** — needs Kafka, ZooKeeper, a JVM, a Connect cluster, schema registries, and a small army of YAML to wire it all together. You wanted CDC; you got a distributed system.
-
-For perspective: in a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory used: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Every daemon held its own replication slot, parsed pgoutput, and pushed batched writes to the sink — for **~1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source was producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
+In a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory used: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Every daemon held its own replication slot, parsed pgoutput, and pushed batched writes to the sink — for **~1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source was producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
 
 dbmazz is the alternative to running a streaming platform: a single Rust binary that connects to your Postgres source on one side and your sink on the other. No brokers, no clusters, no orchestration. Run it, point it at two databases, and you're replicating.
 
@@ -170,6 +166,13 @@ The critical invariant: **LSN checkpoints are persisted before being confirmed t
 
 For initial backfill, dbmazz implements the [Flink CDC concurrent snapshot algorithm](https://github.com/apache/flink-cdc): each table is divided into PK-range chunks, processed by N parallel workers, and de-duplicated against the live WAL stream via low/high watermarks emitted with `pg_logical_emit_message`. Snapshot progress is persisted in PostgreSQL, so an interrupted snapshot resumes from the last completed chunk.
 
+### Guarantees
+
+- **At-least-once delivery.** LSN checkpoints are persisted to PostgreSQL *before* being confirmed back to it — never the other way around. After a crash, dbmazz resumes from the last persisted checkpoint; sinks should be idempotent at the primary key.
+- **Transactional ordering preserved.** Events from the same source transaction reach the sink in commit order. Cross-transaction ordering matches the WAL.
+- **Schema evolution detected.** New columns added to source tables are picked up from `pgoutput` Relation messages and propagated to sinks that support `ALTER TABLE ADD COLUMN` automatically (StarRocks, Snowflake). For PostgreSQL sinks, a manual `ALTER` on the target is currently required.
+- **Resumable snapshots.** An interrupted backfill resumes from the last completed PK chunk via state in the `dbmazz_snapshot_state` table.
+
 Full data flow, module map, and design decisions: [`docs/architecture.md`](docs/architecture.md).
 
 ---
@@ -226,7 +229,9 @@ Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benc
 
 ## 🐳 Production deployment
 
-The production path is a Docker container with a pinned version, a restart policy, and secrets in an env file:
+The production path is a pinned Docker container, a restart policy, and secrets pulled from an env file or your secrets manager. dbmazz keeps its LSN checkpoint inside the source PostgreSQL itself, so restarts and version upgrades resume exactly where they left off — no external state store required.
+
+### Plain `docker run`
 
 ```bash
 docker run -d \
@@ -237,21 +242,50 @@ docker run -d \
   ghcr.io/ez-cdc/dbmazz:1
 ```
 
-The official image is published on every release to [GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz). It's multi-arch (`linux/amd64` + `linux/arm64`), runs as non-root, and ships with the HTTP API and gRPC control plane enabled by default.
+### Docker Compose
 
-For Docker Compose, AWS ECS Fargate, secrets management (Secrets Manager / SSM / env files), Prometheus monitoring, and operations (`pause` / `resume` / `drain-stop`), see [`docs/production-deployment.md`](docs/production-deployment.md).
+```yaml
+services:
+  dbmazz:
+    image: ghcr.io/ez-cdc/dbmazz:1
+    container_name: dbmazz
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    env_file: ./dbmazz.env       # gitignored
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+```
+
+### AWS ECS Fargate
+
+A 256 CPU / 512 MB Fargate task is enough for steady-state CDC (Fargate's minimum is the limit, not dbmazz's appetite). Pull `SOURCE_URL` and `SINK_PASSWORD` from Secrets Manager via the task definition's `secrets` block — never put them in `environment`. The full task-definition template is in [`docs/production-deployment.md`](docs/production-deployment.md).
+
+### Image, monitoring, and operations
+
+The official image is published on every release to [GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz). It's multi-arch (`linux/amd64` + `linux/arm64`), runs as non-root, and ships with the HTTP API and gRPC control plane enabled by default. Prometheus scrapes `/metrics/prometheus`; operations (`pause`, `resume`, `drain-stop`) are HTTP `POST`s.
+
+Full deployment guide — Compose with secrets, ECS task definitions, Secrets Manager / SSM patterns, alerting metrics, and operations playbooks: [`docs/production-deployment.md`](docs/production-deployment.md).
 
 ---
 
 ## 👩‍💻 For developers
 
-### Build from source
+### Build and test
 
 ```bash
-cargo build --release
+cargo build --release             # default: all 3 sinks + HTTP API
+cargo test                        # unit + integration
+cargo fmt -- --check
+cargo clippy -- -D warnings
 ```
 
-Default build includes all 3 sinks plus the HTTP API. For a minimal build:
+For a minimal build (without the HTTP API):
 
 ```bash
 cargo build --release --no-default-features \
@@ -260,9 +294,11 @@ cargo build --release --no-default-features \
 
 Requires Rust 1.91.1+ (MSRV pinned by `aws-smithy-async`). System deps: `protobuf-compiler`, `musl-tools`, `pkg-config`, `perl`, `make`.
 
-### Add a new sink
+The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it spins up source and sink containers in Docker, runs dbmazz against them, and validates the result with the 13-check verification harness.
 
-The `Sink` trait is intentionally small — six methods, one with a default — modelled after Kafka Connect:
+### Contributing a new sink
+
+The engine is sink-agnostic. Adding a new sink means implementing one trait — six methods, one with a default — modelled after Kafka Connect:
 
 ```rust
 #[async_trait]
@@ -276,48 +312,30 @@ pub trait Sink: Send + Sync {
 }
 ```
 
-Snapshot and CDC both use `write_batch()` — there is no separate snapshot path. The sink is fully responsible for its loading strategy (Stream Load, `COPY`, S3 staging, `MERGE`, etc.) and the engine doesn't care.
+Snapshot and CDC both go through `write_batch()` — there is no separate snapshot path. The sink owns its loading strategy (Stream Load, `COPY`, S3 staging, `MERGE`, etc.) and the engine doesn't care.
 
-Step-by-step guide: [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
-
-### Run the tests
-
-```bash
-cargo test                        # unit + integration
-cargo fmt -- --check              # formatting
-cargo clippy -- -D warnings       # lints
-```
-
-The end-to-end suite lives in [`e2e-cli/`](e2e-cli/). It wraps Docker, spins up source/sink containers, runs dbmazz against them, and validates the result with the 13-check verification suite. See [`e2e-cli/README.md`](e2e-cli/README.md).
+**Full step-by-step guide**: [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
 
 ---
 
 ## 📖 Reference
 
+The README intentionally keeps just the high-level surface here. For the full specs, follow the links inside each block to the dedicated docs.
+
 <details>
-<summary><strong>⚙️ Configuration (environment variables)</strong></summary>
+<summary><strong>⚙️ Configuration — key environment variables</strong></summary>
 
-Configured via environment variables. See [`docs/configuration.md`](docs/configuration.md) for the full reference.
+The most-used variables. **Full reference (every variable, every sink, every default)**: [`docs/configuration.md`](docs/configuration.md).
 
-| Variable | Default | Description |
-|---|---|---|
-| `SOURCE_URL` | — | PostgreSQL connection string (`?replication=database` required) |
-| `SOURCE_SLOT_NAME` | `dbmazz_slot` | Logical replication slot name |
-| `SOURCE_PUBLICATION_NAME` | `dbmazz_pub` | Publication name |
-| `TABLES` | — | Comma-separated list of tables to replicate |
-| `SINK_TYPE` | `starrocks` | `starrocks` \| `postgres` \| `snowflake` |
-| `SINK_URL` | — | Sink connection URL |
-| `SINK_DATABASE` | — | Target database |
-| `SINK_USER` | `root` | Sink user |
-| `SINK_PASSWORD` | *(empty)* | Sink password |
-| `FLUSH_SIZE` | `10000` | Max events per batch |
-| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
-| `DO_SNAPSHOT` | `false` | Run initial backfill on startup |
-| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
-| `SNAPSHOT_PARALLEL_WORKERS` | `2` | Concurrent snapshot workers |
-| `GRPC_PORT` | `50051` | gRPC server port |
-| `HTTP_API_PORT` | `8080` | HTTP API port |
-| `RUST_LOG` | `info` | Log level |
+| Variable | Required | Description |
+|---|:---:|---|
+| `SOURCE_URL` | yes | PostgreSQL connection string (`?replication=database`) |
+| `TABLES` | yes | Comma-separated list of tables to replicate |
+| `SINK_TYPE` | yes | `starrocks` \| `postgres` \| `snowflake` |
+| `SINK_URL` | yes | Sink connection URL |
+| `SINK_DATABASE` | yes | Target database |
+| `DO_SNAPSHOT` | no | `true` to run initial backfill on first start |
+| `RUST_LOG` | no | Log level (`info`, `debug`, etc.) |
 
 </details>
 
@@ -355,40 +373,7 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapsho
 grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
 ```
 
-Services: `HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`. Full RPC list in [`proto/`](proto/).
-
-</details>
-
-<details>
-<summary><strong>📸 Snapshot / Backfill</strong></summary>
-
-Set `DO_SNAPSHOT=true` to run a full snapshot on startup. dbmazz uses the [Flink CDC concurrent snapshot algorithm](https://nightlies.apache.org/flink/flink-docs-stable/docs/connectors/table/jdbc/#scan-incremental-snapshot):
-
-1. Each table is divided into PK-range chunks.
-2. N parallel workers pick up chunks: emit a low-watermark, `SELECT` the chunk, emit a high-watermark, write to the sink.
-3. The WAL consumer dedups events whose PK falls inside a completed chunk and whose LSN ≤ the chunk's HW.
-
-Progress is persisted in `dbmazz_snapshot_state` in the source DB, so an interrupted snapshot resumes from the last completed chunk.
-
-You can also trigger a snapshot on-demand at any time via gRPC:
-
-```bash
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
-```
-
-</details>
-
-<details>
-<summary><strong>🐳 Docker tags</strong></summary>
-
-The official image is published on every release to GHCR:
-
-```bash
-docker pull ghcr.io/ez-cdc/dbmazz:1.6.3   # exact version (recommended for prod)
-docker pull ghcr.io/ez-cdc/dbmazz:1.6     # latest patch of 1.6
-docker pull ghcr.io/ez-cdc/dbmazz:1       # latest minor of 1
-docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
-```
+Services: `HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`.
 
 </details>
 
