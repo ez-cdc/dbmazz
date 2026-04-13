@@ -454,7 +454,7 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
           CHANGELOG: ${{ needs.version.outputs.changelog }}
         run: |
-          # CHANGELOG is passed via env (not direct ${{ }} interpolation)
+          # CHANGELOG is passed via env (not direct template interpolation)
           # to avoid shell injection when commit messages contain quotes,
           # backticks, $(...), etc.
           gh release create "$TAG" \
