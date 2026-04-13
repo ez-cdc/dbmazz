@@ -39,7 +39,7 @@ How dbmazz compares to other open-source CDC tools on **resource footprint** and
 | **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 48–64 GB (enterprise tier) | 8 GB+ minimum recommended | not published |
 | **Deployment** | `docker run -e SOURCE_URL=… -e SINK_URL=…` | Compose / K8s with multiple services | Docker Compose with Temporal stack | Docker Compose / K8s with microservices | Docker + Postgres |
 
-Each tool optimizes for different things — see [where dbmazz is *not* the right tool](#where-dbmazz-is-not-the-right-tool) below for the honest tradeoffs. The numbers above are from the projects' own documentation:
+Each tool optimizes for different things. dbmazz optimizes for **resource efficiency and operational simplicity**. The numbers above are from each project's own documentation:
 
 - **Debezium**: [official FAQ](https://debezium.io/documentation/faq/) (256 MB – 2 GB typical heap), with 4 GB+ for high-throughput per [RisingWave's deployment guide](https://risingwave.com/blog/debezium-kubernetes-deployment-production/).
 - **PeerDB**: [GitHub issue #2727](https://github.com/PeerDB-io/peerdb/issues/2727) (enterprise flow workers; smaller deployments are not published).
