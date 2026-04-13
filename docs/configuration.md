@@ -1,10 +1,7 @@
 # Configuration Reference
 
 This document lists every environment variable the `dbmazz` daemon reads.
-The HTTP API (with web UI at `http://localhost:8080`) is part of the default
-build, so all variables are optional — you can configure everything from the
-browser. For minimal builds made with `--no-default-features` (no HTTP API),
-variables marked **required** must be provided via environment.
+Variables marked **required** must always be provided via environment.
 
 If you are using the `ez-cdc` CLI, most of these variables are set for you
 from an `ez-cdc.yaml` file. Run `ez-cdc datasource init` to create one with

@@ -58,7 +58,7 @@ See [docs/architecture.md](docs/architecture.md) for the full data flow, module 
 Default features: `sink-starrocks`, `sink-postgres`, `sink-snowflake`,
 `grpc-reflection`, **`http-api`**. `http-api` is now part of the default
 set so a single build serves both enterprise (gRPC) and self-host (HTTP
-API + web UI on port 8080).
+API on port 8080 — health check, Prometheus metrics, control endpoints).
 
 For an extra-minimal build without the HTTP API:
 

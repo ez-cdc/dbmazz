@@ -26,7 +26,7 @@ All notable changes to dbmazz will be documented here.
   - Troubleshooting and "when to graduate to EZ-CDC Cloud" section
 
 ### Changed
-- **`http-api` is now a default Cargo feature.** A single `cargo build --release` builds a binary that serves both enterprise (gRPC) and self-host (HTTP API + web UI). For an extra-minimal build without the HTTP API, use `cargo build --release --no-default-features --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"`.
+- **`http-api` is now a default Cargo feature.** A single `cargo build --release` builds a binary that serves both enterprise (gRPC) and self-host (HTTP API on port 8080 — health check, status JSON, Prometheus metrics, pause/resume/drain-stop). For an extra-minimal build without the HTTP API, use `cargo build --release --no-default-features --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"`.
 - **Release workflow restructured into 5 jobs**: `version`, `build-dbmazz` (matrix amd64/arm64), `build-ez-cdc` (matrix 4 targets, now all musl for Linux), `docker-publish`, and `release`. The git tag and GitHub Release are only created after `docker-publish` succeeds, so a failed image push does not produce orphan tags.
 - **`ez-cdc` CLI pulls the dbmazz image from GHCR** instead of cross-compiling the daemon and mounting it as a volume. The image reference is pinned to the CLI's own `CARGO_PKG_VERSION` (kept in sync at build time by the release workflow) and overridable via `DBMAZZ_IMAGE` for local-dev testing of patched daemons.
 - **CLI Linux targets migrated from `gnu` to `musl`** for portability across distributions.
@@ -334,7 +334,6 @@ dbmazz/
 
 ### v0.3.0 (Future)
 - [ ] Multi-tenant: multiple sources → multiple destinations
-- [ ] Web UI for monitoring
 - [ ] Integrated alerting (Slack, PagerDuty)
 - [x] Automatic schema evolution (partial: adding columns works, pending type changes and deletion)
 - [ ] Payload compression
