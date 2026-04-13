@@ -35,14 +35,16 @@ color-eyre = "0.6"
 thiserror = "2"
 
 # HTTP + DB
-# `default-features = false` + `rustls-tls` avoids native-tls → openssl-sys,
-# which would otherwise pull in a system libssl and break cross-compilation
-# to x86_64-apple-darwin from the ARM-native `macos-latest` release runner.
+# `default-features = false` + `rustls` (reqwest) and `default-rustls`
+# (mysql_async) avoid pulling native-tls → openssl-sys, which would
+# otherwise break cross-compilation to x86_64-apple-darwin from the
+# ARM-native `macos-latest` release runner and force libssl-dev on
+# every Linux build host.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-util = { version = "0.7", features = ["rt"] }
-mysql_async = "0.34"
+mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
 
 # Config
 serde = { version = "1", features = ["derive"] }
