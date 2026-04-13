@@ -84,15 +84,20 @@ pub fn text(message: &str, default: &str) -> Result<String, PromptError> {
     })
 }
 
-/// Show a password input prompt (characters hidden).
+/// Show a password input prompt (characters hidden). Empty input is
+/// allowed because several supported sinks (StarRocks with default
+/// root, dev-local Postgres, etc.) have no password by design.
 pub fn password(message: &str) -> Result<String, PromptError> {
-    cliclack::password(message).interact().map_err(|e| {
-        if is_ctrl_c_error(&e) {
-            PromptError::Cancelled
-        } else {
-            PromptError::Io(e)
-        }
-    })
+    cliclack::password(message)
+        .allow_empty()
+        .interact()
+        .map_err(|e| {
+            if is_ctrl_c_error(&e) {
+                PromptError::Cancelled
+            } else {
+                PromptError::Io(e)
+            }
+        })
 }
 
 /// Heuristic to detect Ctrl+C / interrupt errors from cliclack.
