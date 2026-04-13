@@ -174,25 +174,6 @@ pub fn ps(compose_file: &Path) -> Result<String, ComposeError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Check whether any container for this stack is currently running.
-pub fn is_running(compose_file: &Path) -> bool {
-    if !compose_file.exists() {
-        return false;
-    }
-    if check_docker_compose().is_err() {
-        return false;
-    }
-
-    let output = base_cmd(compose_file)
-        .args(["ps", "-q"])
-        .output();
-
-    match output {
-        Ok(o) => o.status.success() && !o.stdout.is_empty(),
-        Err(_) => false,
-    }
-}
-
 /// Stop and remove specific services (not the whole stack).
 pub fn stop_services(compose_file: &Path, services: &[&str]) -> Result<(), ComposeError> {
     check_docker_compose()?;

@@ -5,6 +5,40 @@ All notable changes to dbmazz will be documented here.
 ## [Unreleased]
 
 ### Added
+- **Official Docker image on GHCR** (`ghcr.io/ez-cdc/dbmazz`)
+  - Multi-arch manifest with `linux/amd64` and `linux/arm64`
+  - Base image: `debian:bookworm-slim`, runs as non-root (UID 65532)
+  - Published on every release with tags `X.Y.Z`, `X.Y`, `X`, `latest`, and `sha-<short>`
+  - Built from pre-compiled musl-static binaries in the release workflow
+- **`install.sh` one-liner installer** for the `ez-cdc` CLI
+  - `curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh`
+  - Detects OS (Linux/Darwin) and arch (amd64/arm64), verifies SHA256 against `SHA256SUMS`
+  - Honors `EZ_CDC_VERSION` and `EZ_CDC_INSTALL_DIR` env var overrides
+  - POSIX sh, shellcheck-clean, no dependencies beyond `curl` and `uname`
+- **linux/arm64 release binaries** for both `dbmazz` and `ez-cdc` CLI
+  - S3/GCS now host `dbmazz-linux-arm64` alongside `dbmazz-linux-amd64` at the same paths
+  - GitHub release assets include all 4 CLI targets (linux amd64/arm64 musl, darwin amd64/arm64)
+- **`docs/production-deployment.md`** — full self-host deployment guide
+  - `docker run`, Docker Compose, AWS ECS Fargate examples
+  - Secrets management (env_file, Secrets Manager, SSM)
+  - Prometheus monitoring setup and alerting metrics
+  - Operations guide (pause/resume/drain-stop/upgrade)
+  - Troubleshooting and "when to graduate to EZ-CDC Cloud" section
+
+### Changed
+- **`http-api` is now a default Cargo feature.** A single `cargo build --release` builds a binary that serves both enterprise (gRPC) and self-host (HTTP API + web UI). For an extra-minimal build without the HTTP API, use `cargo build --release --no-default-features --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"`.
+- **Release workflow restructured into 5 jobs**: `version`, `build-dbmazz` (matrix amd64/arm64), `build-ez-cdc` (matrix 4 targets, now all musl for Linux), `docker-publish`, and `release`. The git tag and GitHub Release are only created after `docker-publish` succeeds, so a failed image push does not produce orphan tags.
+- **`ez-cdc` CLI pulls the dbmazz image from GHCR** instead of cross-compiling the daemon and mounting it as a volume. The image reference is pinned to the CLI's own `CARGO_PKG_VERSION` (kept in sync at build time by the release workflow) and overridable via `DBMAZZ_IMAGE` for local-dev testing of patched daemons.
+- **CLI Linux targets migrated from `gnu` to `musl`** for portability across distributions.
+- **`gh release create` no longer shell-interpolates the changelog**, protecting against commit messages containing quotes, backticks, or command substitutions.
+- **Docker tags now generated via `docker/metadata-action@v5`** instead of shell-ad-hoc computation.
+
+### Removed
+- **`e2e-cli/Dockerfile.runtime`** and the cross-compile + bind-mount development loop. The CLI now uses the official image.
+- **`e2e-cli/bin/dbmazz-linux-amd64`** (gitignored, was a local artifact). No longer consumed by any code path.
+- **`check_linux_binary()`, `build_dbmazz_image()`, and the `DBMAZZ_IMAGE` constant** in `e2e-cli/src/commands/mod.rs`. Replaced by `dbmazz_image()` fn, `pull_dbmazz_image()`, and a redesigned `ensure_dbmazz_image()` that pulls instead of builds.
+- **`paths::LINUX_BINARY`** static in `e2e-cli/src/paths.rs`.
+
 - **Snowflake Sink Connector**: Two-phase ELT replication to Snowflake via HTTPS
   - Parquet files for type-safe bulk loading (Arrow + Parquet crates)
   - PUT protocol for stage upload (S3/GCS/Azure via Snowflake temp credentials)

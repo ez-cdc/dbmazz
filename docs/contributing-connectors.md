@@ -746,10 +746,11 @@ To add e2e coverage for a new sink:
 3. **Add compose generation** in `e2e-cli/src/compose/builder.rs`:
    add the container definition for your sink's database.
 
-4. **Run the suite**:
+4. **Run the suite** (make sure your source and sink infrastructure is
+   already running — bring your own docker-compose or cloud
+   databases):
 
    ```bash
-   ez-cdc up
    ez-cdc verify --source demo-pg --sink my-sink
    ```
 

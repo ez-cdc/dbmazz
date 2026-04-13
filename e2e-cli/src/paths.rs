@@ -56,10 +56,6 @@ pub fn default_config_path() -> PathBuf {
     CLI_DIR.join("ez-cdc.yaml")
 }
 
-/// Pre-compiled Linux binary shipped with the repo (`<repo>/e2e-cli/bin/dbmazz-linux-amd64`).
-/// Mounted into the Docker runtime container by the compose builder.
-pub static LINUX_BINARY: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join("bin").join("dbmazz-linux-amd64"));
-
 /// Path to the dbmazz daemon log file (`<repo>/e2e-cli/.cache/dbmazz.log`).
 #[allow(dead_code)]
 pub fn dbmazz_log_path() -> PathBuf {

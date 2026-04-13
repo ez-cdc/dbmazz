@@ -5,7 +5,7 @@ use std::time::Duration;
 use console::style;
 
 use crate::clients::dbmazz::DbmazzClient;
-use crate::commands::{check_linux_binary, ensure_dbmazz_image, load_store, resolve_pair};
+use crate::commands::{dbmazz_image, ensure_dbmazz_image, load_store, resolve_pair};
 use crate::compose::{builder, runner};
 use crate::preflight;
 use crate::tui::report::{print_report_summary, print_step, print_tier_header, report_to_json};
@@ -45,17 +45,20 @@ pub async fn run_verify(
     if !preflight::check_connectivity(&src_spec, &sk_spec, &src_name, &sk_name).await {
         anyhow::bail!(
             "source or sink unreachable. Make sure your databases are running \
-             (use `ez-cdc up` for Docker-managed ones) and check the connection URLs."
+             and the URLs in your ez-cdc.yaml are correct."
         );
     }
 
     // Step 2: ensure the dbmazz Docker image exists, then start the container.
     let compose_path = if !no_up {
-        // Ensure Linux binary exists (cross-compiled) and runtime image is ready.
-        check_linux_binary()?;
-        let built = ensure_dbmazz_image(rebuild)?;
-        if built {
-            println!("    {} dbmazz runtime image built", style("✓").green());
+        // Ensure the official dbmazz image is available locally.
+        let pulled = ensure_dbmazz_image(rebuild)?;
+        if pulled {
+            println!(
+                "    {} dbmazz image pulled ({})",
+                style("✓").green(),
+                dbmazz_image(),
+            );
         }
 
         let (compose_path, _env_path) = builder::build_compose_for_pair(
@@ -96,7 +99,13 @@ pub async fn run_verify(
     print_tier_header(&format!("Verify: {} → {}", src_name, sk_name));
 
     let mut verify_runner = VerifyRunner::new(
-        src_name.clone(), src_spec, sk_name.clone(), sk_spec, quick, skip_ids,
+        src_name.clone(),
+        src_spec,
+        sk_name.clone(),
+        sk_spec,
+        quick,
+        skip_ids,
+        data.settings.do_snapshot,
     );
     let report = verify_runner.run().await;
 

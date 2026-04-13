@@ -27,42 +27,56 @@ It has two modes:
 ## Prerequisites
 
 - **Docker Desktop** with `docker compose` (V2). Must be running.
+- A PostgreSQL source and at least one sink (StarRocks / PostgreSQL /
+  Snowflake) running and reachable from your host — native services,
+  your own docker-compose, or remote.
 
 ---
 
 ## Quick Start
 
-From the repository root:
+Install the CLI with the one-liner from the repo root README:
 
 ```bash
-# 1. Init demo datasources (creates ez-cdc.yaml with demo-pg + demo-starrocks)
-./ez-cdc datasource init
-
-# 2. Run the live dashboard (starts infra + dbmazz automatically)
-./ez-cdc quickstart --source demo-pg --sink demo-starrocks
-
-# 3. Or run the verification suite directly
-./ez-cdc verify --source demo-pg --sink demo-starrocks
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
 ```
 
-That's it. The `./ez-cdc` wrapper at the repo root runs the precompiled CLI.
-The precompiled dbmazz Linux binary at `e2e-cli/bin/dbmazz-linux-amd64` is
-mounted into the Docker container automatically.
+Then:
 
-If the binaries are missing (fresh clone without releases), see
-[Building from source](#building-from-source) below.
+```bash
+# 1. Write a starter config with every dbmazz option documented inline
+ez-cdc datasource init
+
+# 2. Add a source and a sink (interactive wizard)
+ez-cdc datasource add
+
+# 3. Run the live dashboard — pulls the official dbmazz image from GHCR
+ez-cdc quickstart --source <source-name> --sink <sink-name>
+
+# 4. Or run the verification suite
+ez-cdc verify --source <source-name> --sink <sink-name>
+```
+
+### Developing the CLI itself
+
+If you are hacking on the CLI, run it from source without installing:
+
+```bash
+cargo run --manifest-path e2e-cli/Cargo.toml -- datasource init
+cargo run --manifest-path e2e-cli/Cargo.toml -- quickstart --source my-pg --sink my-sr
+```
 
 ### Interactive mode
 
-Run `./ez-cdc` with no arguments to open the interactive menu:
+Run `ez-cdc` with no arguments to open the interactive menu:
 
 ```bash
-./ez-cdc
+ez-cdc
 ```
 
-The menu adapts to the current state: no config yet, stack stopped, stack
-running. It guides you through init, quickstart, verify, and datasource
-management.
+The menu adapts to whether you already have a config file with
+datasources or not, and walks you through init, quickstart, verify,
+and datasource management.
 
 ### Run the full verification suite
 ez-cdc verify --source demo-pg --sink demo-starrocks
@@ -180,31 +194,13 @@ When run without a TTY (e.g. in a pipe or CI), `ez-cdc` prints help and exits.
 
 ---
 
-### `ez-cdc up [--rebuild]`
+### Bring Your Own Infrastructure
 
-Start all infrastructure containers (sources and sinks) defined in the config.
-Waits for containers to become healthy before returning.
-
-```
-ez-cdc up
-ez-cdc up --rebuild   # force rebuild of the dbmazz Docker image
-```
-
-Uses the Docker-managed datasources only. Containers are defined dynamically
-based on what is in `ez-cdc.yaml` — only the databases you have configured
-are started.
-
----
-
-### `ez-cdc down [--keep-volumes]`
-
-Stop and remove all infrastructure containers. Volumes are destroyed by
-default (which resets database state).
-
-```
-ez-cdc down
-ez-cdc down --keep-volumes   # stop containers but preserve data volumes
-```
+The CLI does **not** manage source / sink containers. You bring the
+source PostgreSQL and sink (StarRocks / Postgres / Snowflake) already
+running — either your own infrastructure, or your own Docker Compose
+setup. The CLI only manages the `dbmazz` daemon container, which it
+pulls from GHCR on demand.
 
 ---
 
@@ -219,14 +215,20 @@ ez-cdc quickstart                          # interactive prompts if TTY
 ez-cdc quickstart --source demo-pg --sink demo-starrocks --keep-up
 ```
 
+Config file location (unless overridden with `--config PATH` or
+`$EZ_CDC_CONFIG`):
+- `$XDG_CONFIG_HOME/ez-cdc/config.yaml`, or
+- `~/.config/ez-cdc/config.yaml`, or
+- `./ez-cdc.yaml` in the current directory (legacy in-repo dev fallback)
+
 Steps performed:
 1. Connectivity preflight check against source and sink.
-2. Verify that `e2e-cli/bin/dbmazz-linux-amd64` exists.
-3. Build the `ez-cdc-dbmazz:latest` Docker image (cached after first build).
-4. Start the dbmazz container via Docker compose.
-5. Wait for dbmazz HTTP health check to pass.
-6. Open the dashboard (blocks until `q` or Ctrl+C).
-7. Stop and remove the dbmazz container on exit (unless `--keep-up`).
+2. Pull the official `ghcr.io/ez-cdc/dbmazz:<version>` image from GHCR
+   if not already present locally (or `$DBMAZZ_IMAGE` if overridden).
+3. Start the dbmazz container via Docker compose.
+4. Wait for dbmazz HTTP health check to pass.
+5. Open the dashboard (blocks until `q` or Ctrl+C).
+6. Stop and remove the dbmazz container on exit (unless `--keep-up`).
 
 If `--source` or `--sink` are omitted and only one is configured, it is
 auto-selected. If multiple are configured and not on a TTY, the command
@@ -259,7 +261,7 @@ Flags:
 | `--json-report FILE` | Write a JSON report to the specified file |
 | `--no-up` | Skip infra/dbmazz startup; assume the daemon is already running |
 | `--keep-up` | Do not stop the dbmazz container after verify completes |
-| `--rebuild` | Force rebuild of the `ez-cdc-dbmazz:latest` Docker image |
+| `--rebuild` | Force `docker pull` of the dbmazz image even if present locally |
 
 The command exits with a non-zero status if any check fails, making it
 suitable for CI pipelines. The JSON report preserves the full check list with
@@ -286,15 +288,13 @@ progress if active.
 Tail container logs. Defaults to following all infra containers.
 
 ```
-ez-cdc logs                   # all containers, follow
-ez-cdc logs dbmazz            # dbmazz daemon logs only
-ez-cdc logs source-pg         # source PostgreSQL logs
-ez-cdc logs sink-starrocks    # StarRocks logs
+ez-cdc logs dbmazz            # dbmazz daemon logs, follow
 ez-cdc logs dbmazz --tail 50  # last 50 lines, no follow
 ```
 
-The service name corresponds to the Docker compose service name. Run
-`ez-cdc up` first — logs require the containers to be running.
+Only the `dbmazz` service is managed by the CLI. For source / sink
+containers (running under your own Docker Compose or infra), use
+`docker logs <container>` directly.
 
 ---
 
@@ -365,15 +365,26 @@ ez-cdc datasource remove my-old-sink
 ez-cdc datasource remove my-old-sink --yes
 ```
 
-#### `ez-cdc datasource init`
+#### `ez-cdc datasource init [--template {blank|demo}]`
 
-Populate `ez-cdc.yaml` with the two demo datasources (`demo-pg` and
-`demo-starrocks`) pre-configured for the Docker-managed containers. Safe
-to run on an existing config — existing entries are not overwritten.
+Create a starter config file at the resolved config path (default
+`$XDG_CONFIG_HOME/ez-cdc/config.yaml`). Refuses to overwrite an
+existing file.
 
 ```
-ez-cdc datasource init
+ez-cdc datasource init                     # default: blank template
+ez-cdc datasource init --template blank    # explicit blank
+ez-cdc datasource init --template demo     # in-repo demos (dev/e2e)
 ```
+
+`--template blank` (default) writes a fully commented template with
+every dbmazz option inline plus commented examples for PostgreSQL,
+StarRocks, PostgreSQL target, and Snowflake sinks. Edit it by hand
+or follow up with `ez-cdc datasource add` for a guided wizard.
+
+`--template demo` adds the in-repo `demo-pg` + `demo-starrocks`
+(or `demo-pg-target`) datasources used by the e2e test harness.
+Only useful when running inside a clone of this repo.
 
 ---
 
@@ -562,86 +573,121 @@ e2e-cli/
 ├── fixtures/
 │   ├── postgres-seed.sql   Schema + 500 seed orders + 1500 order items
 │   └── starrocks-init.sh   StarRocks database creation script
-├── bin/
-│   └── dbmazz-linux-amd64  Pre-compiled Linux binary (not in git, built locally)
-├── Dockerfile.runtime       Minimal runtime image (libs only; binary is mounted)
 └── ez-cdc.yaml             Generated config (not in git)
 ```
 
 ### How the daemon is containerized
 
-`ez-cdc quickstart` and `ez-cdc verify` do not bake the dbmazz binary into
-the Docker image. Instead:
+`ez-cdc quickstart` and `ez-cdc verify` pull the official `dbmazz` image
+from GitHub Container Registry:
 
-1. The `Dockerfile.runtime` builds a minimal Debian-slim image with only the
-   runtime libraries (OpenSSL, CA certificates). This image is tagged
-   `ez-cdc-dbmazz:latest` and cached — it only needs to be rebuilt when
-   system dependencies change.
-2. The `compose/builder.rs` generates a Docker compose file that bind-mounts
-   `e2e-cli/bin/dbmazz-linux-amd64` into the container at runtime.
-3. This means updating the binary (after a `cross build`) is instant — no
-   Docker rebuild required, just copy the new binary to `bin/`.
+1. The image reference is `ghcr.io/ez-cdc/dbmazz:<CLI version>`. The CLI
+   version is pinned at compile time via `env!("CARGO_PKG_VERSION")`, and
+   the release workflow patches `e2e-cli/Cargo.toml` before building to
+   keep daemon and CLI versions aligned.
+2. `compose/builder.rs` generates a Docker compose file that references
+   the image directly — no bind-mounts, no cross-compile loop.
+3. To test a locally-patched daemon, set `DBMAZZ_IMAGE=my-tag:dev` and
+   the CLI will use that image instead of the GHCR one. Build it with
+   `docker build -t my-tag:dev <path-to-dbmazz>` from the root Dockerfile.
+
+### Networking model
+
+The `dbmazz` container runs on the default docker-compose bridge
+network with one extra host entry:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+This makes `host.docker.internal` resolve to the host machine on
+macOS, Windows, and Linux (Docker Engine 20.10+). When the CLI
+generates the `.env` file for the container, it automatically
+rewrites any `localhost`, `127.0.0.1`, or `0.0.0.0` host in your
+datasource URLs to `host.docker.internal`, preserving the port and
+the rest of the URL. This means you can write:
+
+```yaml
+sources:
+  my-pg:
+    url: postgres://user:pass@localhost:5432/mydb
+```
+
+...in your `ez-cdc.yaml`, and the container will reach a postgres
+running on the host (either native on the host OS, or in another
+container that publishes port 5432). Remote hostnames
+(`prod-db.internal`, `xy12345.snowflakecomputing.com`, etc.) are
+passed through unchanged.
+
+**Edge case**: if your source or sink lives in another container on
+a private docker bridge *without* publishing its port to the host,
+`host.docker.internal` cannot reach it. Publish the port with
+`-p <host>:<container>` so it becomes visible on the host loopback.
 
 ### Compose file generation
 
-`builder.rs` generates two types of compose files:
+`builder.rs` generates one compose file per (source, sink) pair under
+`.cache/compose/<src>__<sink>__<hash>/compose.yml`. The file contains
+a single `dbmazz` service referencing the official
+`ghcr.io/ez-cdc/dbmazz:<version>` image, plus the `extra_hosts` entry
+described above.
 
-- **Infra compose** (`ez-cdc up`/`ez-cdc down`): contains only the source and
-  sink containers. Stored at `.cache/compose/_infra/compose.yml`.
-- **Pair compose** (`quickstart`/`verify`): contains a single `dbmazz` service
-  with the correct environment variables for the chosen source/sink pair.
-  Stored at `.cache/compose/<src>__<sink>__<hash>/compose.yml`.
-
-Environment variables for the pair (all `dbmazz` config) are written to a
-parallel `.env` file derived from `PipelineSettings.to_env_lines()`.
+Environment variables for the pair (all `dbmazz` config) are written
+to a parallel `.env` file derived from `PipelineSettings.to_env_lines()`,
+with localhost URLs rewritten to `host.docker.internal`.
 
 ---
 
 ## Building from Source
 
-Only needed if precompiled binaries are not available (fresh clone without
-GitHub release assets).
+The preferred way to install the CLI is via the one-liner installer
+documented in the repo root README:
 
-### Build the ez-cdc CLI
+```bash
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+```
+
+This installer downloads the pre-built binary from the latest GitHub
+release. Only build from source if you are developing the CLI itself:
 
 ```bash
 cargo build --release --manifest-path e2e-cli/Cargo.toml
 ```
 
-The `./ez-cdc` wrapper at the repo root automatically finds the binary at
-`e2e-cli/target/release/ez-cdc`.
+The resulting binary is at `e2e-cli/target/release/ez-cdc`. You can run
+it directly or symlink it into your PATH.
 
-### Cross-compile dbmazz for Linux
+### Developing against a patched dbmazz daemon
 
-The dbmazz daemon runs inside a Docker container, so it needs to be a
-Linux/amd64 ELF binary. On macOS, use `cross`:
+The CLI pulls `ghcr.io/ez-cdc/dbmazz:<CLI version>` by default. To test
+the CLI against a local daemon build:
 
 ```bash
-# Install cross (one-time)
-cargo install cross
+# From the repo root, build the daemon and the Docker image locally
+cargo build --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/dbmazz dbmazz-linux-amd64
+docker build -t dbmazz-dev:local .
 
-# Build
-cross build --release --target x86_64-unknown-linux-gnu --features http-api
-
-# Copy to the expected location
-cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
+# Point the CLI at the local image
+DBMAZZ_IMAGE=dbmazz-dev:local ez-cdc quickstart --source demo-pg --sink demo-starrocks
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Linux binary not found"
+### `docker pull` fails with "unauthorized" or "manifest unknown"
 
-```
-Error: Linux binary not found at e2e-cli/bin/dbmazz-linux-amd64
-  Build it with: cross build --release --target x86_64-unknown-linux-gnu --features http-api
-  Then copy to: cp target/x86_64-unknown-linux-gnu/release/dbmazz e2e-cli/bin/dbmazz-linux-amd64
-```
+The CLI pulls `ghcr.io/ez-cdc/dbmazz:<version>` from GHCR. If the image
+is not publicly accessible or the tag does not exist:
 
-The `e2e-cli/bin/` directory is not committed to git. You must build the
-binary locally before running `quickstart` or `verify`. Follow the exact
-commands in the message.
+- Verify your CLI version matches a published release:
+  `ez-cdc --version`, then check
+  https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz
+- Override with a known-good image: `DBMAZZ_IMAGE=ghcr.io/ez-cdc/dbmazz:latest`
+- Build locally as shown in the "Developing against a patched dbmazz
+  daemon" section above.
 
 ### "Docker not running" or compose command fails
 
@@ -667,21 +713,16 @@ installed services:
 | dbmazz HTTP API | 8080 |
 | dbmazz gRPC | 50051 |
 
-If another process is using one of these ports, `ez-cdc up` will fail. Stop
-the conflicting process or edit the URLs in `ez-cdc.yaml` to use different
-ports, then rebuild the compose file by running `ez-cdc up` again.
+If another process is using one of these ports, start your source or
+sink on different ports and update the URLs in `ez-cdc.yaml`
+accordingly.
 
 ### "source or sink unreachable"
 
-The preflight connectivity check in `quickstart` and `verify` connects to
-the source and sink before starting dbmazz. If infra is not running:
-
-```
-ez-cdc up
-```
-
-If using external (non-Docker) databases, verify the connection URL in
-`ez-cdc.yaml` with:
+The preflight connectivity check in `quickstart` and `verify` connects
+to the source and sink before starting dbmazz. Start your source /
+sink infrastructure first (docker-compose, cloud, whatever), then
+verify each connection with:
 
 ```
 ez-cdc datasource test <name>
@@ -689,14 +730,10 @@ ez-cdc datasource test <name>
 
 ### StarRocks takes too long to start
 
-StarRocks initializes internal metadata on first run, which typically takes
-60-90 seconds. If `ez-cdc verify` fails at the P1 health check with a
-timeout, run `ez-cdc up` first and wait for StarRocks to become healthy before
-running verify. Check progress with:
-
-```
-ez-cdc logs sink-starrocks
-```
+StarRocks initializes internal metadata on first run, which typically
+takes 60-90 seconds. Wait for it to become healthy before running
+`ez-cdc verify`, then check progress with `docker logs` against your
+StarRocks container.
 
 ### Daemon does not reach CDC stage (P4 timeout)
 
