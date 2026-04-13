@@ -12,6 +12,8 @@
 
 A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or another PostgreSQL with sub-second replication lag — **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
 
+Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
+
 [![License: ELv2](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-ez--cdc%2Fdbmazz-0969da?logo=docker)](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz)
 [![Discussions](https://img.shields.io/badge/GitHub-Discussions-181717?logo=github)](https://github.com/ez-cdc/dbmazz/discussions)
@@ -28,7 +30,7 @@ A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or
 
 ## What is dbmazz?
 
-dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
+dbmazz is what CDC looks like without the JVM tax: a single Rust binary, built and maintained by **[EZ-CDC](https://ez-cdc.com)**, that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
 
 The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
 
@@ -272,6 +274,8 @@ The official image is published on every release to [GitHub Container Registry](
 
 Full deployment guide — Compose with secrets, ECS task definitions, Secrets Manager / SSM patterns, alerting metrics, and operations playbooks: [`docs/production-deployment.md`](docs/production-deployment.md).
 
+> **Want someone else to run this for you?** [**EZ-CDC Cloud**](https://ez-cdc.com) deploys dbmazz into your own AWS or GCP account via Terraform — same engine, with managed updates, auto-healing workers, centralized monitoring across many jobs, and a web portal. BYOC, so the data never leaves your account.
+
 ---
 
 ## 👩‍💻 For developers
@@ -411,6 +415,8 @@ In plain English: **dbmazz is free for commercial and non-commercial use**, incl
 
 ## ☁️ About EZ-CDC
 
-dbmazz is the open-source CDC engine maintained by [**EZ-CDC**](https://ez-cdc.com). The same team also runs **EZ-CDC Cloud**, a managed BYOC platform for teams that want to run multiple replication jobs across AWS or GCP without operating dbmazz themselves — auto-healing workers, centralized monitoring, a web portal, and a REST API. It's built on top of the same engine you'll find in this repo.
+**dbmazz is the open-source CDC engine maintained by [EZ-CDC](https://ez-cdc.com).** We're a small team building modern data replication tools for teams that want streaming Postgres CDC without operating a streaming platform — and dbmazz is the daemon at the heart of everything we ship.
 
-If you're happy self-hosting one or two pipelines, dbmazz is what you want. If you'd like someone else to run them for you, [ez-cdc.com](https://ez-cdc.com) has the details.
+The same team also runs **[EZ-CDC Cloud](https://ez-cdc.com)**: a managed BYOC platform that deploys dbmazz into your own AWS or GCP account via Terraform. It adds the things you need *around* the daemon — auto-healing workers, centralized monitoring across many jobs, a web portal for your team, a REST API, and an MCP server for AI-native integration. The engine running underneath EZ-CDC Cloud is the same dbmazz you'll find in this repo.
+
+**Self-hosting one or two pipelines? dbmazz is what you want.** Need a managed multi-job platform with operations handled for you? Visit [ez-cdc.com](https://ez-cdc.com).
