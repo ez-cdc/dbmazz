@@ -354,6 +354,15 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Disable SLSA provenance and SBOM attestations. They are
+          # enabled by default in build-push-action@v7 and published
+          # as extra artifacts on the workflow run, which then break
+          # the `release` job's Download all artifacts step because
+          # their format is not a plain file the subsequent steps
+          # expect. We can re-enable them later with a dedicated
+          # sigstore step if we want signed release artifacts.
+          provenance: false
+          sbom: false
 
   # ---------------------------------------------------------------------
   # Job 5: release
@@ -372,9 +381,19 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Download all artifacts
+      # Explicit patterns instead of downloading *all* artifacts, so we
+      # never pick up unexpected artifacts (e.g. SLSA attestations from
+      # docker/build-push-action) that would fail the extract step.
+      - name: Download dbmazz binaries
         uses: actions/download-artifact@v4
         with:
+          pattern: dbmazz-linux-*
+          merge-multiple: true
+
+      - name: Download ez-cdc CLI binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ez-cdc-*
           merge-multiple: true
 
       - name: List artifacts
