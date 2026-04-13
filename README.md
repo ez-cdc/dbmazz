@@ -10,9 +10,7 @@
 
 **Real-time PostgreSQL CDC in ~11 MB of RAM. One binary. No Kafka.**
 
-Stream PostgreSQL → StarRocks, Snowflake, or another PostgreSQL with a single Rust daemon. In a 3-day production load test, **40 dbmazz instances ran in parallel on a single 2 vCPU / 4 GB worker** at 15 % total CPU. Each daemon used ~1 % of one CPU core and ~11 MB RSS — fixed cost, regardless of load.
-
-That's **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
+A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or another PostgreSQL with sub-second replication lag — **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
 
 [![License: ELv2](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-ez--cdc%2Fdbmazz-0969da?logo=docker)](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz)
@@ -77,20 +75,12 @@ dbmazz is the alternative to running a streaming platform: a single Rust binary 
 
 ### Where dbmazz wins
 
-- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. Most tools that *call themselves* "Postgres replication" — Airbyte, Fivetran, Stitch — are actually batch ETL with sync windows of minutes or hours. If freshness matters to your downstream, that's the difference between an *operational replica* and a *day-old data lake*.
+- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. No sync windows, no scheduled jobs, no waiting for the next batch. If freshness matters to your downstream, that's the difference between an *operational replica* and a *day-old data lake*.
 - **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
 - **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between.
 - **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
 - **🔌 Embed CDC in your own product** — every dbmazz instance exposes gRPC and HTTP APIs for control and observability. Build higher-level systems on top, or integrate it into existing tooling without taking on a SaaS dependency.
 
-### Where dbmazz is *not* the right tool
-
-We try to be honest about where other tools are a better fit. **If your situation matches one of the following, look elsewhere first**:
-
-- **You need MySQL, Oracle, MongoDB, or SQL Server CDC.** dbmazz is PostgreSQL-only today. → Look at [Debezium](https://debezium.io/) (12+ source databases) or a managed platform.
-- **You need a hosted web UI for non-technical users to manage pipelines.** dbmazz is a daemon. The control surface is environment variables, APIs, and an optional terminal dashboard. → Look at [Airbyte](https://airbyte.com/) for a no-code UI, or see the [About EZ-CDC](#-about-ez-cdc) note for a managed multi-job platform built on dbmazz.
-- **You need built-in transformations or a SQL-based pipeline language.** dbmazz delivers raw CDC events; transformations are your downstream concern (dbt, the sink's own SQL, etc.). → Look at [PeerDB](https://www.peerdb.io/) (SQL transformations baked in) or [Estuary Flow](https://estuary.dev/) (derivations).
-- **You need horizontal scaling of a single replication job.** dbmazz scales *vertically* — one instance handles one job. Sharding across instances is your responsibility (or use a job-orchestrator like the one [EZ-CDC Cloud](#-about-ez-cdc) provides on top).
 
 ---
 
