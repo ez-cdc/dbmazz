@@ -246,7 +246,12 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config libssl-dev
+          sudo apt-get install -y musl-tools pkg-config
+          # NOTE: libssl-dev is deliberately NOT installed. The CLI uses
+          # reqwest with rustls, so openssl-sys is not in the dep graph.
+          # Installing libssl-dev would risk silent dynamic linkage
+          # against libssl.so and break the musl-static binary at runtime
+          # on distros that lack it.
 
       - name: Sync CLI version with release version
         shell: bash
@@ -258,7 +263,8 @@ jobs:
           grep "^version" e2e-cli/Cargo.toml
 
       - name: Build ez-cdc CLI
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path e2e-cli/Cargo.toml
+        working-directory: e2e-cli
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary
         shell: bash
@@ -323,7 +329,7 @@ jobs:
 
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.GHCR_IMAGE }}
           tags: |
@@ -340,7 +346,7 @@ jobs:
             org.opencontainers.image.description=Real-time CDC daemon for PostgreSQL to StarRocks, PostgreSQL, and Snowflake
 
       - name: Build and push multi-arch image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -473,24 +479,35 @@ jobs:
             --notes "$CHANGELOG"
 
       - name: Summary
+        env:
+          # Pass version metadata and changelog via env, not direct
+          # template interpolation, so commit messages containing
+          # quotes, backticks, or command substitution do not execute
+          # arbitrary shell code.
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          BUMP: ${{ needs.version.outputs.bump }}
+          CHANGELOG: ${{ needs.version.outputs.changelog }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           {
-            echo "## Release: ${{ env.COMPONENT }} ${{ needs.version.outputs.tag }}"
+            echo "## Release: ${COMPONENT} ${TAG}"
             echo ""
-            echo "**Version:** ${{ needs.version.outputs.version }}"
-            echo "**Bump:** ${{ needs.version.outputs.bump }}"
+            echo "**Version:** ${VERSION}"
+            echo "**Bump:** ${BUMP}"
             echo ""
             echo "### Enterprise binaries (S3 + GCS)"
-            echo "- \`s3://${{ env.S3_BUCKET }}/${{ env.COMPONENT }}/${{ needs.version.outputs.version }}/dbmazz-linux-{amd64,arm64}\`"
-            echo "- \`gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/${{ needs.version.outputs.version }}/dbmazz-linux-{amd64,arm64}\`"
+            echo "- \`s3://${S3_BUCKET}/${COMPONENT}/${VERSION}/dbmazz-linux-{amd64,arm64}\`"
+            echo "- \`gs://${GCS_BUCKET}/${COMPONENT}/${VERSION}/dbmazz-linux-{amd64,arm64}\`"
             echo ""
             echo "### Docker image (GHCR, multi-arch)"
-            echo "- \`${{ env.GHCR_IMAGE }}:${{ needs.version.outputs.version }}\`"
-            echo "- \`${{ env.GHCR_IMAGE }}:latest\`"
+            echo "- \`${GHCR_IMAGE}:${VERSION}\`"
+            echo "- \`${GHCR_IMAGE}:latest\`"
             echo ""
             echo "### GitHub Release"
-            echo "- ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.version.outputs.tag }}"
+            echo "- ${SERVER_URL}/${REPOSITORY}/releases/tag/${TAG}"
             echo ""
             echo "### Changelog"
-            echo "${{ needs.version.outputs.changelog }}"
+            echo "${CHANGELOG}"
           } >> "$GITHUB_STEP_SUMMARY"
