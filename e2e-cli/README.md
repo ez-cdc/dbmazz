@@ -27,42 +27,56 @@ It has two modes:
 ## Prerequisites
 
 - **Docker Desktop** with `docker compose` (V2). Must be running.
+- A PostgreSQL source and at least one sink (StarRocks / PostgreSQL /
+  Snowflake) running and reachable from your host — native services,
+  your own docker-compose, or remote.
 
 ---
 
 ## Quick Start
 
-From the repository root:
+Install the CLI with the one-liner from the repo root README:
 
 ```bash
-# 1. Init demo datasources (creates ez-cdc.yaml with demo-pg + demo-starrocks)
-./ez-cdc datasource init
-
-# 2. Run the live dashboard (starts infra + dbmazz automatically)
-./ez-cdc quickstart --source demo-pg --sink demo-starrocks
-
-# 3. Or run the verification suite directly
-./ez-cdc verify --source demo-pg --sink demo-starrocks
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
 ```
 
-That's it. The `./ez-cdc` wrapper at the repo root runs the precompiled CLI.
-The precompiled dbmazz Linux binary at `e2e-cli/bin/dbmazz-linux-amd64` is
-mounted into the Docker container automatically.
+Then:
 
-If the binaries are missing (fresh clone without releases), see
-[Building from source](#building-from-source) below.
+```bash
+# 1. Write a starter config with every dbmazz option documented inline
+ez-cdc datasource init
+
+# 2. Add a source and a sink (interactive wizard)
+ez-cdc datasource add
+
+# 3. Run the live dashboard — pulls the official dbmazz image from GHCR
+ez-cdc quickstart --source <source-name> --sink <sink-name>
+
+# 4. Or run the verification suite
+ez-cdc verify --source <source-name> --sink <sink-name>
+```
+
+### Developing the CLI itself
+
+If you are hacking on the CLI, run it from source without installing:
+
+```bash
+cargo run --manifest-path e2e-cli/Cargo.toml -- datasource init
+cargo run --manifest-path e2e-cli/Cargo.toml -- quickstart --source my-pg --sink my-sr
+```
 
 ### Interactive mode
 
-Run `./ez-cdc` with no arguments to open the interactive menu:
+Run `ez-cdc` with no arguments to open the interactive menu:
 
 ```bash
-./ez-cdc
+ez-cdc
 ```
 
-The menu adapts to the current state: no config yet, stack stopped, stack
-running. It guides you through init, quickstart, verify, and datasource
-management.
+The menu adapts to whether you already have a config file with
+datasources or not, and walks you through init, quickstart, verify,
+and datasource management.
 
 ### Run the full verification suite
 ez-cdc verify --source demo-pg --sink demo-starrocks

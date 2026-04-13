@@ -50,7 +50,7 @@ e2e/src/**/*.egg-info/
 e2e/**/*.pyc
 e2e/build/
 
-# Downloaded CLI binaries (auto-fetched by ./ez-cdc wrapper)
+# Legacy: dev binary drop directory (no longer used)
 e2e-cli/bin/
 
 # Misc
