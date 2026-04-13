@@ -8,26 +8,53 @@
 
 # dbmazz
 
-**Real-time PostgreSQL CDC. One binary. No Kafka.**
+**Real-time PostgreSQL CDC in ~11 MB of RAM. One binary. No Kafka.**
 
-Stream PostgreSQL changes to StarRocks, Snowflake, or another PostgreSQL — via a single Rust daemon. No JVM, no Kafka, no ZooKeeper, no orchestration layer.
+Stream PostgreSQL → StarRocks, Snowflake, or another PostgreSQL with a single Rust daemon. In a 3-day production load test, **40 dbmazz instances ran in parallel on a single 2 vCPU / 4 GB worker** at 15 % total CPU. Each daemon used ~1 % of one CPU core and ~11 MB RSS — fixed cost, regardless of load.
+
+That's **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
 
 [![License: ELv2](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-ez--cdc%2Fdbmazz-0969da?logo=docker)](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz)
 [![Discussions](https://img.shields.io/badge/GitHub-Discussions-181717?logo=github)](https://github.com/ez-cdc/dbmazz/discussions)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
 
-[Quickstart](#-try-it-in-2-minutes) · [What is dbmazz?](#what-is-dbmazz) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment) · [Contributing](#-contributing)
+[Quickstart](#-try-it-in-2-minutes) · [At a glance](#at-a-glance) · [What is dbmazz?](#what-is-dbmazz) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment)
+
+[deb-faq]: https://debezium.io/documentation/faq/
+[air-deploy]: https://docs.airbyte.com/platform/deploying-airbyte
 
 </div>
 
 ---
 
+## At a glance
+
+How dbmazz compares to other open-source CDC tools on **resource footprint** and **deployment complexity** — the two dimensions where dbmazz is purpose-built to win.
+
+|  | **dbmazz** | Debezium (standard) | PeerDB | Airbyte | Sequin |
+|---|---|---|---|---|---|
+| **Language / runtime** | Rust (static binary) | Java / JVM | Go + Temporal | Java / Python | Elixir / BEAM |
+| **Components for one PG → sink pipeline** | **1** (single binary) | 2–7 (JVM + Kafka + …) | 3–4 (Server + Postgres + Temporal) | 7–10+ (microservices) | 2 (Container + Postgres) |
+| **External dependencies** | **none** | Kafka, ZooKeeper | Temporal, MinIO / S3 | Postgres, Temporal, scheduler | Postgres |
+| **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 48–64 GB (enterprise tier) | 8 GB+ minimum recommended | not published |
+| **Deployment** | `docker run -e SOURCE_URL=… -e SINK_URL=…` | Compose / K8s with multiple services | Docker Compose with Temporal stack | Docker Compose / K8s with microservices | Docker + Postgres |
+
+Each tool optimizes for different things — see [where dbmazz is *not* the right tool](#where-dbmazz-is-not-the-right-tool) below for the honest tradeoffs. The numbers above are from the projects' own documentation:
+
+- **Debezium**: [official FAQ](https://debezium.io/documentation/faq/) (256 MB – 2 GB typical heap), with 4 GB+ for high-throughput per [RisingWave's deployment guide](https://risingwave.com/blog/debezium-kubernetes-deployment-production/).
+- **PeerDB**: [GitHub issue #2727](https://github.com/PeerDB-io/peerdb/issues/2727) (enterprise flow workers; smaller deployments are not published).
+- **Airbyte**: [official deployment docs](https://docs.airbyte.com/platform/deploying-airbyte) (4 vCPU + 8 GB minimum recommended).
+- **Sequin**: their docs do not publish a memory footprint as of this comparison; we list it as "not published" rather than guess.
+- **dbmazz**: from [our own benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md) (40 daemons concurrent on a single 2 vCPU / 4 GB worker, ~11 MB RSS each).
+
+---
+
 ## What is dbmazz?
 
-dbmazz is an open-source Change Data Capture (CDC) daemon written in Rust. It reads the PostgreSQL Write-Ahead Log via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` to a downstream system in near-real time — without requiring Kafka, Flink, ZooKeeper, or a JVM.
+dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in near-real time. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry.
 
-Each instance handles one replication job. Run it directly from the official Docker image, deploy it on ECS / Kubernetes / a bare VM, or build it from source. It's a single static binary (~30 MB) with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations.
+The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
 
 <div align="center">
   <img src="assets/demo.svg" alt="dbmazz TUI dashboard demo" width="90%">
@@ -41,60 +68,35 @@ Each instance handles one replication job. Run it directly from the official Doc
 
 ### The problem
 
-You need to replicate PostgreSQL into an analytical warehouse, lakehouse, or another database. The incumbent tool — **Debezium** — needs Kafka, ZooKeeper, a JVM, a Connect cluster, schema registries, and a small army of YAML to wire it all together. You wanted CDC; you got a distributed system.
+You need to replicate PostgreSQL into an analytical warehouse, lakehouse, or another database. The incumbent tool — **[Debezium](https://debezium.io/)** — needs Kafka, ZooKeeper, a JVM, a Connect cluster, schema registries, and a small army of YAML to wire it all together. You wanted CDC; you got a distributed system.
 
-dbmazz is the alternative: a single Rust binary that connects to your Postgres source on one side and your sink on the other. No brokers, no clusters, no orchestration. Run it, point it at two databases, and you're replicating.
+For perspective: in a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory used: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Every daemon held its own replication slot, parsed pgoutput, and pushed batched writes to the sink — for **~1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source was producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
 
-### What dbmazz is for
+dbmazz is the alternative to running a streaming platform: a single Rust binary that connects to your Postgres source on one side and your sink on the other. No brokers, no clusters, no orchestration. Run it, point it at two databases, and you're replicating.
 
-- **🏔️ Postgres → Lakehouse** — stream operational data into StarRocks or Snowflake for analytics, with audit columns and primary-key upserts handled automatically.
-- **🔁 Postgres → Postgres** — migrate, sync, or replicate between Postgres instances using logical replication on the source and a `COPY` + `MERGE` pipeline on the target.
-- **🔌 Embed CDC in your own tooling** — every dbmazz instance exposes gRPC and HTTP APIs for control and observability, so you can build higher-level systems on top.
+### Where dbmazz wins
 
-### What dbmazz is *not* for
+- **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
+- **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between.
+- **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
+- **🔌 Embed CDC in your own product** — every dbmazz instance exposes gRPC and HTTP APIs for control and observability. Build higher-level systems on top, or integrate it into existing tooling without taking on a SaaS dependency.
 
-- **You need ten different sources.** dbmazz speaks PostgreSQL only. If you also need MySQL/Oracle/MongoDB CDC today, look at Debezium or a managed platform.
-- **You need a hosted UI for non-technical users.** dbmazz is a daemon. The control surface is APIs and a TUI dashboard. If you want a web portal for your team, see the [About EZ-CDC](#-about-ez-cdc) note at the bottom.
-- **You need horizontal scaling of a single job.** dbmazz scales vertically. One instance handles one replication job. Sharding across multiple instances is your responsibility.
+### Where dbmazz is *not* the right tool
+
+We try to be honest about where other tools are a better fit. **If your situation matches one of the following, look elsewhere first**:
+
+- **You need MySQL, Oracle, MongoDB, or SQL Server CDC.** dbmazz is PostgreSQL-only today. → Look at [Debezium](https://debezium.io/) (12+ source databases) or a managed platform.
+- **You need a hosted web UI for non-technical users to manage pipelines.** dbmazz is a daemon. The control surface is environment variables, APIs, and an optional terminal dashboard. → Look at [Airbyte](https://airbyte.com/) for a no-code UI, or see the [About EZ-CDC](#-about-ez-cdc) note for a managed multi-job platform built on dbmazz.
+- **You need built-in transformations or a SQL-based pipeline language.** dbmazz delivers raw CDC events; transformations are your downstream concern (dbt, the sink's own SQL, etc.). → Look at [PeerDB](https://www.peerdb.io/) (SQL transformations baked in) or [Estuary Flow](https://estuary.dev/) (derivations).
+- **You need horizontal scaling of a single replication job.** dbmazz scales *vertically* — one instance handles one job. Sharding across instances is your responsibility (or use a job-orchestrator like the one [EZ-CDC Cloud](#-about-ez-cdc) provides on top).
 
 ---
 
 ## 🚀 Try it in 2 minutes
 
-### Install the CLI
+### The simplest path — `docker run`
 
-```bash
-curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
-```
-
-Linux and macOS, amd64 and arm64. The binary is downloaded from the latest GitHub release, checksum-verified, and installed to `$HOME/.local/bin/ez-cdc`.
-
-### Spin up the demo
-
-```bash
-ez-cdc datasource init                                    # write a starter config
-ez-cdc datasource add                                     # interactive wizard
-ez-cdc quickstart --source demo-pg --sink demo-starrocks  # spin up + live dashboard
-```
-
-`quickstart` pulls the official `ghcr.io/ez-cdc/dbmazz` image, starts the source and sink containers, and opens the TUI shown above. Press `t` to generate live traffic, `q` to quit.
-
-> **Requires** Docker. To use your own Postgres source instead of the demo, see the [Run with your own databases](#run-with-your-own-databases) section below.
-
-### Run the verification suite
-
-The CLI ships with a 13-check end-to-end test harness that validates every supported sink: schema, snapshot integrity, CDC `INSERT`/`UPDATE`/`DELETE`, TOAST handling, NULL roundtrip, and idempotency drift over time.
-
-```bash
-ez-cdc verify --source demo-pg --sink demo-starrocks           # full suite
-ez-cdc verify --source demo-pg --sink demo-pg-target --quick   # skip slow checks
-```
-
-Use `--json-report results.json` to wire it into CI.
-
-### Run with your own databases
-
-If you don't want to use the CLI, run dbmazz directly with `docker run` and pass connection details via environment variables:
+If you already have a PostgreSQL source and a sink, the entire dbmazz deployment is one command:
 
 ```bash
 docker run -d --name dbmazz \
@@ -107,7 +109,33 @@ docker run -d --name dbmazz \
   ghcr.io/ez-cdc/dbmazz:latest
 ```
 
-Full configuration reference: [`docs/configuration.md`](docs/configuration.md). Production deployment guide (Compose, ECS, secrets, monitoring): [`docs/production-deployment.md`](docs/production-deployment.md).
+That's it. No Kafka cluster to provision. No separate state store. No connector to register. The container image is multi-arch (`amd64` + `arm64`), runs as non-root, and uses ~11 MB of RAM at steady state. dbmazz creates the publication, the replication slot, and the audit columns on the sink automatically on first start, and keeps its LSN checkpoint in the source database itself.
+
+Full configuration reference: [`docs/configuration.md`](docs/configuration.md). Compose, AWS ECS Fargate, secrets management, and monitoring: [`docs/production-deployment.md`](docs/production-deployment.md).
+
+### Or use the CLI for a complete demo (no databases of your own needed)
+
+The `ez-cdc` CLI bundles a one-liner installer plus a `quickstart` command that spins up a demo PostgreSQL source, a demo StarRocks sink, and a dbmazz daemon — all in containers — and opens a live terminal dashboard:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+ez-cdc datasource init                                    # write a starter config
+ez-cdc datasource add                                     # interactive wizard
+ez-cdc quickstart --source demo-pg --sink demo-starrocks  # spin up + live dashboard
+```
+
+The CLI runs on Linux and macOS (`amd64` and `arm64`); the binary is downloaded from the latest GitHub release, checksum-verified, and installed to `$HOME/.local/bin/ez-cdc`. Press `t` in the dashboard to generate live traffic, `q` to quit.
+
+### Run the verification suite
+
+The CLI also ships with a 13-check end-to-end test harness that validates every supported sink: schema, snapshot integrity, CDC `INSERT`/`UPDATE`/`DELETE`, TOAST handling, NULL roundtrip, and idempotency drift over time.
+
+```bash
+ez-cdc verify --source demo-pg --sink demo-starrocks           # full suite
+ez-cdc verify --source demo-pg --sink demo-pg-target --quick   # skip slow checks
+```
+
+Use `--json-report results.json` to wire it into CI.
 
 ---
 
