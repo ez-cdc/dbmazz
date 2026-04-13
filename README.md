@@ -33,7 +33,7 @@ dbmazz is what CDC looks like without the JVM tax: a single Rust binary that rea
 The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
 
 <div align="center">
-  <img src="assets/demo.svg" alt="dbmazz TUI dashboard demo" width="90%">
+  <img src="assets/demo.gif" alt="dbmazz TUI dashboard demo" width="90%">
   <br>
   <sup><i>The <code>ez-cdc</code> CLI in <code>quickstart</code> mode — live throughput, lag, source vs target row counts.</i></sup>
 </div>
