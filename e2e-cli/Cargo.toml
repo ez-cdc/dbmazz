@@ -35,7 +35,10 @@ color-eyre = "0.6"
 thiserror = "2"
 
 # HTTP + DB
-reqwest = { version = "0.13", features = ["json"] }
+# `default-features = false` + `rustls-tls` avoids native-tls → openssl-sys,
+# which would otherwise pull in a system libssl and break cross-compilation
+# to x86_64-apple-darwin from the ARM-native `macos-latest` release runner.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { version = "1", features = ["full"] }
 tokio-postgres = "0.7"
 tokio-util = { version = "0.7", features = ["rt"] }
