@@ -153,6 +153,55 @@ Format: `vMAJOR.MINOR.PATCH` (e.g., `v1.3.2`). Tags only on `main`.
 - Rollout via canary tiers: `canary` → `early_adopter` → `stable`
 - Worker-agent manages dbmazz lifecycle; version comes from `daemon_versions` table
 
+## Changelog Discipline (NON-NEGOTIABLE)
+
+**Every change that affects user-visible behaviour MUST update `CHANGELOG.md` under the `[Unreleased]` section in the same PR.** Do not defer it to release time. Do not assume "the release bot will pick it up". The `[Unreleased]` block must always reflect the current main branch state.
+
+### What counts as user-visible (update CHANGELOG)
+
+- New features, new sinks, new sources, new env vars
+- New gRPC RPCs or HTTP endpoints
+- Bug fixes that change observable behaviour
+- Performance improvements with measurable impact
+- Breaking changes (config, wire protocol, checkpoint format, schema)
+- Default value changes
+- Removed features, deprecated APIs
+- New supported PG versions, new supported sink versions
+- Security fixes (always)
+
+### What does NOT count
+
+- Internal refactors with no behaviour change
+- Test additions
+- README / docs reorganisation (unless it documents new behaviour)
+- CI / build pipeline changes that don't affect what gets shipped
+
+### Format
+
+Follow [Keep a Changelog](https://keepachangelog.com/). The existing `CHANGELOG.md` already uses this convention:
+
+```markdown
+## [Unreleased]
+
+### Added
+- New thing X
+
+### Changed
+- Behaviour Y now does Z
+
+### Fixed
+- Bug in W
+
+### Removed
+- Deprecated function Q
+```
+
+The release workflow closes `[Unreleased]` and creates a versioned section (`## [1.6.4] - 2026-04-13`) automatically when the release tag is cut. Your job as a contributor is to keep `[Unreleased]` accurate as you go — **never wait until release time**, and never assume someone else will do it.
+
+### When in doubt, write the entry
+
+If you're not sure whether a change is user-visible, write the entry anyway. A noisy CHANGELOG is recoverable; a missed entry leaves users confused about what changed in a release.
+
 ## Build & Test
 
 ```bash
