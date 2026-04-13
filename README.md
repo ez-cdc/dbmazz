@@ -75,19 +75,24 @@ source/target row counts in real time. Press `t` to generate traffic,
 
 ### Use your own databases
 
-Run the daemon directly with Docker and configure everything from the
-web UI at `http://localhost:8080`:
+Run the daemon directly with Docker, passing connection details via
+environment variables:
 
 ```bash
 docker run -d --name dbmazz \
+  -e SOURCE_URL="postgres://user:pass@host:5432/mydb?replication=database" \
+  -e TABLES="orders,order_items" \
+  -e SINK_TYPE="starrocks" \
+  -e SINK_URL="http://starrocks-fe:8030" \
+  -e SINK_DATABASE="analytics" \
   -p 8080:8080 -p 50051:50051 \
   ghcr.io/ez-cdc/dbmazz:latest
 ```
 
-A setup wizard lets you test connections, discover tables, and start
-replication with one click. No config files needed. See
-[`docs/configuration.md`](docs/configuration.md) for the full list of
-environment variables if you prefer to configure via env vars.
+See [`docs/configuration.md`](docs/configuration.md) for the full list
+of environment variables, and
+[`docs/production-deployment.md`](docs/production-deployment.md) for
+Docker Compose and ECS examples with secrets management.
 
 ---
 
@@ -297,8 +302,8 @@ docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
 ```
 
 The image is multi-arch (`linux/amd64` + `linux/arm64`), runs as
-non-root, and ships with the web UI, Prometheus metrics, and gRPC
-control plane enabled by default.
+non-root, and ships with the HTTP API (Prometheus metrics, health
+check, control endpoints) and gRPC control plane enabled by default.
 
 The `ez-cdc` CLI pulls this image automatically when you run
 `ez-cdc quickstart` or `ez-cdc verify`. If you want to run dbmazz
@@ -311,8 +316,6 @@ documented in [`docs/production-deployment.md`](docs/production-deployment.md).
 <summary><strong>⚙️ Configuration</strong></summary>
 
 Configured via environment variables. See [`docs/configuration.md`](docs/configuration.md) for a full reference with all variables organized by section.
-
-With the HTTP API enabled (default), all connection variables are optional — you can configure everything from the browser instead.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -344,11 +347,10 @@ With the HTTP API enabled (default), all connection variables are optional — y
 <details>
 <summary><strong>🌐 HTTP API</strong></summary>
 
-The web UI and HTTP endpoints are enabled by default. To opt out, build with `--no-default-features`.
+The HTTP endpoints are enabled by default on port 8080. To opt out, build with `--no-default-features`.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/` | Web UI (setup wizard or live dashboard) |
 | GET | `/healthz` | Health check |
 | GET | `/status` | Full metrics JSON |
 | GET | `/metrics/prometheus` | Prometheus metrics |
@@ -453,7 +455,7 @@ See [docs/architecture.md](docs/architecture.md) for the full data flow, module 
 <summary><strong>🔨 Build from source</strong></summary>
 
 ```bash
-cargo build --release       # Default build: all 3 sinks + HTTP API + web UI
+cargo build --release       # Default build: all 3 sinks + HTTP API
 ```
 
 For an extra-minimal binary without the HTTP API:
