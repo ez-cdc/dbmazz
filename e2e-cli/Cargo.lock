@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "ez-cdc-cli"
-version = "1.4.4"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
