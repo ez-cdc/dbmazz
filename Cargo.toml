@@ -8,7 +8,7 @@ license = "Elastic-2.0"
 rust-version = "1.91.1"
 
 [features]
-default = ["sink-starrocks", "sink-postgres", "sink-snowflake", "grpc-reflection"]
+default = ["sink-starrocks", "sink-postgres", "sink-snowflake", "grpc-reflection", "http-api"]
 http-api = ["dep:axum", "dep:tower-http"]
 sink-starrocks = ["dep:curl", "dep:mysql_async", "dep:openssl-sys"]
 sink-postgres = []
