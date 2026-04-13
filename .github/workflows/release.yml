@@ -222,8 +222,12 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             asset: ez-cdc-linux-arm64
+          # `macos-13` is end-of-life in GitHub Actions, so we cross-compile
+          # x86_64-apple-darwin from the ARM-native `macos-latest` runner.
+          # `dtolnay/rust-toolchain` installs the target toolchain, and the
+          # macOS SDK shipped with Xcode on macos-latest can link both arches.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-latest
             asset: ez-cdc-darwin-amd64
           - target: aarch64-apple-darwin
             runner: macos-latest
