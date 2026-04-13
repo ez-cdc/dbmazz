@@ -25,7 +25,7 @@ pub fn run_logs(_config_path: &Path, service: Option<String>, follow: bool, tail
 /// Find the running (or most recent) dbmazz pair compose in the cache
 /// directory and tail its logs.
 fn show_dbmazz_docker_logs(follow: bool, tail: u32) -> anyhow::Result<()> {
-    let compose_cache = crate::paths::CLI_DIR.join(".cache").join("compose");
+    let compose_cache = crate::paths::cache_dir().join("compose");
 
     if !compose_cache.exists() {
         println!(

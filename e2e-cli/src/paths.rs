@@ -34,9 +34,42 @@ pub static REPO_ROOT: Lazy<PathBuf> = Lazy::new(|| {
 /// Fixtures directory (`<repo>/e2e-cli/fixtures/`).
 pub static FIXTURES_DIR: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join("fixtures"));
 
-/// Compose cache directory (`<repo>/e2e-cli/.cache/compose/`).
+/// Compose cache directory (legacy — inside CLI_DIR).
+///
+/// Do NOT use. Resolves to the manifest dir baked at compile time,
+/// which is invalid for binaries distributed via `install.sh`. Use
+/// [`cache_dir()`] instead.
 #[allow(dead_code)]
 pub static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| CLI_DIR.join(".cache").join("compose"));
+
+/// User-local cache directory for ez-cdc generated artifacts
+/// (compose files, .env files, etc.).
+///
+/// Resolves with the XDG Base Directory spec so it works regardless
+/// of how the CLI was installed (curl|sh, cargo install, brew, clone
+/// + cargo run, etc.):
+///
+///  1. `$XDG_CACHE_HOME/ez-cdc`
+///  2. `$HOME/.cache/ez-cdc`
+///  3. fallback to the current directory's `.cache/ez-cdc`
+///
+/// This replaces the old `CLI_DIR/.cache/...` path, which was broken
+/// for binaries whose `CARGO_MANIFEST_DIR` (baked at compile time)
+/// points at the CI runner's filesystem — `Permission denied` when
+/// the CLI tries to `mkdir -p /home/runner/...`.
+pub fn cache_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("ez-cdc");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home).join(".cache").join("ez-cdc");
+        }
+    }
+    PathBuf::from(".cache").join("ez-cdc")
+}
 
 /// PostgreSQL seed SQL file.
 #[allow(dead_code)]

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 mod clients;
 mod commands;
@@ -159,6 +160,24 @@ enum Commands {
         #[arg(long, short)]
         yes: bool,
     },
+    /// Print a shell completion script to stdout.
+    ///
+    /// Redirect the output to wherever your shell looks for completion
+    /// files. For zsh:
+    ///
+    ///     ez-cdc completions zsh > "${fpath[1]}/_ez-cdc"
+    ///
+    /// For bash:
+    ///
+    ///     ez-cdc completions bash > ~/.local/share/bash-completion/completions/ez-cdc
+    ///
+    /// For fish:
+    ///
+    ///     ez-cdc completions fish > ~/.config/fish/completions/ez-cdc.fish
+    Completions {
+        /// Target shell (bash, zsh, fish, powershell, elvish).
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,6 +233,16 @@ async fn main() -> color_eyre::Result<()> {
 
     let cli = Cli::parse();
     let config_path = resolve_config_path(cli.config);
+
+    // The `completions` subcommand prints a shell script to stdout that is
+    // meant to be piped into a completion file. Banner / color / any extra
+    // output corrupts the script, so short-circuit before rendering.
+    if let Some(Commands::Completions { shell }) = cli.command {
+        let mut cmd = Cli::command();
+        let bin = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, bin, &mut std::io::stdout());
+        return Ok(());
+    }
 
     match cli.command {
         Some(cmd) => {
@@ -292,6 +321,10 @@ async fn main() -> color_eyre::Result<()> {
                 }
                 Commands::Clean { source, sink, yes } => {
                     commands::clean::run_clean(&config_path, source, sink, yes).await
+                }
+                Commands::Completions { .. } => {
+                    // handled above the match via early return
+                    unreachable!("Completions should be handled before the banner is printed");
                 }
             };
 

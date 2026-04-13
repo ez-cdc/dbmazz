@@ -62,7 +62,9 @@ fn extract_port(url_str: &str) -> Option<u16> {
 // ── Cache layout ───────────────────────────────────────────────────────────
 
 fn cache_root() -> PathBuf {
-    paths::CLI_DIR.join(".cache").join("compose")
+    // User-local cache (XDG-style). Works for standalone installs
+    // where the binary cannot write inside the compile-time manifest dir.
+    paths::cache_dir().join("compose")
 }
 
 /// Return the cache directory for a (source_name, sink_name) pair.
