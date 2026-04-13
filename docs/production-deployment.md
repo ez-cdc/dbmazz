@@ -58,7 +58,7 @@ patch/minor of a major/minor track. `:latest` exists but you should not
 use it in production.
 
 The daemon exposes:
-- `:8080` — HTTP API, web UI, Prometheus metrics, health check
+- `:8080` — HTTP API (health check, Prometheus metrics, status, pause/resume/drain-stop)
 - `:50051` — gRPC control plane (pause/resume/snapshot)
 
 ## Docker Compose
@@ -166,7 +166,7 @@ Notes:
   secrets listed.
 - Fargate handles container restarts and health checks automatically.
 - Use an ALB target group pointing to port 8080 if you want to expose
-  the web UI or Prometheus metrics outside the VPC.
+  the Prometheus metrics endpoint outside the VPC.
 
 ## Secrets
 
