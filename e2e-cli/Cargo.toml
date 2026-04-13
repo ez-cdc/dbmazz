@@ -1,6 +1,6 @@
 [package]
 name = "ez-cdc-cli"
-version = "1.4.4"
+version = "1.6.3"
 edition = "2021"
 license = "Elastic-2.0"
 description = "EZ-CDC end-to-end test harness — interactive CLI for verify, load, and quickstart"
