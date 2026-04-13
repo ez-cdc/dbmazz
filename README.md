@@ -17,11 +17,25 @@ A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or
 [![Discussions](https://img.shields.io/badge/GitHub-Discussions-181717?logo=github)](https://github.com/ez-cdc/dbmazz/discussions)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
 
-[Quickstart](#-try-it-in-2-minutes) · [At a glance](#at-a-glance) · [What is dbmazz?](#what-is-dbmazz) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment)
+[Quickstart](#-try-it-in-2-minutes) · [What is dbmazz?](#what-is-dbmazz) · [At a glance](#at-a-glance) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment)
 
 [deb-faq]: https://debezium.io/documentation/faq/
 [air-deploy]: https://docs.airbyte.com/platform/deploying-airbyte
 
+</div>
+
+---
+
+## What is dbmazz?
+
+dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
+
+The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
+
+<div align="center">
+  <img src="assets/demo.svg" alt="dbmazz TUI dashboard demo" width="90%">
+  <br>
+  <sup><i>The <code>ez-cdc</code> CLI in <code>quickstart</code> mode — live throughput, lag, source vs target row counts.</i></sup>
 </div>
 
 ---
@@ -46,20 +60,6 @@ Each tool optimizes for different things. dbmazz optimizes for **resource effici
 - **Airbyte**: [official deployment docs](https://docs.airbyte.com/platform/deploying-airbyte) (4 vCPU + 8 GB minimum recommended).
 - **Sequin**: their docs do not publish a memory footprint as of this comparison; we list it as "not published" rather than guess.
 - **dbmazz**: from [our own benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md) (40 daemons concurrent on a single 2 vCPU / 4 GB worker, ~11 MB RSS each).
-
----
-
-## What is dbmazz?
-
-dbmazz is what CDC looks like without the JVM tax: a single Rust binary that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
-
-The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
-
-<div align="center">
-  <img src="assets/demo.svg" alt="dbmazz TUI dashboard demo" width="90%">
-  <br>
-  <sup><i>The <code>ez-cdc</code> CLI in <code>quickstart</code> mode — live throughput, lag, source vs target row counts.</i></sup>
-</div>
 
 ---
 
