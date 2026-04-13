@@ -224,6 +224,11 @@ fn build_env_file(source: &SourceSpec, sink: &SinkSpec, settings: &PipelineSetti
             if let Some(key_path) = &sf.private_key_path {
                 lines.push(format!("SINK_SNOWFLAKE_PRIVATE_KEY_PATH={key_path}"));
             }
+            if let Some(passphrase) = &sf.private_key_passphrase {
+                lines.push(format!(
+                    "SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE={passphrase}"
+                ));
+            }
         }
     }
 

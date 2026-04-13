@@ -109,6 +109,7 @@ mod tests {
             warehouse: "wh".to_string(),
             role: None,
             private_key_path: None,
+            private_key_passphrase: None,
             soft_delete: true,
         });
         let backend = instantiate_backend(&spec).expect("should create backend");

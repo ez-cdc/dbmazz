@@ -184,6 +184,13 @@ pub struct SnowflakeSinkSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
 
+    /// Optional passphrase for an encrypted RSA private key. Only
+    /// used when `private_key_path` points at a key that was created
+    /// with `openssl pkcs8 -topk8 -v2 des3` or similar. Maps to
+    /// `SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_passphrase: Option<String>,
+
     /// If true, DELETEs become `_DBMAZZ_IS_DELETED=true`.
     #[serde(default = "default_true")]
     pub soft_delete: bool,
@@ -208,6 +215,10 @@ impl fmt::Debug for SnowflakeSinkSpec {
             .field("warehouse", &self.warehouse)
             .field("role", &self.role)
             .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "***"),
+            )
             .field("soft_delete", &self.soft_delete)
             .finish()
     }
@@ -346,6 +357,8 @@ pub struct SnowflakeSinkInner {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_key_passphrase: Option<String>,
     #[serde(default = "default_true")]
     pub soft_delete: bool,
 }
@@ -361,6 +374,10 @@ impl fmt::Debug for SnowflakeSinkInner {
             .field("warehouse", &self.warehouse)
             .field("role", &self.role)
             .field("private_key_path", &self.private_key_path)
+            .field(
+                "private_key_passphrase",
+                &self.private_key_passphrase.as_ref().map(|_| "***"),
+            )
             .field("soft_delete", &self.soft_delete)
             .finish()
     }
@@ -427,6 +444,12 @@ pub struct PipelineSettings {
 
     #[serde(default = "default_sf_flush_bytes")]
     pub snowflake_flush_bytes: u64,
+
+    /// Snowflake normalizer MERGE polling interval (milliseconds).
+    /// Only used when a sink of type `snowflake` is running. Optional —
+    /// when absent, the daemon uses its built-in default (30_000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snowflake_merge_interval_ms: Option<u32>,
 }
 
 // NOTE: every default below must match the dbmazz daemon's own defaults
@@ -470,6 +493,7 @@ impl Default for PipelineSettings {
             rust_log: default_rust_log(),
             snowflake_flush_files: default_sf_flush_files(),
             snowflake_flush_bytes: default_sf_flush_bytes(),
+            snowflake_merge_interval_ms: None,
         }
     }
 }
@@ -477,7 +501,7 @@ impl Default for PipelineSettings {
 impl PipelineSettings {
     /// Render as `KEY=value` lines for the `.env` file.
     pub fn to_env_lines(&self) -> Vec<String> {
-        vec![
+        let mut lines = vec![
             format!("FLUSH_SIZE={}", self.flush_size),
             format!("FLUSH_INTERVAL_MS={}", self.flush_interval_ms),
             format!("DO_SNAPSHOT={}", if self.do_snapshot { "true" } else { "false" }),
@@ -490,7 +514,11 @@ impl PipelineSettings {
             format!("RUST_LOG={}", self.rust_log),
             format!("SINK_SNOWFLAKE_FLUSH_FILES={}", self.snowflake_flush_files),
             format!("SINK_SNOWFLAKE_FLUSH_BYTES={}", self.snowflake_flush_bytes),
-        ]
+        ];
+        if let Some(ms) = self.snowflake_merge_interval_ms {
+            lines.push(format!("SINK_SNOWFLAKE_MERGE_INTERVAL_MS={ms}"));
+        }
+        lines
     }
 }
 
@@ -726,10 +754,12 @@ sinks:
             warehouse: "wh".into(),
             role: None,
             private_key_path: None,
+            private_key_passphrase: Some("passphrase_456".into()),
             soft_delete: true,
         };
         let debug = format!("{sf:?}");
         assert!(!debug.contains("super_secret_123"));
+        assert!(!debug.contains("passphrase_456"));
         assert!(debug.contains("***"));
     }
 

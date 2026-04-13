@@ -381,7 +381,11 @@ fn build_sf_sink_wizard() -> Result<SnowflakeSinkInner, prompts::PromptError> {
         schema_name: if schema.trim().is_empty() { "PUBLIC".into() } else { schema.trim().to_string() },
         warehouse: warehouse.trim().to_string(),
         role: if role.trim().is_empty() { None } else { Some(role.trim().to_string()) },
+        // JWT key-pair auth is an advanced option; the wizard leaves
+        // these None and users who need it edit the yaml directly
+        // (see the blank template for documentation).
         private_key_path: None,
+        private_key_passphrase: None,
         soft_delete: true,
     })
 }

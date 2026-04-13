@@ -73,6 +73,12 @@ settings:
   # Maps to SINK_SNOWFLAKE_FLUSH_BYTES.
   # snowflake_flush_bytes: 104857600
 
+  # Normalizer MERGE polling interval (milliseconds). After raw rows
+  # land in the staging table, the normalizer MERGE runs on this
+  # cadence to produce the final deduplicated target. Default: 30000.
+  # Maps to SINK_SNOWFLAKE_MERGE_INTERVAL_MS.
+  # snowflake_merge_interval_ms: 30000
+
 # ─────────────────────────────────────────────────────────────────────
 # Sources — what we read FROM
 #
@@ -213,13 +219,15 @@ sinks: {}
 #     # ── Authentication ────────────────────────────────────────────
 #     # Preferred: JWT key-pair auth. Generate with:
 #     #   openssl genrsa 2048 | openssl pkcs8 -topk8 -v2 des3 -out snowflake.p8
-#     # and register the public key on the Snowflake user. Then set:
+#     # and register the public key on the Snowflake user.
 #     # Maps to SINK_SNOWFLAKE_PRIVATE_KEY_PATH.
 #     # private_key_path: /etc/ez-cdc/snowflake.p8
 #     #
-#     # If the key is encrypted, also set the passphrase via
-#     # environment variable (no YAML mapping):
-#     #   SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=...
+#     # Passphrase for an encrypted private key. Omit for unencrypted keys.
+#     # Use ${VAR} and export the passphrase in the environment rather
+#     # than hardcoding it here.
+#     # Maps to SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE.
+#     # private_key_passphrase: ${SF_KEY_PASSPHRASE}
 #
 #     # Fallback: username + password. Not recommended for production.
 #     # Maps to SINK_USER / SINK_PASSWORD.
@@ -234,18 +242,14 @@ sinks: {}
 #     soft_delete: true
 
 # ─────────────────────────────────────────────────────────────────────
-# Advanced — environment-only variables (no YAML mapping)
+# Ports — not configurable through this file
 #
-# The following dbmazz variables cannot be set via this file. Export
-# them in the environment where you run `ez-cdc` and they will be
-# passed through to the dbmazz container.
+# `GRPC_PORT` (50051) and `HTTP_API_PORT` (8080) are fixed by the CLI
+# because the generated docker-compose service publishes them to the
+# host at the same values. Changing them here would desynchronize the
+# published ports and break `ez-cdc quickstart` / `ez-cdc verify`.
 #
-#   SINK_SNOWFLAKE_PRIVATE_KEY_PASSPHRASE  Passphrase for an encrypted
-#                                          Snowflake private key.
-#   SINK_SNOWFLAKE_MERGE_INTERVAL_MS       Normalizer MERGE polling
-#                                          interval (default 30000).
-#   GRPC_PORT                              dbmazz gRPC port
-#                                          (default 50051).
-#   HTTP_API_PORT                          dbmazz HTTP API port
-#                                          (default 8080).
+# If you need to run dbmazz on different ports, use
+# `docker run ghcr.io/ez-cdc/dbmazz:<version>` directly (see
+# docs/production-deployment.md) instead of the CLI.
 # ─────────────────────────────────────────────────────────────────────
