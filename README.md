@@ -1,82 +1,92 @@
 <div align="center">
 
-<a href="https://ez-cdc.com" target="_blank">
-  <img src="assets/ez-cdc-banner.png" alt="EZ-CDC — Real-time Change Data Capture" width="100%">
+<a href="https://github.com/ez-cdc/dbmazz" target="_blank">
+  <img src="assets/ez-cdc-banner.png" alt="dbmazz — Real-time PostgreSQL CDC" width="100%">
 </a>
 
 <br>
 
-**Real-time data replication, radically simplified**
+# dbmazz
 
-Sub-second latency · 5 MB memory · Zero config · One binary · Written in Rust
+**Real-time PostgreSQL CDC in ~11 MB of RAM. One binary. No Kafka.**
 
-[![License](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
+A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or another PostgreSQL with sub-second replication lag — **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
+
+Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
+
+[![License: ELv2](https://img.shields.io/badge/license-ELv2-blue.svg)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-ez--cdc%2Fdbmazz-0969da?logo=docker)](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz)
+[![Discussions](https://img.shields.io/badge/GitHub-Discussions-181717?logo=github)](https://github.com/ez-cdc/dbmazz/discussions)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
 
-[Install the CLI](#-install-the-cli) · [Quickstart](#-quickstart) · [Run in production](#-run-in-production) · [Why dbmazz?](#why-dbmazz) · [Performance](#performance) · [EZ-CDC Cloud](#️-scale-with-ez-cdc-cloud) · [Reference](#-reference)
+[Quickstart](#-try-it-in-2-minutes) · [What is dbmazz?](#what-is-dbmazz) · [At a glance](#at-a-glance) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment)
+
+[deb-faq]: https://debezium.io/documentation/faq/
+[air-deploy]: https://docs.airbyte.com/platform/deploying-airbyte
 
 </div>
 
 ---
 
-## 📦 Install the CLI
+## What is dbmazz?
 
-One-liner installer — no Rust toolchain, no clone, no compile:
+dbmazz is what CDC looks like without the JVM tax: a single Rust binary, built and maintained by **[EZ-CDC](https://ez-cdc.com)**, that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
 
-```bash
-curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
-```
+The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
 
-Supports Linux and macOS on both amd64 and arm64. The binary is
-downloaded from the latest GitHub release, checksum-verified, and
-installed to `$HOME/.local/bin/ez-cdc` (or `/usr/local/bin` with sudo).
-
-Pin a specific version or change the install dir with:
-
-```bash
-EZ_CDC_VERSION=v1.5.2 curl -sSL .../install.sh | sh
-EZ_CDC_INSTALL_DIR=/opt/bin curl -sSL .../install.sh | sh
-```
+<div align="center">
+  <img src="assets/demo.gif" alt="dbmazz TUI dashboard demo" width="90%">
+  <br>
+  <sup><i>The <code>ez-cdc</code> CLI in <code>quickstart</code> mode — live throughput, lag, source vs target row counts.</i></sup>
+</div>
 
 ---
 
-## 🚀 Quickstart
+## At a glance
 
-```bash
-ez-cdc datasource init                  # write ~/.config/ez-cdc/config.yaml
-ez-cdc datasource add                   # guided wizard to add a source and a sink
-ez-cdc quickstart --source <name> --sink <name>
-```
+How dbmazz compares to other open-source CDC tools on **resource footprint** and **deployment complexity** — the two dimensions where dbmazz is purpose-built to win.
 
-`datasource init` writes a blank config with every dbmazz option
-documented inline and comments for every source/sink type. You can
-edit it by hand or use the `datasource add` wizard.
+|  | **dbmazz** | Debezium (standard) | PeerDB | Airbyte | Sequin |
+|---|---|---|---|---|---|
+| **Language / runtime** | Rust (static binary) | Java / JVM | Go + Temporal | Java / Python | Elixir / BEAM |
+| **Replication mode** | **Real-time CDC** (sub-second WAL streaming) | Real-time CDC (sub-second WAL streaming) | Near-real-time (~10 s freshness at high throughput) | **Batch ETL** (scheduled syncs, minutes – hours) | Real-time CDC (~55 ms p50) |
+| **Components for one PG → sink pipeline** | **1** (single binary) | 2–7 (JVM + Kafka + …) | 3–4 (Server + Postgres + Temporal) | 7–10+ (microservices) | 2 (Container + Postgres) |
+| **External dependencies** | **none** | Kafka, ZooKeeper | Temporal, MinIO / S3 | Postgres, Temporal, scheduler | Postgres |
+| **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 48–64 GB (enterprise tier) | 8 GB+ minimum recommended | not published |
+| **Deployment** | `docker run -e SOURCE_URL=… -e SINK_URL=…` | Compose / K8s with multiple services | Docker Compose with Temporal stack | Docker Compose / K8s with microservices | Docker + Postgres |
 
-`quickstart` pulls the official `ghcr.io/ez-cdc/dbmazz` image from
-GHCR, starts the containers, runs snapshot + CDC replication, and
-opens a live terminal dashboard showing throughput, lag, and
-source/target row counts in real time. Press `t` to generate traffic,
-`q` to quit.
+Each tool optimizes for different things. dbmazz optimizes for **resource efficiency and operational simplicity**. The numbers above are from each project's own documentation:
 
-> Docker must be running. To test a patched daemon locally, set
-> `DBMAZZ_IMAGE=my-tag:dev` before running `ez-cdc`.
->
-> Config location: `$XDG_CONFIG_HOME/ez-cdc/config.yaml` (or
-> `~/.config/ez-cdc/config.yaml`). Override with `--config PATH` or
-> `$EZ_CDC_CONFIG`. If you are running from inside a clone of this
-> repo, `./ez-cdc.yaml` in the working directory still works as a
-> fallback.
->
-> Networking: the `dbmazz` container reaches the host via
-> `host.docker.internal`. `localhost`/`127.0.0.1` hosts in your
-> datasource URLs are rewritten automatically, so you can keep using
-> `localhost:5432` in the yaml whether your source/sink is native on
-> the host or in another container that publishes its port.
+- **Debezium**: [official FAQ](https://debezium.io/documentation/faq/) (256 MB – 2 GB typical heap), with 4 GB+ for high-throughput per [RisingWave's deployment guide](https://risingwave.com/blog/debezium-kubernetes-deployment-production/).
+- **PeerDB**: [GitHub issue #2727](https://github.com/PeerDB-io/peerdb/issues/2727) (enterprise flow workers; smaller deployments are not published).
+- **Airbyte**: [official deployment docs](https://docs.airbyte.com/platform/deploying-airbyte) (4 vCPU + 8 GB minimum recommended).
+- **Sequin**: their docs do not publish a memory footprint as of this comparison; we list it as "not published" rather than guess.
+- **dbmazz**: from [our own benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md) (40 daemons concurrent on a single 2 vCPU / 4 GB worker, ~11 MB RSS each).
 
-### Use your own databases
+---
 
-Run the daemon directly with Docker, passing connection details via
-environment variables:
+## 🤔 Why dbmazz?
+
+In a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory used: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Every daemon held its own replication slot, parsed pgoutput, and pushed batched writes to the sink — for **~1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source was producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
+
+dbmazz is the alternative to running a streaming platform: a single Rust binary that connects to your Postgres source on one side and your sink on the other. No brokers, no clusters, no orchestration. Run it, point it at two databases, and you're replicating.
+
+### Where dbmazz wins
+
+- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. No sync windows, no scheduled jobs, no waiting for the next batch. If freshness matters to your downstream, that's the difference between an *operational replica* and a *day-old data lake*.
+- **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
+- **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between.
+- **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
+- **🔌 Embed CDC in your own product** — every dbmazz instance exposes gRPC and HTTP APIs for control and observability. Build higher-level systems on top, or integrate it into existing tooling without taking on a SaaS dependency.
+
+
+---
+
+## 🚀 Try it in 2 minutes
+
+### The simplest path — `docker run`
+
+If you already have a PostgreSQL source and a sink, the entire dbmazz deployment is one command:
 
 ```bash
 docker run -d --name dbmazz \
@@ -89,17 +99,141 @@ docker run -d --name dbmazz \
   ghcr.io/ez-cdc/dbmazz:latest
 ```
 
-See [`docs/configuration.md`](docs/configuration.md) for the full list
-of environment variables, and
-[`docs/production-deployment.md`](docs/production-deployment.md) for
-Docker Compose and ECS examples with secrets management.
+That's it. No Kafka cluster to provision. No separate state store. No connector to register. The container image is multi-arch (`amd64` + `arm64`), runs as non-root, and uses ~11 MB of RAM at steady state. dbmazz creates the publication, the replication slot, and the audit columns on the sink automatically on first start, and keeps its LSN checkpoint in the source database itself.
+
+Full configuration reference: [`docs/configuration.md`](docs/configuration.md). Compose, AWS ECS Fargate, secrets management, and monitoring: [`docs/production-deployment.md`](docs/production-deployment.md).
+
+### Or use the CLI for a complete demo (no databases of your own needed)
+
+The `ez-cdc` CLI bundles a one-liner installer plus a `quickstart` command that spins up a demo PostgreSQL source, a demo StarRocks sink, and a dbmazz daemon — all in containers — and opens a live terminal dashboard:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+ez-cdc datasource init                                    # write a starter config
+ez-cdc datasource add                                     # interactive wizard
+ez-cdc quickstart --source demo-pg --sink demo-starrocks  # spin up + live dashboard
+```
+
+The CLI runs on Linux and macOS (`amd64` and `arm64`); the binary is downloaded from the latest GitHub release, checksum-verified, and installed to `$HOME/.local/bin/ez-cdc`. Press `t` in the dashboard to generate live traffic, `q` to quit.
+
+### Run the verification suite
+
+The CLI also ships with a 13-check end-to-end test harness that validates every supported sink: schema, snapshot integrity, CDC `INSERT`/`UPDATE`/`DELETE`, TOAST handling, NULL roundtrip, and idempotency drift over time.
+
+```bash
+ez-cdc verify --source demo-pg --sink demo-starrocks           # full suite
+ez-cdc verify --source demo-pg --sink demo-pg-target --quick   # skip slow checks
+```
+
+Use `--json-report results.json` to wire it into CI.
 
 ---
 
-## 🐳 Run in production
+## 🔌 Supported sources & sinks
 
-The production path is a Docker container with pinned version,
-restart policy, and secrets in an env file:
+| Source | Sink | Status | Notes |
+|---|---|:---:|---|
+| PostgreSQL 12+ | **StarRocks** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed |
+| PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
+| PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported |
+| PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
+| MySQL | * | 🚧 Roadmap | The source layer is generic; PostgreSQL is the only implementation today |
+
+Adding a new sink is intentionally small: implement a 6-method `Sink` trait and CDC + snapshot work automatically. See [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
+
+---
+
+## How it works
+
+```
+PostgreSQL (source)               dbmazz                          Sink (target)
+┌──────────────┐               ┌────────────────────┐          ┌──────────────┐
+│  WAL         │   logical     │ WAL Handler        │          │ StarRocks    │
+│  (INSERT,    │   replication │   │                │          │ PostgreSQL   │
+│   UPDATE,    │ ────────────▶ │   ▼                │          │ Snowflake    │
+│   DELETE)    │   (pgoutput)  │ source/converter   │          │              │
+│              │               │   │                │          │              │
+│              │               │   ▼                │          │              │
+│              │               │ Pipeline           │  write   │              │
+│              │               │   │ batch + flush  │──batch──▶│              │
+│              │               │   ▼                │          │              │
+│              │               │ Checkpoint (LSN)   │          │              │
+│              │ ◀─────────────│  confirm to PG     │          │              │
+└──────────────┘               └────────────────────┘          └──────────────┘
+```
+
+dbmazz reads PostgreSQL's logical replication stream (`pgoutput` protocol), converts each event to a generic `CdcRecord`, batches records in a small in-memory pipeline, and writes them to a sink via a 6-method `Sink` trait. The sink owns its loading strategy entirely — Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake — the engine doesn't care.
+
+The critical invariant: **LSN checkpoints are persisted before being confirmed to PostgreSQL**. If we confirmed first and crashed, the WAL would be discarded with no local record — permanent data loss. dbmazz never does that.
+
+For initial backfill, dbmazz implements the [Flink CDC concurrent snapshot algorithm](https://github.com/apache/flink-cdc): each table is divided into PK-range chunks, processed by N parallel workers, and de-duplicated against the live WAL stream via low/high watermarks emitted with `pg_logical_emit_message`. Snapshot progress is persisted in PostgreSQL, so an interrupted snapshot resumes from the last completed chunk.
+
+### Guarantees
+
+- **At-least-once delivery.** LSN checkpoints are persisted to PostgreSQL *before* being confirmed back to it — never the other way around. After a crash, dbmazz resumes from the last persisted checkpoint; sinks should be idempotent at the primary key.
+- **Transactional ordering preserved.** Events from the same source transaction reach the sink in commit order. Cross-transaction ordering matches the WAL.
+- **Schema evolution detected.** New columns added to source tables are picked up from `pgoutput` Relation messages and propagated to sinks that support `ALTER TABLE ADD COLUMN` automatically (StarRocks, Snowflake). For PostgreSQL sinks, a manual `ALTER` on the target is currently required.
+- **Resumable snapshots.** An interrupted backfill resumes from the last completed PK chunk via state in the `dbmazz_snapshot_state` table.
+
+Full data flow, module map, and design decisions: [`docs/architecture.md`](docs/architecture.md).
+
+---
+
+## 📊 Performance
+
+We publish reproducible benchmarks with full hardware specs and methodology. Numbers below come from real runs, not synthetic projections.
+
+### Read this first — Snapshot vs CDC
+
+dbmazz operates in two modes with **fundamentally different resource profiles**. Don't conflate them.
+
+- **Snapshot** (one-time backfill) is a heavy parallel workload. It runs N concurrent `SELECT` chunks over multiple PostgreSQL connections, serializes millions of rows to the sink format, and pushes them in batches. The CPU and memory you see in the snapshot benchmark below reflect this *workload* — N workers each holding a chunk in memory waiting for the sink to ACK — not steady-state daemon overhead. Snapshot runs once.
+
+- **CDC streaming** (steady state) is an entirely different beast. dbmazz reads logical replication messages over a *single* PostgreSQL connection, batches them in a small in-memory channel, and flushes to the sink. There is no read-side parallelism because the WAL stream is sequential. Memory is bounded by the channel buffer (a few thousand events, configurable). This is what you run 99% of the time, and it costs almost nothing.
+
+> **TL;DR**: if you see "1.7 GB RSS" in the snapshot benchmark and assume that's what dbmazz uses on your production CDC pipeline — that's the wrong takeaway. CDC steady state runs in a fraction of the resources because the mechanism is fundamentally lighter.
+
+### Snapshot — TPC-DS 1 TB (partial run)
+
+We published a partial TPC-DS 1 TB snapshot run alongside the source code so you can see exactly what we measured, on what hardware, and where the bottleneck is.
+
+- **Source**: PostgreSQL 16 on RDS (`us-west-2`), gp3 storage
+- **Sink**: StarRocks on EC2 (same region)
+- **Worker**: c5.2xlarge — 8 vCPU, 16 GB RAM
+- **Workers / chunk size**: 25 concurrent / 50,000 rows
+- **Dataset**: 25 tables, ~6.35 B rows total
+- **Result**: ~110 K rows/sec sustained, ~1.7 GB RSS, 82–91 % CPU sustained
+- **Estimated total time** (full 1 TB): ~16 hours
+
+> **Status**: this is a *partial* run (2,176 of 113,129 chunks completed at the time of recording). A complete end-to-end run is in progress. Full report with timing breakdown, optimizations applied, and known bottlenecks: [`benchmarks/2026-03-07-tpcds-1tb-snapshot.md`](benchmarks/2026-03-07-tpcds-1tb-snapshot.md).
+
+**Where's the bottleneck?** All 8 vCPUs of the worker are saturated on JSON serialization and gzip compression — the bottleneck is *worker compute*, not PostgreSQL or StarRocks. Larger instances scale further until you hit the source DB's read IOPS ceiling (typically ~12 K IOPS on RDS gp3).
+
+### CDC streaming — per-daemon footprint
+
+In a 3-day production load test, **40 dbmazz daemons ran concurrently on a single ~t3.medium worker** (2 vCPU / 4 GB RAM), split across three workload tiers that differed by 4 orders of magnitude in configured insert rate. Per-daemon footprint was nearly constant across all three tiers:
+
+| Tier | Configured rate (per source) | Jobs | CPU avg | RSS avg |
+|---|---|:---:|:---:|:---:|
+| **High-rate** | 500–1 000 inserts/sec | 10 | **11.3 millicores** | **11.0 MB** |
+| **Moderate-rate** | 50–100 inserts/sec | 20 | **10.7 millicores** | **10.7 MB** |
+| **Low-rate** | 1–5 inserts/min | 10 | **12.3 millicores** | **10.7 MB** |
+
+> **The headline finding**: dbmazz overhead is **fixed-cost per daemon**, not load-dependent. Whether the source is producing 1 000 inserts/sec or 1 insert/minute, a daemon converges on roughly **1 % of one CPU core and ~11 MB of RSS**. The cost is dominated by holding the replication slot, parsing pgoutput, and maintaining the sink connection — the marginal cost per event is invisible at this scale.
+
+The same worker reported **15 % total CPU and 522 MB total RAM used (12.7 % of capacity)** with all 40 daemons running. dbmazz scales horizontally on a single host: each daemon is an independent Unix process with its own replication slot and sink connection.
+
+Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benchmarks/2026-04-13-cdc-footprint-multitenant.md`](benchmarks/2026-04-13-cdc-footprint-multitenant.md).
+
+**What this does NOT measure**: maximum sustained throughput per daemon (no daemon was anywhere close to saturated), end-to-end lag percentiles (the workload was light enough that lag stayed below the metric's reporting threshold), or behaviour under a sink slowdown. A reproducible single-daemon throughput benchmark with `pgbench`-driven sustained load is tracked in [issue #71](https://github.com/ez-cdc/dbmazz/issues/71).
+
+---
+
+## 🐳 Production deployment
+
+The production path is a pinned Docker container, a restart policy, and secrets pulled from an env file or your secrets manager. dbmazz keeps its LSN checkpoint inside the source PostgreSQL itself, so restarts and version upgrades resume exactly where they left off — no external state store required.
+
+### Plain `docker run`
 
 ```bash
 docker run -d \
@@ -107,307 +241,125 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 -p 50051:50051 \
   --env-file /etc/dbmazz/env \
-  ghcr.io/ez-cdc/dbmazz:1.5.2
+  ghcr.io/ez-cdc/dbmazz:1
 ```
 
-See [`docs/production-deployment.md`](docs/production-deployment.md)
-for full guidance on Docker Compose, AWS ECS Fargate, secrets
-management, Prometheus monitoring, and operations (pause/resume/drain).
+### Docker Compose
 
-Running multiple pipelines? Need HA, auto-healing, and a web portal?
-See [EZ-CDC Cloud](https://ez-cdc.com).
+```yaml
+services:
+  dbmazz:
+    image: ghcr.io/ez-cdc/dbmazz:1
+    container_name: dbmazz
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    env_file: ./dbmazz.env       # gitignored
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+```
+
+### AWS ECS Fargate
+
+A 256 CPU / 512 MB Fargate task is enough for steady-state CDC (Fargate's minimum is the limit, not dbmazz's appetite). Pull `SOURCE_URL` and `SINK_PASSWORD` from Secrets Manager via the task definition's `secrets` block — never put them in `environment`. The full task-definition template is in [`docs/production-deployment.md`](docs/production-deployment.md).
+
+### Image, monitoring, and operations
+
+The official image is published on every release to [GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz). It's multi-arch (`linux/amd64` + `linux/arm64`), runs as non-root, and ships with the HTTP API and gRPC control plane enabled by default. Prometheus scrapes `/metrics/prometheus`; operations (`pause`, `resume`, `drain-stop`) are HTTP `POST`s.
+
+Full deployment guide — Compose with secrets, ECS task definitions, Secrets Manager / SSM patterns, alerting metrics, and operations playbooks: [`docs/production-deployment.md`](docs/production-deployment.md).
+
+> **Want someone else to run this for you?** [**EZ-CDC Cloud**](https://ez-cdc.com) deploys dbmazz into your own AWS or GCP account via Terraform — same engine, with managed updates, auto-healing workers, centralized monitoring across many jobs, and a web portal. BYOC, so the data never leaves your account.
 
 ---
 
-## 🧪 Test a sink end-to-end
+## 👩‍💻 For developers
 
-The `ez-cdc` CLI provides a single entry point for running the full
-e2e validation suite against any supported sink. It verifies snapshot,
-CDC (INSERT/UPDATE/DELETE), TOAST handling, schema consistency, and
-more — see [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
-for the full list of checks.
-
-### Supported sinks
-
-| Sink | Demo datasource | Requirements |
-|------|----------------|--------------|
-| StarRocks | `demo-starrocks` | Docker only |
-| PostgreSQL | `demo-pg-target` | Docker only |
-| Snowflake | (add via wizard) | Snowflake account |
-
-### Run verify
+### Build and test
 
 ```bash
-ez-cdc verify --source demo-pg --sink demo-starrocks          # full verification suite
-ez-cdc verify --source demo-pg --sink demo-pg-target          # PG target
-ez-cdc verify --source demo-pg --sink demo-starrocks --quick  # skip slow checks (TOAST, idempotency)
+cargo build --release             # default: all 3 sinks + HTTP API
+cargo test                        # unit + integration
+cargo fmt -- --check
+cargo clippy -- -D warnings
 ```
 
-### Snowflake
-
-Snowflake is cloud-only — no Docker container. Add credentials interactively
-with `ez-cdc datasource add`, or edit `ez-cdc.yaml` directly. Free 30-day
-trial at [signup.snowflake.com](https://signup.snowflake.com).
-
-### Other commands
+For a minimal build (without the HTTP API):
 
 ```bash
-ez-cdc status                                       # one-shot daemon status
-ez-cdc logs dbmazz                                  # tail dbmazz container logs
-ez-cdc clean --source <name> --sink <name>          # reset state between test runs
-ez-cdc datasource list                              # show configured datasources
-ez-cdc datasource add                               # interactive wizard
-ez-cdc datasource test <name>                       # validate connection
-ez-cdc --help                                       # see everything
+cargo build --release --no-default-features \
+  --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"
 ```
 
-> Adding a new sink? See [`e2e-cli/README.md`](e2e-cli/README.md) and
-> [`docs/contributing-connectors.md`](docs/contributing-connectors.md)
-> for the step-by-step checklist.
+Requires Rust 1.91.1+ (MSRV pinned by `aws-smithy-async`). System deps: `protobuf-compiler`, `musl-tools`, `pkg-config`, `perl`, `make`.
 
----
+The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it spins up source and sink containers in Docker, runs dbmazz against them, and validates the result with the 13-check verification harness.
 
-## Why dbmazz?
+### Contributing a new sink
 
-Other CDC tools need Kafka, ZooKeeper, JVM clusters, or multi-container orchestration. dbmazz is a single binary — download, run, replicate.
+The engine is sink-agnostic. Adding a new sink means implementing one trait — six methods, one with a default — modelled after Kafka Connect:
 
-|  |  |
-|--|--|
-| ⚡ **Fast** | 300K+ events/sec. Sub-second replication lag. |
-| 🪶 **Tiny** | ~5 MB memory footprint. Runs on the smallest EC2 instance or a Raspberry Pi. |
-| 🚀 **Simple** | One binary, zero dependencies. No Kafka, no JVM, no cluster. Up and running in minutes. |
-| 🔒 **Reliable** | At-least-once delivery via LSN checkpointing. No data loss. |
-| 📸 **Snapshot** | Backfill existing data with zero downtime — runs concurrently with CDC. |
-| 🔧 **Zero config** | Auto-creates publications, replication slots, sink tables, and audit columns. |
-| 📊 **Observable** | Built-in dashboard, Prometheus metrics, and gRPC API out of the box. |
-
-### Supported databases
-
-| Source | Sink | Status |
-|:-------|:-----|:-------|
-| PostgreSQL | StarRocks | Stable |
-| PostgreSQL | PostgreSQL | In development |
-| PostgreSQL | Snowflake | In development |
-
-MongoDB, S3, and more on the [roadmap](.plans/multi-sink-roadmap.md).
-
----
-
-## Performance
-
-### CDC Replication
-
-dbmazz reads the PostgreSQL WAL directly and streams changes to StarRocks. Single binary, no JVM, no Kafka, no intermediate queues.
-
-```
-  Throughput   ████████████████████████████████████████  300,000+ events/sec
-  Latency      █                                        < 1 second
-  Memory       ▏                                        ~ 5 MB
-  CPU          ▏                                        < 2%
+```rust
+#[async_trait]
+pub trait Sink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> SinkCapabilities;
+    async fn validate_connection(&self) -> Result<()>;
+    async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> { Ok(()) }
+    async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
+    async fn close(&mut self) -> Result<()>;
+}
 ```
 
-|  | dbmazz | Traditional CDC tools |
-|:--|:--:|:--|
-| **Runtime** | Single binary (5 MB RSS) | JVM + Kafka + ZooKeeper, or managed SaaS |
-| **Deployment** | One process, zero dependencies | Multi-container orchestration |
-| **Scaling model** | Vertical (one instance per job) | Horizontal (brokers, connectors, workers) |
+Snapshot and CDC both go through `write_batch()` — there is no separate snapshot path. The sink owns its loading strategy (Stream Load, `COPY`, S3 staging, `MERGE`, etc.) and the engine doesn't care.
 
----
-
-### Snapshot (Initial Backfill)
-
-Snapshot loads all existing rows before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
-
-<table>
-<tr><td>
-
-**Test environment** — TPC-DS 1TB (25 tables, 6.35 billion rows)
-
-| | |
-|--|--|
-| **Source** | PostgreSQL 16 — AWS RDS `db.r6i.2xlarge` (8 vCPU, 64 GB) |
-| **Worker** | EC2 `c6i.4xlarge` (16 vCPU, 32 GB) — same AZ |
-| **Storage** | gp3 (3,000 baseline IOPS, burst to 16,000) |
-
-</td></tr>
-</table>
-
-| Workers | Chunk size | Narrow tables | Wide tables | Worker CPU | Worker RAM |
-|:-------:|:----------:|---------------:|-------------:|:----------:|:----------:|
-| 6 | 150K | **130K rows/s** | 11K rows/s | 25–35% | ~2 GB |
-| 12 | 200K | **107K rows/s** | 22K rows/s | 60% | ~2 GB |
-| 20 | 50K | 93K rows/s | 15K rows/s | 87–97% | ~2 GB |
-
-<sup>Narrow: `catalog_returns` (27 cols, 144M rows). Wide: `catalog_sales` (34 cols, 1.44B rows).</sup>
-
-> **Where's the bottleneck?** On wide tables the worker sits idle at 3–7% CPU while RDS DiskQueueDepth hits 12 and ReadIOPS maxes at 12,000. The bottleneck is PostgreSQL disk I/O, not the CDC tool. Every CDC tool that reads from PostgreSQL hits this same ceiling.
-
----
-
-## ☁️ Scale with EZ-CDC Cloud
-
-dbmazz is the open-source CDC engine at the core of **<a href="https://ez-cdc.com" target="_blank">EZ-CDC</a>**. It's fast, reliable, and free to use.
-
-But running CDC in production means managing multiple jobs, monitoring them, handling failures, and keeping everything running 24/7. That's what EZ-CDC Cloud does.
-
-|  | **dbmazz** (open source) | **EZ-CDC Cloud** |
-|--|--------------------------|-------------------|
-| **Engine** | Full CDC engine (this repo) | Same engine, fully managed |
-| **Jobs** | 1 instance = 1 job | Unlimited jobs, one dashboard |
-| **Deployment** | You build, deploy, maintain | BYOC — deploys in your AWS/GCP via Terraform |
-| **Availability** | Manual restarts | Auto-healing workers, zero downtime |
-| **Monitoring** | Per-instance dashboard | Centralized metrics, alerting, historical dashboards |
-| **Security** | You manage credentials | AES-256 encryption, RBAC, audit logs, API keys |
-| **Web portal** | Status page at `:8080` | Full management portal for your team |
-| **API** | HTTP + gRPC per instance | REST API + MCP server (Claude, Cursor) |
-| **Support** | GitHub Issues | Enterprise SLAs |
-| **Cost** | Free | Pay per deployment |
-
-### When to use dbmazz
-
-- Single PostgreSQL → StarRocks pipeline
-- You're comfortable managing the process yourself
-- You want to embed the CDC engine in your own tooling
-
-### When to use EZ-CDC
-
-- Multiple replication jobs across databases
-- Zero-downtime with auto-healing and restarts
-- Centralized observability for all jobs
-- BYOC deployment with Terraform automation
-- Web portal for your team — no CLI needed
-- Enterprise security — encrypted configs, RBAC, API keys
-
-<p align="center">
-  <br>
-  <a href="https://ez-cdc.com" target="_blank"><strong>Get started with EZ-CDC Cloud →</strong></a>
-  <br><br>
-</p>
+**Full step-by-step guide**: [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
 
 ---
 
 ## 📖 Reference
 
-<details>
-<summary><strong>🐳 Docker deployment</strong></summary>
-
-The official image is published on every release to
-[GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz):
-
-```bash
-docker pull ghcr.io/ez-cdc/dbmazz:1.5.2   # pin to exact version
-docker pull ghcr.io/ez-cdc/dbmazz:1.5     # latest patch of 1.5
-docker pull ghcr.io/ez-cdc/dbmazz:1       # latest minor of 1
-docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
-```
-
-The image is multi-arch (`linux/amd64` + `linux/arm64`), runs as
-non-root, and ships with the HTTP API (Prometheus metrics, health
-check, control endpoints) and gRPC control plane enabled by default.
-
-The `ez-cdc` CLI pulls this image automatically when you run
-`ez-cdc quickstart` or `ez-cdc verify`. If you want to run dbmazz
-directly without the CLI, use `docker run` / Docker Compose / ECS as
-documented in [`docs/production-deployment.md`](docs/production-deployment.md).
-
-</details>
+The README intentionally keeps just the high-level surface here. For the full specs, follow the links inside each block to the dedicated docs.
 
 <details>
-<summary><strong>⚙️ Configuration</strong></summary>
+<summary><strong>⚙️ Configuration — key environment variables</strong></summary>
 
-Configured via environment variables. See [`docs/configuration.md`](docs/configuration.md) for a full reference with all variables organized by section.
+The most-used variables. **Full reference (every variable, every sink, every default)**: [`docs/configuration.md`](docs/configuration.md).
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SOURCE_URL` | — | PostgreSQL connection string (`?replication=database` required) |
-| `SOURCE_SLOT_NAME` | `dbmazz_slot` | Logical replication slot name |
-| `SOURCE_PUBLICATION_NAME` | `dbmazz_pub` | Publication name |
-| `TABLES` | `orders,order_items` | Comma-separated list of tables to replicate |
-| `SINK_URL` | — | StarRocks FE HTTP URL (e.g. `http://starrocks:8030`) |
-| `SINK_PORT` | `9030` | StarRocks FE MySQL port |
-| `SINK_DATABASE` | — | Target database in StarRocks |
-| `SINK_USER` | `root` | StarRocks user |
-| `SINK_PASSWORD` | *(empty)* | Sink password |
-| `SINK_SNOWFLAKE_ACCOUNT` | — | Snowflake account identifier (e.g. `xy12345.us-east-1`) |
-| `SINK_SNOWFLAKE_WAREHOUSE` | — | Snowflake warehouse for COPY/MERGE |
-| `SINK_SNOWFLAKE_ROLE` | *(empty)* | Snowflake role (optional) |
-| `SINK_SNOWFLAKE_PRIVATE_KEY_PATH` | *(empty)* | Path to RSA key for JWT auth (optional) |
-| `SINK_SNOWFLAKE_SOFT_DELETE` | `true` | Soft delete mode (`true`/`false`) |
-| `FLUSH_SIZE` | `10000` | Max events per batch |
-| `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing a batch |
-| `GRPC_PORT` | `50051` | gRPC server port |
-| `HTTP_API_PORT` | `8080` | HTTP API port |
-| `RUST_LOG` | `info` | Log level |
-| `DO_SNAPSHOT` | `false` | Enable initial snapshot/backfill of existing data |
-| `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk (min: 1) |
-| `SNAPSHOT_PARALLEL_WORKERS` | `2` | Reserved for future use (currently sequential) |
+| Variable | Required | Description |
+|---|:---:|---|
+| `SOURCE_URL` | yes | PostgreSQL connection string (`?replication=database`) |
+| `TABLES` | yes | Comma-separated list of tables to replicate |
+| `SINK_TYPE` | yes | `starrocks` \| `postgres` \| `snowflake` |
+| `SINK_URL` | yes | Sink connection URL |
+| `SINK_DATABASE` | yes | Target database |
+| `DO_SNAPSHOT` | no | `true` to run initial backfill on first start |
+| `RUST_LOG` | no | Log level (`info`, `debug`, etc.) |
 
 </details>
 
 <details>
 <summary><strong>🌐 HTTP API</strong></summary>
 
-The HTTP endpoints are enabled by default on port 8080. To opt out, build with `--no-default-features`.
+Enabled by default on port 8080.
 
 | Method | Path | Description |
-|--------|------|-------------|
-| GET | `/healthz` | Health check |
-| GET | `/status` | Full metrics JSON |
-| GET | `/metrics/prometheus` | Prometheus metrics |
+|---|---|---|
+| GET | `/healthz` | Container health probe |
+| GET | `/status` | Full state as JSON |
+| GET | `/metrics/prometheus` | Prometheus scrape target |
 | POST | `/pause` | Pause replication |
 | POST | `/resume` | Resume replication |
 | POST | `/drain-stop` | Graceful drain and stop |
-| POST | `/api/datasources/test` | Test connection |
-| POST | `/api/tables/discover` | Discover tables |
-| POST | `/api/replication/start` | Start replication |
-| POST | `/api/replication/stop` | Stop replication |
 
 ```bash
 curl http://localhost:8080/healthz
 curl -X POST http://localhost:8080/pause
-curl -X POST http://localhost:8080/resume
-```
-
-</details>
-
-<details>
-<summary><strong>📸 Snapshot / Backfill</strong></summary>
-
-Snapshot loads all existing rows from PostgreSQL into StarRocks before CDC takes over. It runs concurrently with the WAL consumer — no downtime, no data loss.
-
-### Enable on startup
-
-Set `DO_SNAPSHOT=true` to run a full snapshot when the daemon starts:
-
-```bash
-DO_SNAPSHOT=true SNAPSHOT_CHUNK_SIZE=50000 ./target/release/dbmazz
-```
-
-The snapshot divides each table into PK-range chunks and processes them sequentially. Progress is tracked in a `dbmazz_snapshot_state` table in PostgreSQL, so interrupted snapshots resume from the last completed chunk.
-
-### Trigger on-demand (via gRPC)
-
-You can trigger a snapshot at any time while CDC is running:
-
-```bash
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
-```
-
-### How it works
-
-Uses the [Flink CDC concurrent snapshot algorithm](https://nightlies.apache.org/flink/flink-docs-stable/docs/connectors/table/jdbc/#scan-incremental-snapshot):
-
-1. For each chunk: emit low-watermark (LW) → SELECT rows → emit high-watermark (HW) → Stream Load to StarRocks
-2. The WAL consumer checks `should_emit()` for each event — events within a completed chunk's PK range with LSN <= HW are suppressed (already loaded by snapshot)
-3. Events outside chunk ranges or with LSN > HW are emitted normally
-
-This ensures consistent delivery even with concurrent writes during the snapshot.
-
-### Monitor progress
-
-```bash
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
-# snapshot_active: true, snapshot_chunks_total: 100, snapshot_chunks_done: 42, snapshot_rows_synced: 21000000
 ```
 
 </details>
@@ -415,65 +367,56 @@ grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcStatusService/GetStatus
 <details>
 <summary><strong>🔌 gRPC API</strong></summary>
 
-gRPC with reflection enabled — `grpcurl` works without `.proto` files.
+Reflection enabled — `grpcurl` works without `.proto` files.
 
 ```bash
+grpcurl -plaintext localhost:50051 list
 grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
-grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Resume
 grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
+grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
 ```
+
+Services: `HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`.
 
 </details>
 
-<details>
-<summary><strong>🏗️ Architecture</strong></summary>
+---
 
-```
-PostgreSQL (source)            dbmazz                         Sink (target)
-┌──────────────┐            ┌──────────────────┐          ┌──────────────┐
-│  WAL         │  logical   │ WAL Handler      │          │ StarRocks    │
-│  (INSERT,    │  replic.   │   ▼              │          │ PostgreSQL   │
-│   UPDATE,    │ ─────────▶ │ CdcRecord        │  write   │ Snowflake    │
-│   DELETE)    │ (pgoutput) │   ▼              │──batch──▶│ ...          │
-│              │            │ Pipeline         │          │              │
-│              │ ◀──────────│ Checkpoint (LSN) │          │              │
-└──────────────┘  confirm   └──────────────────┘          └──────────────┘
-                                 ~5 MB RAM                     <1s lag
-```
+## 💬 Community
 
-dbmazz reads the PostgreSQL Write-Ahead Log via logical replication, converts events to generic `CdcRecord` types, batches them in a pipeline, and writes to any supported sink via the `Sink` trait. Each instance handles one replication job.
+- **GitHub Discussions** — questions, ideas, show & tell: [github.com/ez-cdc/dbmazz/discussions](https://github.com/ez-cdc/dbmazz/discussions)
+- **Issues** — bug reports and feature requests: [github.com/ez-cdc/dbmazz/issues](https://github.com/ez-cdc/dbmazz/issues)
+- **Changelog** — [`CHANGELOG.md`](CHANGELOG.md)
 
-The sink is fully responsible for its loading strategy (Stream Load, COPY, S3 staging, etc.). The engine and pipeline are sink-agnostic.
-
-See [docs/architecture.md](docs/architecture.md) for the full data flow, module map, and how to add new sinks.
-
-</details>
-
-<details>
-<summary><strong>🔨 Build from source</strong></summary>
-
-```bash
-cargo build --release       # Default build: all 3 sinks + HTTP API
-```
-
-For an extra-minimal binary without the HTTP API:
-
-```bash
-cargo build --release --no-default-features \
-  --features "sink-starrocks,sink-postgres,sink-snowflake,grpc-reflection"
-```
-
-</details>
-
+We're a small project. PRs and issues are read by humans, not bots.
 
 ---
 
 ## 🤝 Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for general guidelines and [docs/contributing-connectors.md](docs/contributing-connectors.md) for adding new connectors.
+dbmazz welcomes contributions. The simplest path:
+
+1. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, conventions, and the PR checklist.
+2. For new connectors, see [`docs/contributing-connectors.md`](docs/contributing-connectors.md) — the `Sink` trait is small and the engine handles snapshot + CDC for you.
+3. For architecture-level questions, [`docs/architecture.md`](docs/architecture.md) is the deep dive.
+
+By contributing you agree your contributions are licensed under the Elastic License v2.0, the same license as the project.
+
+---
 
 ## 📄 License
 
-[Elastic License v2.0](LICENSE) — free for commercial and non-commercial use. Cannot be offered as a managed service.
+[Elastic License v2.0](LICENSE).
+
+In plain English: **dbmazz is free for commercial and non-commercial use**, including running it in production, embedding it in your own product, or modifying it for internal use. The only restriction is that you cannot offer dbmazz to third parties as a managed service. Self-hosting is unrestricted.
+
+---
+
+## ☁️ About EZ-CDC
+
+**dbmazz is the open-source CDC engine maintained by [EZ-CDC](https://ez-cdc.com).** We're a small team building modern data replication tools for teams that want streaming Postgres CDC without operating a streaming platform — and dbmazz is the daemon at the heart of everything we ship.
+
+The same team also runs **[EZ-CDC Cloud](https://ez-cdc.com)**: a managed BYOC platform that deploys dbmazz into your own AWS or GCP account via Terraform. It adds the things you need *around* the daemon — auto-healing workers, centralized monitoring across many jobs, a web portal for your team, a REST API, and an MCP server for AI-native integration. The engine running underneath EZ-CDC Cloud is the same dbmazz you'll find in this repo.
+
+**Self-hosting one or two pipelines? dbmazz is what you want.** Need a managed multi-job platform with operations handled for you? Visit [ez-cdc.com](https://ez-cdc.com).
