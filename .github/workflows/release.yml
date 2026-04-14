@@ -209,85 +209,7 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------
-  # Job 3: build-ez-cdc
-  # Compiles the ez-cdc CLI for 4 targets (linux amd64/arm64 musl +
-  # darwin amd64/arm64). The Linux targets are musl now (previously gnu)
-  # for portability across distros.
-  #
-  # IMPORTANT: this job patches e2e-cli/Cargo.toml with the calculated
-  # release version before compiling, so env!("CARGO_PKG_VERSION") at
-  # runtime returns the right tag for the `docker pull` in the CLI.
-  # ---------------------------------------------------------------------
-  build-ez-cdc:
-    needs: version
-    if: needs.version.outputs.skip != 'true'
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-            asset: ez-cdc-linux-amd64
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-            asset: ez-cdc-linux-arm64
-          # `macos-13` is end-of-life in GitHub Actions, so we cross-compile
-          # x86_64-apple-darwin from the ARM-native `macos-latest` runner.
-          # `dtolnay/rust-toolchain` installs the target toolchain, and the
-          # macOS SDK shipped with Xcode on macos-latest can link both arches.
-          - target: x86_64-apple-darwin
-            runner: macos-latest
-            asset: ez-cdc-darwin-amd64
-          - target: aarch64-apple-darwin
-            runner: macos-latest
-            asset: ez-cdc-darwin-arm64
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux system deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config
-          # NOTE: libssl-dev is deliberately NOT installed. The CLI uses
-          # reqwest with rustls, so openssl-sys is not in the dep graph.
-          # Installing libssl-dev would risk silent dynamic linkage
-          # against libssl.so and break the musl-static binary at runtime
-          # on distros that lack it.
-
-      - name: Sync CLI version with release version
-        shell: bash
-        run: |
-          VERSION=${{ needs.version.outputs.version }}
-          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" e2e-cli/Cargo.toml
-          rm e2e-cli/Cargo.toml.bak
-          echo "e2e-cli/Cargo.toml version after sync:"
-          grep "^version" e2e-cli/Cargo.toml
-
-      - name: Build ez-cdc CLI
-        working-directory: e2e-cli
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Rename binary
-        shell: bash
-        run: cp e2e-cli/target/${{ matrix.target }}/release/ez-cdc ${{ matrix.asset }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
-          retention-days: 1
-
-  # ---------------------------------------------------------------------
-  # Job 4: docker-publish
+  # Job 3: docker-publish
   # Builds the multi-arch Docker image from pre-compiled binaries and
   # pushes to GHCR. Runs only after both dbmazz architectures are built.
   # ---------------------------------------------------------------------
@@ -374,13 +296,13 @@ jobs:
           sbom: false
 
   # ---------------------------------------------------------------------
-  # Job 5: release
+  # Job 4: release
   # Final job. Uploads enterprise binaries to S3 + GCS (unchanged path),
   # creates the git tag, and publishes a GitHub Release with all assets.
   # Runs only after every build and the docker publish succeeded.
   # ---------------------------------------------------------------------
   release:
-    needs: [version, build-dbmazz, build-ez-cdc, docker-publish]
+    needs: [version, build-dbmazz, docker-publish]
     if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
@@ -399,14 +321,8 @@ jobs:
           pattern: dbmazz-linux-*
           merge-multiple: true
 
-      - name: Download ez-cdc CLI binaries
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ez-cdc-*
-          merge-multiple: true
-
       - name: List artifacts
-        run: ls -lh dbmazz-linux-* ez-cdc-*
+        run: ls -lh dbmazz-linux-*
 
       - name: Calculate dbmazz checksums
         run: |
@@ -498,10 +414,6 @@ jobs:
           gh release create "$TAG" \
             dbmazz-linux-amd64 \
             dbmazz-linux-arm64 \
-            ez-cdc-linux-amd64 \
-            ez-cdc-linux-arm64 \
-            ez-cdc-darwin-amd64 \
-            ez-cdc-darwin-arm64 \
             SHA256SUMS \
             --title "$TAG" \
             --notes "$CHANGELOG"

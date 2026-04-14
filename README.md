@@ -87,7 +87,7 @@ For backfill at scale, we've also benchmarked **TPC-DS 1 TB at ~110 K rows/sec s
 dbmazz is operated through the `ez-cdc` CLI. Install it with one command:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/ez-cdc/ez-cdc-cli-releases/main/install.sh | sh
 ```
 
 Then point it at a PostgreSQL source and a sink:
@@ -99,8 +99,6 @@ ez-cdc quickstart --source my-pg --sink my-warehouse      # spin up dbmazz + liv
 ```
 
 The CLI runs on Linux and macOS (`amd64` and `arm64`). Press `t` in the dashboard to generate live traffic, `q` to quit.
-
-Full CLI reference: [`e2e-cli/README.md`](e2e-cli/README.md).
 
 ### Run the verification suite
 
@@ -233,8 +231,6 @@ cargo clippy -- -D warnings
 ```
 
 Requires Rust 1.91.1+. System deps: `protobuf-compiler`, `musl-tools`, `pkg-config`, `perl`, `make`.
-
-The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it runs the dbmazz daemon against a configured source and sink and validates the result with the 13-check verification harness.
 
 ### Contributing a new sink
 

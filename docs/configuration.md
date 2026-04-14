@@ -85,4 +85,3 @@ every option documented inline. The default location is
 
 - [`docs/architecture.md`](architecture.md) — data flow, module map, design decisions
 - [`docs/contributing-connectors.md`](contributing-connectors.md) — how to add new source/sink connectors
-- [`e2e-cli/README.md`](../e2e-cli/README.md) — test harness and CLI
