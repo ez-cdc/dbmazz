@@ -26,7 +26,7 @@ jobs:
     outputs:
       version: ${{ steps.calc.outputs.VERSION }}
       tag: ${{ steps.calc.outputs.TAG }}
-      bump: ${{ steps.calc.outputs.BUMP }}
+      latest_tag: ${{ steps.calc.outputs.LATEST_TAG }}
       skip: ${{ steps.calc.outputs.SKIP }}
       changelog: ${{ steps.calc.outputs.CHANGELOG }}
       is_prerelease: ${{ steps.calc.outputs.IS_PRERELEASE }}
@@ -37,78 +37,81 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Calculate version from conventional commits
+      - name: Read version from Cargo.toml
         id: calc
         run: |
+          set -euo pipefail
+
+          # Source of truth: the `version = "X.Y.Z"` line in Cargo.toml.
+          # A release fires iff this version differs from the latest tag
+          # (and is strictly greater). Bumping is a manual, reviewable
+          # action in the PR that intends to ship.
+          VERSION=$(grep -E '^version = "' Cargo.toml | head -1 | sed -E 's/^version = "(.*)"$/\1/')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to parse version from Cargo.toml"
+            exit 1
+          fi
+          NEW_TAG="v${VERSION}"
+          echo "Cargo.toml version: $VERSION"
+
+          # Find the latest tag (fetched from origin via fetch-tags: true
+          # on the checkout step above). Used for changelog range, the
+          # monotonicity guard, and unreleased-commit diagnostics.
           LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG="v0.0.0"
           fi
           echo "Latest tag: $LATEST_TAG"
 
-          VERSION=${LATEST_TAG#v}
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
-
-          COMMITS=$(git log "$LATEST_TAG"..HEAD --pretty=format:"%s" 2>/dev/null)
-
-          if [ -z "$COMMITS" ]; then
-            echo "No new commits since $LATEST_TAG"
+          # Tag-exists check against the remote (remote is the truth —
+          # local refs can lag). If the tag already exists, no-op release:
+          # emit a diagnostic so accumulated unreleased commits don't hide.
+          if git ls-remote --exit-code --tags origin "refs/tags/$NEW_TAG" >/dev/null 2>&1; then
+            COMMITS_SINCE=$(git log "$LATEST_TAG"..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')
+            {
+              echo "## Release skipped"
+              echo ""
+              echo "Tag \`$NEW_TAG\` already exists on \`origin\`."
+              echo ""
+              echo "**${COMMITS_SINCE} commit(s)** since \`$LATEST_TAG\` are not yet released. Bump \`Cargo.toml\` in a PR to cut the next release."
+              echo ""
+              echo "### Unreleased commits"
+              git log "$LATEST_TAG"..HEAD --pretty=format:"- %s" 2>/dev/null || true
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Tag $NEW_TAG already exists, skipping release. $COMMITS_SINCE commit(s) unreleased."
             echo "SKIP=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Commits since $LATEST_TAG:"
-          echo "$COMMITS"
-          echo ""
-
-          BUMP="none"
-          while IFS= read -r msg; do
-            if echo "$msg" | grep -qE '^[a-z]+(\(.+\))?!:'; then
-              BUMP="major"
+          # Monotonicity guard: reject backwards or sideways version moves.
+          # Uses `sort -V` (version sort) to compare without parsing semver.
+          if [ "$LATEST_TAG" != "v0.0.0" ]; then
+            LATEST_VER="${LATEST_TAG#v}"
+            if [ "$VERSION" = "$LATEST_VER" ]; then
+              echo "::error::Cargo.toml version $VERSION equals the latest tag $LATEST_TAG. Bump the version to cut a release."
+              exit 1
             fi
-            if echo "$msg" | grep -qE '^feat(\(.+\))?:'; then
-              if [ "$BUMP" != "major" ]; then
-                BUMP="minor"
-              fi
+            HIGHER=$(printf '%s\n%s\n' "$LATEST_VER" "$VERSION" | sort -V | tail -1)
+            if [ "$HIGHER" != "$VERSION" ]; then
+              echo "::error::Cargo.toml version $VERSION is older than the latest tag $LATEST_TAG. Version must only move forward."
+              exit 1
             fi
-            if echo "$msg" | grep -qE '^(fix|refactor|perf|security)(\(.+\))?:'; then
-              if [ "$BUMP" = "none" ]; then
-                BUMP="patch"
-              fi
-            fi
-            if echo "$msg" | grep -qE '^(docs|test|chore|style|ci|build)(\(.+\))?:'; then
-              if [ "$BUMP" = "none" ]; then
-                BUMP="patch"
-              fi
-            fi
-          done <<< "$COMMITS"
-
-          if [ "$BUMP" = "none" ]; then
-            echo "No conventional commits found, skipping release"
-            echo "SKIP=true" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
 
-          case "$BUMP" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-
-          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
-          NEW_TAG="v${NEW_VERSION}"
-
-          # Pre-release detection: currently always false. If we introduce
-          # -rc.N / -beta.N / -alpha.N via commit convention later, compute
-          # it here and set IS_PRERELEASE=true so docker-publish skips the
-          # latest/X.Y/X mutable tags.
+          # Pre-release detection: derived from the version string itself.
+          # Examples that flip to prerelease: 1.7.0-rc.1, 2.0.0-beta.3,
+          # 1.6.9-alpha, 1.6.9-pre.20260414. Pre-releases skip the mutable
+          # latest/X.Y/X Docker tags in docker-publish.
           IS_PRERELEASE="false"
+          if echo "$VERSION" | grep -qE -- '-(rc|alpha|beta|pre)(\.|$|[0-9])'; then
+            IS_PRERELEASE="true"
+          fi
 
-          echo "Bump type: $BUMP"
-          echo "New version: $NEW_VERSION (tag: $NEW_TAG)"
-          echo "VERSION=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing $NEW_TAG (prerelease=$IS_PRERELEASE)"
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
           echo "TAG=$NEW_TAG" >> "$GITHUB_OUTPUT"
-          echo "BUMP=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "LATEST_TAG=$LATEST_TAG" >> "$GITHUB_OUTPUT"
           echo "SKIP=false" >> "$GITHUB_OUTPUT"
           echo "IS_PRERELEASE=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
 
@@ -184,19 +187,10 @@ jobs:
           path: target
           key: ${{ runner.os }}-${{ matrix.arch }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Sync dbmazz version with release version
-        shell: bash
-        run: |
-          VERSION=${{ needs.version.outputs.version }}
-          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-          rm Cargo.toml.bak
-          echo "Cargo.toml version after sync:"
-          grep "^version" Cargo.toml
-
       - name: Build dbmazz
         env:
           CARGO_TERM_COLOR: always
-        run: cargo build --release --target ${{ matrix.target }} --verbose
+        run: cargo build --release --locked --target ${{ matrix.target }} --verbose
 
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/dbmazz dbmazz-linux-${{ matrix.arch }}
@@ -388,35 +382,36 @@ jobs:
           gcloud storage cp version.txt \
             "gs://${{ env.GCS_BUCKET }}/${{ env.COMPONENT }}/latest/VERSION"
 
-      - name: Create and push git tag
-        env:
-          NEW_TAG: ${{ needs.version.outputs.tag }}
-          BUMP: ${{ needs.version.outputs.bump }}
-          CHANGELOG: ${{ needs.version.outputs.changelog }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "$NEW_TAG ($BUMP)
-
-          $CHANGELOG"
-          git push origin "$NEW_TAG"
-          echo "Created and pushed tag: $NEW_TAG"
-
-      - name: Create GitHub Release
+      - name: Create tag and GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
           CHANGELOG: ${{ needs.version.outputs.changelog }}
+          IS_PRERELEASE: ${{ needs.version.outputs.is_prerelease }}
         run: |
+          # Atomic: `gh release create --target` creates the tag and the
+          # GitHub Release in a single operation, and this is the last
+          # mutation of the release job. If any earlier step fails, no tag
+          # is created, and re-running the workflow on the same SHA
+          # retries cleanly. S3/GCS uploads above are idempotent (cp
+          # overwrites), so partial retries don't drift artifact state.
+          #
           # CHANGELOG is passed via env (not direct template interpolation)
           # to avoid shell injection when commit messages contain quotes,
           # backticks, $(...), etc.
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "$CHANGELOG" \
+            $PRERELEASE_FLAG \
             dbmazz-linux-amd64 \
             dbmazz-linux-arm64 \
-            SHA256SUMS \
-            --title "$TAG" \
-            --notes "$CHANGELOG"
+            SHA256SUMS
+          echo "Created tag and release: $TAG"
 
       - name: Summary
         env:
@@ -426,7 +421,7 @@ jobs:
           # arbitrary shell code.
           TAG: ${{ needs.version.outputs.tag }}
           VERSION: ${{ needs.version.outputs.version }}
-          BUMP: ${{ needs.version.outputs.bump }}
+          LATEST_TAG: ${{ needs.version.outputs.latest_tag }}
           CHANGELOG: ${{ needs.version.outputs.changelog }}
           SERVER_URL: ${{ github.server_url }}
           REPOSITORY: ${{ github.repository }}
@@ -435,7 +430,7 @@ jobs:
             echo "## Release: ${COMPONENT} ${TAG}"
             echo ""
             echo "**Version:** ${VERSION}"
-            echo "**Bump:** ${BUMP}"
+            echo "**Previous tag:** ${LATEST_TAG}"
             echo ""
             echo "### Enterprise binaries (S3 + GCS)"
             echo "- \`s3://${S3_BUCKET}/${COMPONENT}/${VERSION}/dbmazz-linux-{amd64,arm64}\`"

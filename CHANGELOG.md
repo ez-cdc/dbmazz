@@ -4,6 +4,37 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [1.6.8] - 2026-04-14
+
+### Changed
+- **Release version is now driven by `Cargo.toml`** instead of being
+  calculated from conventional commits. To cut a release, bump
+  `[package].version` in `Cargo.toml` in the PR that should ship (and
+  regenerate `Cargo.lock` with `cargo check`). If `Cargo.toml` still
+  matches the latest tag on merge, the release workflow cleanly no-ops
+  and the job summary lists the accumulated unreleased commits so they
+  don't hide. Previously every merge with any conventional-commit type
+  produced a release, including `docs:` and `chore:` PRs, which caused
+  patch-bump noise (tags `v1.6.4`–`v1.6.7` were all no-op docs/chore
+  releases).
+- **`gh release create` now creates the git tag atomically** via
+  `--target $GITHUB_SHA`, as the final mutation of the release job.
+  Previously the tag was pushed in a separate step before the release
+  was created; a workflow abort between those two steps left an orphan
+  tag and any re-run on the same SHA would skip the release because the
+  tag already existed. Re-runs now retry cleanly.
+- **Release build now uses `cargo build --release --locked`** to catch
+  `Cargo.lock` drift deterministically instead of silently regenerating.
+
+### Added
+- **Monotonicity guard** in the release workflow: a `Cargo.toml` version
+  that equals or precedes the latest git tag fails the workflow with a
+  clear error, preventing accidental backwards or sideways bumps.
+- **Pre-release detection from the version string** (`-rc`, `-alpha`,
+  `-beta`, `-pre`). A version like `1.7.0-rc.1` is now correctly flagged
+  as a prerelease, and the Docker publish step skips the mutable
+  `latest`/`X`/`X.Y` tags for prereleases.
+
 ### Removed
 - The `ez-cdc` CLI source code (`e2e-cli/`) and the `install.sh` installer
   have been moved out of this repository. The CLI binary remains publicly
@@ -13,6 +44,11 @@ All notable changes to dbmazz will be documented here.
   dbmazz releases now only build and publish the daemon binaries and the
   Docker image. CLI binaries are produced and published from a separate
   repository.
+- **Conventional-commit-based version calculation** in the release workflow
+  (superseded by the Cargo.toml-driven model above), along with the
+  `Sync dbmazz version with release version` build-time sed patch and the
+  `bump` output that used to propagate the computed bump type through the
+  tag annotation and the workflow summary.
 
 ## [1.6.3] - 2026-04-13
 
