@@ -3,8 +3,7 @@
 # This file is managed by `ez-cdc datasource` commands. You can also
 # edit it by hand — `${VAR}` interpolation is supported for credentials.
 #
-# Full documentation:
-#   https://github.com/ez-cdc/dbmazz/blob/main/docs/configuration.md
+# Configuration is managed via the `ez-cdc datasource` commands.
 #
 # Every field below includes the name of the dbmazz environment variable
 # it maps to, so you can cross-reference with the upstream daemon docs.
