@@ -5,7 +5,6 @@
 #
 # Full documentation:
 #   https://github.com/ez-cdc/dbmazz/blob/main/docs/configuration.md
-#   https://github.com/ez-cdc/dbmazz/blob/main/docs/production-deployment.md
 #
 # Every field below includes the name of the dbmazz environment variable
 # it maps to, so you can cross-reference with the upstream daemon docs.
@@ -242,14 +241,5 @@ sinks: {}
 #     soft_delete: true
 
 # ─────────────────────────────────────────────────────────────────────
-# Ports — not configurable through this file
-#
-# `GRPC_PORT` (50051) and `HTTP_API_PORT` (8080) are fixed by the CLI
-# because the generated docker-compose service publishes them to the
-# host at the same values. Changing them here would desynchronize the
-# published ports and break `ez-cdc quickstart` / `ez-cdc verify`.
-#
-# If you need to run dbmazz on different ports, use
-# `docker run ghcr.io/ez-cdc/dbmazz:<version>` directly (see
-# docs/production-deployment.md) instead of the CLI.
+# Ports are fixed by the CLI and not configurable through this file.
 # ─────────────────────────────────────────────────────────────────────

@@ -32,7 +32,7 @@ Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
 
 dbmazz is what CDC looks like without the JVM tax: a single Rust binary, built and maintained by **[EZ-CDC](https://ez-cdc.com)**, that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
 
-The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint, a gRPC control plane, and an HTTP API for operations. Run it from the official Docker image, on ECS, on Kubernetes, on a bare VM, or build it from source. Each instance handles one replication job.
+The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint for monitoring. Run it from the official Docker image or build it from source. Each instance handles one replication job.
 
 <div align="center">
   <img src="assets/demo.gif" alt="dbmazz TUI dashboard demo" width="90%">
@@ -77,41 +77,24 @@ dbmazz is the alternative to running a streaming platform: a single Rust binary 
 - **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
 - **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between.
 - **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
-- **🔌 Embed CDC in your own product** — every dbmazz instance exposes gRPC and HTTP APIs for control and observability. Build higher-level systems on top, or integrate it into existing tooling without taking on a SaaS dependency.
 
 
 ---
 
 ## 🚀 Try it in 2 minutes
 
-### The simplest path — `docker run`
-
-If you already have a PostgreSQL source and a sink, the entire dbmazz deployment is one command:
-
-```bash
-docker run -d --name dbmazz \
-  -e SOURCE_URL="postgres://user:pass@host:5432/mydb?replication=database" \
-  -e TABLES="orders,order_items" \
-  -e SINK_TYPE="starrocks" \
-  -e SINK_URL="http://starrocks-fe:8030" \
-  -e SINK_DATABASE="analytics" \
-  -p 8080:8080 -p 50051:50051 \
-  ghcr.io/ez-cdc/dbmazz:latest
-```
-
-That's it. No Kafka cluster to provision. No separate state store. No connector to register. The container image is multi-arch (`amd64` + `arm64`), runs as non-root, and uses ~11 MB of RAM at steady state. dbmazz creates the publication, the replication slot, and the audit columns on the sink automatically on first start, and keeps its LSN checkpoint in the source database itself.
-
-Full configuration reference: [`docs/configuration.md`](docs/configuration.md). Compose, AWS ECS Fargate, secrets management, and monitoring: [`docs/production-deployment.md`](docs/production-deployment.md).
-
-### Or use the CLI for a complete demo (no databases of your own needed)
-
-The `ez-cdc` CLI bundles a one-liner installer plus a `quickstart` command that spins up a demo PostgreSQL source, a demo StarRocks sink, and a dbmazz daemon — all in containers — and opens a live terminal dashboard:
+dbmazz is operated through the `ez-cdc` CLI. Install it with one command:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
+```
+
+Then point it at a PostgreSQL source and a sink:
+
+```bash
 ez-cdc datasource init                                    # write a starter config
-ez-cdc datasource add                                     # interactive wizard
-ez-cdc quickstart --source demo-pg --sink demo-starrocks  # spin up + live dashboard
+ez-cdc datasource add                                     # interactive wizard for source + sink
+ez-cdc quickstart --source my-pg --sink my-warehouse      # spin up dbmazz + live dashboard
 ```
 
 The CLI runs on Linux and macOS (`amd64` and `arm64`); the binary is downloaded from the latest GitHub release, checksum-verified, and installed to `$HOME/.local/bin/ez-cdc`. Press `t` in the dashboard to generate live traffic, `q` to quit.
@@ -121,8 +104,8 @@ The CLI runs on Linux and macOS (`amd64` and `arm64`); the binary is downloaded 
 The CLI also ships with a 13-check end-to-end test harness that validates every supported sink: schema, snapshot integrity, CDC `INSERT`/`UPDATE`/`DELETE`, TOAST handling, NULL roundtrip, and idempotency drift over time.
 
 ```bash
-ez-cdc verify --source demo-pg --sink demo-starrocks           # full suite
-ez-cdc verify --source demo-pg --sink demo-pg-target --quick   # skip slow checks
+ez-cdc verify --source my-pg --sink my-warehouse           # full suite
+ez-cdc verify --source my-pg --sink my-warehouse --quick   # skip slow checks
 ```
 
 Use `--json-report results.json` to wire it into CI.
@@ -231,50 +214,7 @@ Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benc
 
 ## 🐳 Production deployment
 
-The production path is a pinned Docker container, a restart policy, and secrets pulled from an env file or your secrets manager. dbmazz keeps its LSN checkpoint inside the source PostgreSQL itself, so restarts and version upgrades resume exactly where they left off — no external state store required.
-
-### Plain `docker run`
-
-```bash
-docker run -d \
-  --name dbmazz \
-  --restart unless-stopped \
-  -p 8080:8080 -p 50051:50051 \
-  --env-file /etc/dbmazz/env \
-  ghcr.io/ez-cdc/dbmazz:1
-```
-
-### Docker Compose
-
-```yaml
-services:
-  dbmazz:
-    image: ghcr.io/ez-cdc/dbmazz:1
-    container_name: dbmazz
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-      - "50051:50051"
-    env_file: ./dbmazz.env       # gitignored
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 30s
-```
-
-### AWS ECS Fargate
-
-A 256 CPU / 512 MB Fargate task is enough for steady-state CDC (Fargate's minimum is the limit, not dbmazz's appetite). Pull `SOURCE_URL` and `SINK_PASSWORD` from Secrets Manager via the task definition's `secrets` block — never put them in `environment`. The full task-definition template is in [`docs/production-deployment.md`](docs/production-deployment.md).
-
-### Image, monitoring, and operations
-
-The official image is published on every release to [GitHub Container Registry](https://github.com/ez-cdc/dbmazz/pkgs/container/dbmazz). It's multi-arch (`linux/amd64` + `linux/arm64`), runs as non-root, and ships with the HTTP API and gRPC control plane enabled by default. Prometheus scrapes `/metrics/prometheus`; operations (`pause`, `resume`, `drain-stop`) are HTTP `POST`s.
-
-Full deployment guide — Compose with secrets, ECS task definitions, Secrets Manager / SSM patterns, alerting metrics, and operations playbooks: [`docs/production-deployment.md`](docs/production-deployment.md).
-
-> **Want someone else to run this for you?** [**EZ-CDC Cloud**](https://ez-cdc.com) deploys dbmazz into your own AWS or GCP account via Terraform — same engine, with managed updates, auto-healing workers, centralized monitoring across many jobs, and a web portal. BYOC, so the data never leaves your account.
+For managed BYOC deployment with auto-healing workers, centralized monitoring, RBAC, audit logs, and a web portal — running dbmazz in your own AWS or GCP account via Terraform — see **[EZ-CDC Cloud](https://ez-cdc.com)**.
 
 ---
 
@@ -298,7 +238,7 @@ cargo build --release --no-default-features \
 
 Requires Rust 1.91.1+ (MSRV pinned by `aws-smithy-async`). System deps: `protobuf-compiler`, `musl-tools`, `pkg-config`, `perl`, `make`.
 
-The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it spins up source and sink containers in Docker, runs dbmazz against them, and validates the result with the 13-check verification harness.
+The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it runs the dbmazz daemon against a configured source and sink and validates the result with the 13-check verification harness.
 
 ### Contributing a new sink
 
@@ -340,44 +280,6 @@ The most-used variables. **Full reference (every variable, every sink, every def
 | `SINK_DATABASE` | yes | Target database |
 | `DO_SNAPSHOT` | no | `true` to run initial backfill on first start |
 | `RUST_LOG` | no | Log level (`info`, `debug`, etc.) |
-
-</details>
-
-<details>
-<summary><strong>🌐 HTTP API</strong></summary>
-
-Enabled by default on port 8080.
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/healthz` | Container health probe |
-| GET | `/status` | Full state as JSON |
-| GET | `/metrics/prometheus` | Prometheus scrape target |
-| POST | `/pause` | Pause replication |
-| POST | `/resume` | Resume replication |
-| POST | `/drain-stop` | Graceful drain and stop |
-
-```bash
-curl http://localhost:8080/healthz
-curl -X POST http://localhost:8080/pause
-```
-
-</details>
-
-<details>
-<summary><strong>🔌 gRPC API</strong></summary>
-
-Reflection enabled — `grpcurl` works without `.proto` files.
-
-```bash
-grpcurl -plaintext localhost:50051 list
-grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/Pause
-grpcurl -plaintext -d '{}' localhost:50051 dbmazz.CdcControlService/StartSnapshot
-grpcurl -plaintext -d '{"interval_ms": 2000}' localhost:50051 dbmazz.CdcMetricsService/StreamMetrics
-```
-
-Services: `HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`.
 
 </details>
 

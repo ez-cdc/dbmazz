@@ -64,8 +64,7 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `GRPC_PORT` | `50051` | gRPC server port (`HealthService`, `CdcControlService`, `CdcStatusService`, `CdcMetricsService`). |
-| `HTTP_API_PORT` | `8080` | HTTP API port. Serves the dashboard UI, Prometheus metrics, and REST endpoints. Enabled by default; disabled only when built with `--no-default-features`. |
+| `HTTP_API_PORT` | `8080` | HTTP API port. Serves the Prometheus metrics endpoint. Enabled by default; disabled only when built with `--no-default-features`. |
 
 ## Logging
 

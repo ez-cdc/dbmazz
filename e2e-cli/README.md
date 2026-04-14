@@ -8,11 +8,11 @@ against any supported sink.
 
 ## Overview
 
-`ez-cdc` is a Rust CLI that wraps the full lifecycle of a dbmazz end-to-end
-test: spin up source and sink containers, cross-compile and containerize the
-dbmazz daemon, run it against your chosen source/sink pair, and validate the
-output with a structured set of checks covering schema correctness, snapshot
-integrity, CDC operations, type fidelity, and idempotency.
+`ez-cdc` is a Rust CLI that wraps the lifecycle of a dbmazz end-to-end
+test: it runs the dbmazz daemon container against a configured source/sink
+pair (which you bring yourself) and validates the output with a structured
+set of checks covering schema correctness, snapshot integrity, CDC
+operations, type fidelity, and idempotency.
 
 It has two modes:
 
@@ -78,10 +78,6 @@ The menu adapts to whether you already have a config file with
 datasources or not, and walks you through init, quickstart, verify,
 and datasource management.
 
-### Run the full verification suite
-ez-cdc verify --source demo-pg --sink demo-starrocks
-```
-
 ---
 
 ## Configuration
@@ -139,11 +135,11 @@ sinks:
 
 ### Supported sink types
 
-| Type | Field `type` | Notes |
-|------|-------------|-------|
-| StarRocks | `starrocks` | Docker-managed or remote |
-| PostgreSQL | `postgres` | Docker-managed or remote |
-| Snowflake | `snowflake` | Cloud-only, no Docker container |
+| Type | Field `type` |
+|------|-------------|
+| StarRocks | `starrocks` |
+| PostgreSQL | `postgres` |
+| Snowflake | `snowflake` |
 
 ### Snowflake sink fields
 
@@ -271,8 +267,7 @@ pass/fail status and duration for each check.
 
 ### `ez-cdc status`
 
-Print the current status of the dbmazz daemon by querying its HTTP API at
-`http://localhost:8080/status`.
+Print the current status of the running dbmazz daemon container.
 
 ```
 ez-cdc status
@@ -539,7 +534,7 @@ e2e-cli/
 │   │   ├── logs.rs         Tail container logs
 │   │   └── clean.rs        Truncate target tables
 │   ├── clients/
-│   │   ├── dbmazz.rs       HTTP client for the dbmazz HTTP API (/healthz, /status)
+│   │   ├── dbmazz.rs       Client for the dbmazz daemon container
 │   │   ├── source_pg.rs    PostgreSQL source client (insert, update, delete, count)
 │   │   └── targets/        Target backend implementations
 │   │       ├── mod.rs      TargetBackend trait + BackendCapabilities
@@ -710,8 +705,6 @@ installed services:
 | Target PostgreSQL | 25432 |
 | StarRocks HTTP (Stream Load) | 18030 |
 | StarRocks MySQL wire | 19030 |
-| dbmazz HTTP API | 8080 |
-| dbmazz gRPC | 50051 |
 
 If another process is using one of these ports, start your source or
 sink on different ports and update the URLs in `ez-cdc.yaml`

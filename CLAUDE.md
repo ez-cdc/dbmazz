@@ -76,8 +76,6 @@ Set `DO_SNAPSHOT=true` for initial data backfill. Uses Flink CDC concurrent snap
 4. Progress tracked in `dbmazz_snapshot_state` table (resumable)
 5. N parallel workers, each with its own PG connection and sink instance
 
-Can also be triggered on-demand via gRPC: `CdcControlService/StartSnapshot`
-
 ## Adding a New Sink
 
 ```
@@ -119,17 +117,9 @@ trait Sink: Send + Sync {
 | `SINK_DATABASE` | — | Target database name |
 | `FLUSH_SIZE` | `10000` | Max events per batch |
 | `FLUSH_INTERVAL_MS` | `5000` | Max ms before flushing |
-| `GRPC_PORT` | `50051` | gRPC server port |
 | `DO_SNAPSHOT` | `false` | Enable initial snapshot |
 | `SNAPSHOT_CHUNK_SIZE` | `50000` | Rows per snapshot chunk |
 | `INITIAL_SNAPSHOT_ONLY` | `false` | Exit after snapshot (no CDC) |
-
-## gRPC Services
-
-- `HealthService` - Health check
-- `CdcControlService` - Pause/Resume/StartSnapshot/DrainStop
-- `CdcStatusService` - GetStatus (LSN, events, snapshot progress)
-- `CdcMetricsService` - StreamMetrics (streaming metrics at configurable interval)
 
 ## Versioning & Release
 
@@ -229,8 +219,7 @@ docker pull ghcr.io/ez-cdc/dbmazz:latest  # latest stable (avoid for prod)
 The `Dockerfile` at the repo root uses `debian:bookworm-slim` as base,
 runs as non-root (UID 65532), and copies the pre-compiled binary by
 `TARGETARCH` during a `docker buildx build --platform linux/amd64,
-linux/arm64`. See [`docs/production-deployment.md`](docs/production-deployment.md)
-for self-host deployment guidance.
+linux/arm64`.
 
 ## Review Rules
 
