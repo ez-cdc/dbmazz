@@ -8,11 +8,11 @@ against any supported sink.
 
 ## Overview
 
-`ez-cdc` is a Rust CLI that wraps the full lifecycle of a dbmazz end-to-end
-test: spin up source and sink containers, cross-compile and containerize the
-dbmazz daemon, run it against your chosen source/sink pair, and validate the
-output with a structured set of checks covering schema correctness, snapshot
-integrity, CDC operations, type fidelity, and idempotency.
+`ez-cdc` is a Rust CLI that wraps the lifecycle of a dbmazz end-to-end
+test: it runs the dbmazz daemon container against a configured source/sink
+pair (which you bring yourself) and validates the output with a structured
+set of checks covering schema correctness, snapshot integrity, CDC
+operations, type fidelity, and idempotency.
 
 It has two modes:
 
@@ -78,10 +78,6 @@ The menu adapts to whether you already have a config file with
 datasources or not, and walks you through init, quickstart, verify,
 and datasource management.
 
-### Run the full verification suite
-ez-cdc verify --source demo-pg --sink demo-starrocks
-```
-
 ---
 
 ## Configuration
@@ -139,11 +135,11 @@ sinks:
 
 ### Supported sink types
 
-| Type | Field `type` | Notes |
-|------|-------------|-------|
-| StarRocks | `starrocks` | Docker-managed or remote |
-| PostgreSQL | `postgres` | Docker-managed or remote |
-| Snowflake | `snowflake` | Cloud-only, no Docker container |
+| Type | Field `type` |
+|------|-------------|
+| StarRocks | `starrocks` |
+| PostgreSQL | `postgres` |
+| Snowflake | `snowflake` |
 
 ### Snowflake sink fields
 
@@ -271,8 +267,7 @@ pass/fail status and duration for each check.
 
 ### `ez-cdc status`
 
-Print the current status of the dbmazz daemon by querying its HTTP API at
-`http://localhost:8080/status`.
+Print the current status of the running dbmazz daemon container.
 
 ```
 ez-cdc status
@@ -523,158 +518,6 @@ binary, and a running StarRocks instance. To validate a sink change, run
 
 ---
 
-## Architecture
-
-```
-e2e-cli/
-├── src/
-│   ├── main.rs             CLI entry point, subcommand dispatch, interactive menu
-│   ├── commands/           One module per subcommand
-│   │   ├── up.rs           Start infra containers
-│   │   ├── down.rs         Stop infra containers
-│   │   ├── quickstart.rs   Start daemon + open dashboard
-│   │   ├── verify_cmd.rs   Orchestrate verify: up + run + report + down
-│   │   ├── datasource.rs   CRUD for datasource config
-│   │   ├── status.rs       Print daemon status
-│   │   ├── logs.rs         Tail container logs
-│   │   └── clean.rs        Truncate target tables
-│   ├── clients/
-│   │   ├── dbmazz.rs       HTTP client for the dbmazz HTTP API (/healthz, /status)
-│   │   ├── source_pg.rs    PostgreSQL source client (insert, update, delete, count)
-│   │   └── targets/        Target backend implementations
-│   │       ├── mod.rs      TargetBackend trait + BackendCapabilities
-│   │       ├── starrocks.rs StarRocks (mysql_async over wire MySQL)
-│   │       ├── postgres.rs  PostgreSQL (tokio-postgres)
-│   │       └── snowflake.rs Snowflake (HTTP API)
-│   ├── compose/
-│   │   ├── builder.rs      Dynamically generate Docker compose YAML for any pair
-│   │   └── runner.rs       Wrap `docker compose up/down/logs/ps`
-│   ├── config/
-│   │   ├── schema.rs       Serde types for ez-cdc.yaml (SourceSpec, SinkSpec, PipelineSettings)
-│   │   ├── store.rs        DatasourceStore: load, save, add, remove
-│   │   ├── loader.rs       YAML + env var interpolation
-│   │   └── presets.rs      Demo datasource definitions for `datasource init`
-│   ├── verify/
-│   │   ├── runner.rs       VerifyRunner: orchestrates precheck + tier execution
-│   │   ├── tier1.rs        All tier 1 check functions (A, B, C, D, E, H series)
-│   │   └── polling.rs      wait_until helper: async polling with timeout
-│   ├── tui/
-│   │   ├── dashboard.rs    ratatui full-screen dashboard (QuickstartDashboard)
-│   │   ├── banner.rs       ASCII banner on startup
-│   │   ├── report.rs       Check result formatting (PASS/FAIL/SKIP) and JSON serialization
-│   │   ├── prompts.rs      Interactive select prompts (cliclack)
-│   │   └── theme.rs        Brand colors
-│   ├── load/
-│   │   └── generator.rs    Background traffic generator (INSERT/UPDATE/DELETE loop)
-│   ├── instantiate.rs      Factory: SourceSpec/SinkSpec → concrete client instances
-│   ├── preflight.rs        Connectivity checks before starting the daemon
-│   ├── daemon.rs           Daemon lifecycle helpers
-│   └── paths.rs            Compile-time and runtime path resolution
-├── fixtures/
-│   ├── postgres-seed.sql   Schema + 500 seed orders + 1500 order items
-│   └── starrocks-init.sh   StarRocks database creation script
-└── ez-cdc.yaml             Generated config (not in git)
-```
-
-### How the daemon is containerized
-
-`ez-cdc quickstart` and `ez-cdc verify` pull the official `dbmazz` image
-from GitHub Container Registry:
-
-1. The image reference is `ghcr.io/ez-cdc/dbmazz:<CLI version>`. The CLI
-   version is pinned at compile time via `env!("CARGO_PKG_VERSION")`, and
-   the release workflow patches `e2e-cli/Cargo.toml` before building to
-   keep daemon and CLI versions aligned.
-2. `compose/builder.rs` generates a Docker compose file that references
-   the image directly — no bind-mounts, no cross-compile loop.
-3. To test a locally-patched daemon, set `DBMAZZ_IMAGE=my-tag:dev` and
-   the CLI will use that image instead of the GHCR one. Build it with
-   `docker build -t my-tag:dev <path-to-dbmazz>` from the root Dockerfile.
-
-### Networking model
-
-The `dbmazz` container runs on the default docker-compose bridge
-network with one extra host entry:
-
-```yaml
-extra_hosts:
-  - "host.docker.internal:host-gateway"
-```
-
-This makes `host.docker.internal` resolve to the host machine on
-macOS, Windows, and Linux (Docker Engine 20.10+). When the CLI
-generates the `.env` file for the container, it automatically
-rewrites any `localhost`, `127.0.0.1`, or `0.0.0.0` host in your
-datasource URLs to `host.docker.internal`, preserving the port and
-the rest of the URL. This means you can write:
-
-```yaml
-sources:
-  my-pg:
-    url: postgres://user:pass@localhost:5432/mydb
-```
-
-...in your `ez-cdc.yaml`, and the container will reach a postgres
-running on the host (either native on the host OS, or in another
-container that publishes port 5432). Remote hostnames
-(`prod-db.internal`, `xy12345.snowflakecomputing.com`, etc.) are
-passed through unchanged.
-
-**Edge case**: if your source or sink lives in another container on
-a private docker bridge *without* publishing its port to the host,
-`host.docker.internal` cannot reach it. Publish the port with
-`-p <host>:<container>` so it becomes visible on the host loopback.
-
-### Compose file generation
-
-`builder.rs` generates one compose file per (source, sink) pair under
-`.cache/compose/<src>__<sink>__<hash>/compose.yml`. The file contains
-a single `dbmazz` service referencing the official
-`ghcr.io/ez-cdc/dbmazz:<version>` image, plus the `extra_hosts` entry
-described above.
-
-Environment variables for the pair (all `dbmazz` config) are written
-to a parallel `.env` file derived from `PipelineSettings.to_env_lines()`,
-with localhost URLs rewritten to `host.docker.internal`.
-
----
-
-## Building from Source
-
-The preferred way to install the CLI is via the one-liner installer
-documented in the repo root README:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/ez-cdc/dbmazz/main/install.sh | sh
-```
-
-This installer downloads the pre-built binary from the latest GitHub
-release. Only build from source if you are developing the CLI itself:
-
-```bash
-cargo build --release --manifest-path e2e-cli/Cargo.toml
-```
-
-The resulting binary is at `e2e-cli/target/release/ez-cdc`. You can run
-it directly or symlink it into your PATH.
-
-### Developing against a patched dbmazz daemon
-
-The CLI pulls `ghcr.io/ez-cdc/dbmazz:<CLI version>` by default. To test
-the CLI against a local daemon build:
-
-```bash
-# From the repo root, build the daemon and the Docker image locally
-cargo build --release --target x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release/dbmazz dbmazz-linux-amd64
-docker build -t dbmazz-dev:local .
-
-# Point the CLI at the local image
-DBMAZZ_IMAGE=dbmazz-dev:local ez-cdc quickstart --source demo-pg --sink demo-starrocks
-```
-
----
-
 ## Troubleshooting
 
 ### `docker pull` fails with "unauthorized" or "manifest unknown"
@@ -710,8 +553,6 @@ installed services:
 | Target PostgreSQL | 25432 |
 | StarRocks HTTP (Stream Load) | 18030 |
 | StarRocks MySQL wire | 19030 |
-| dbmazz HTTP API | 8080 |
-| dbmazz gRPC | 50051 |
 
 If another process is using one of these ports, start your source or
 sink on different ports and update the URLs in `ez-cdc.yaml`

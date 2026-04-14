@@ -53,5 +53,8 @@ e2e/build/
 # Legacy: dev binary drop directory (no longer used)
 e2e-cli/bin/
 
+# Internal-only docs (not part of the public surface)
+/internal-docs/
+
 # Misc
 *.old

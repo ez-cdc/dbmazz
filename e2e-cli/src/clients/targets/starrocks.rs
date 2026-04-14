@@ -1,13 +1,4 @@
 //! StarRocks target backend.
-//!
-//! StarRocks speaks wire MySQL on port 9030 for DDL/DML, so we use
-//! `mysql_async`. The dbmazz StarRocks sink writes via the Stream Load HTTP API
-//! (not via this connection) but we only need read access for verification.
-//!
-//! Audit columns (from src/connectors/sinks/starrocks/setup.rs):
-//!   - `dbmazz_op_type`     TINYINT
-//!   - `dbmazz_is_deleted`  BOOLEAN
-//!   - `dbmazz_synced_at`   DATETIME
 //!   - `dbmazz_cdc_version` BIGINT
 //!
 //! StarRocks does NOT have a metadata table in the target schema.

@@ -1,10 +1,4 @@
-//! HTTP client for the dbmazz daemon.
-//!
-//! The daemon exposes `/healthz`, `/status`, `/pause`, `/resume` endpoints
-//! via the HTTP API (part of the default features).
-//!
-//! This client is async (reqwest + tokio) and supports polling helpers
-//! (`wait_for_stage`, `wait_healthy`) for the verify runner.
+//! Client for the dbmazz daemon container.
 
 use std::time::Duration;
 
@@ -140,9 +134,7 @@ impl DbmazzClient {
         Self::new(base_url, Duration::from_secs(5))
     }
 
-    // ── endpoints ───────────────────────────────────────────────────────
-
-    /// Return true if `/healthz` returns 200 and `status == "ok"`.
+    /// Return true if the daemon is healthy.
     pub async fn health(&self) -> bool {
         let url = format!("{}/healthz", self.base_url);
         let resp = match self.client.get(&url).send().await {
@@ -162,7 +154,7 @@ impl DbmazzClient {
             .unwrap_or(false)
     }
 
-    /// Fetch `/status` and return a `DaemonStatus`.
+    /// Fetch the current daemon status.
     pub async fn status(&self) -> Result<DaemonStatus, DbmazzError> {
         let url = format!("{}/status", self.base_url);
         let resp = self.client.get(&url).send().await?;
@@ -178,7 +170,7 @@ impl DbmazzClient {
         Ok(status)
     }
 
-    /// POST `/pause`.
+    /// Pause replication.
     pub async fn pause(&self) -> Result<(), DbmazzError> {
         let url = format!("{}/pause", self.base_url);
         let resp = self.client.post(&url).send().await?;
@@ -191,7 +183,7 @@ impl DbmazzClient {
         Ok(())
     }
 
-    /// POST `/resume`.
+    /// Resume replication.
     pub async fn resume(&self) -> Result<(), DbmazzError> {
         let url = format!("{}/resume", self.base_url);
         let resp = self.client.post(&url).send().await?;
@@ -206,10 +198,7 @@ impl DbmazzClient {
 
     // ── higher-level helpers ────────────────────────────────────────────
 
-    /// Poll `/status` until `stage == expected` or timeout expires.
-    ///
-    /// Returns the final `DaemonStatus` on success. Returns an error on timeout
-    /// or on setup errors (`error_detail` set).
+    /// Poll until `stage == expected` or timeout expires.
     pub async fn wait_for_stage(
         &self,
         expected: &str,
@@ -250,7 +239,7 @@ impl DbmazzClient {
         })
     }
 
-    /// Poll `/healthz` until it returns ok, or timeout.
+    /// Poll until the daemon is healthy or timeout.
     pub async fn wait_healthy(
         &self,
         timeout: Duration,
