@@ -1,7 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Snowflake DDL setup.
+//! Snowflake DDL setup: creates internal schema, stage, raw table, metadata, and target tables.
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};

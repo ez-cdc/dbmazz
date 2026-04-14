@@ -65,6 +65,10 @@ pub fn parse_replication_message(bytes: &mut Bytes) -> Option<WalMessage> {
 }
 
 /// Process XLogData data.
+///
+/// Converts pgoutput CdcMessage to generic CdcRecord before sending to the pipeline.
+/// SchemaCache is updated here (on Relation messages) so the converter can look up
+/// column names and types for Insert/Update/Delete messages.
 pub async fn handle_xlog_data(
     data: Bytes,
     lsn: u64,
@@ -102,6 +106,9 @@ pub async fn handle_xlog_data(
                 cache.insert(*id, pk_indices);
             }
 
+            // Logical messages (LW/HW watermarks) are informational only for the
+            // WAL consumer — deduplication state is managed by the snapshot worker.
+            // Just skip these messages — do not forward to the pipeline.
             if matches!(&cdc_msg, CdcMessage::LogicalMessage { .. }) {
                 return Ok(());
             }

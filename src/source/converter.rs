@@ -1,7 +1,11 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Source message → generic CdcRecord conversion.
+//! Converts pgoutput CdcMessage types into generic CdcRecord types.
+//!
+//! This module is the boundary between PostgreSQL-specific replication data
+//! and the generic CDC pipeline. Everything downstream of this converter
+//! (Pipeline, Sink) only sees CdcRecord — never CdcMessage.
 
 use crate::core::position::SourcePosition;
 use crate::core::record::{CdcRecord, ColumnDef, ColumnValue, DataType, TableRef, Value};

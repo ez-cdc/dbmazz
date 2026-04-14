@@ -1,7 +1,28 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Sink connectors.
+//! # Sink Connectors
+//!
+//! This module contains sink connector implementations that write CDC records
+//! to various target systems. Each sink implements the `Sink` trait from
+//! `crate::core::traits`.
+//!
+//! ## Available Sinks
+//!
+//! - **StarRocks**: OLAP database with Stream Load API support
+//! - **PostgreSQL**: Relational database via raw table + MERGE (PG >= 15)
+//! - **Snowflake**: Cloud data warehouse via Parquet stage + COPY INTO + MERGE
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use crate::connectors::sinks::create_sink;
+//! use crate::config::SinkConfig;
+//!
+//! let sink = create_sink(&config)?;
+//! sink.validate_connection().await?;
+//! sink.write_batch(records).await?;
+//! ```
 
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;

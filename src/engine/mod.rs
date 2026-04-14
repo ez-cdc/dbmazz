@@ -33,7 +33,10 @@ pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
     state_store: StateStore,
+    /// SchemaCache for converting pgoutput CdcMessage → generic CdcRecord.
+    /// Owned by the engine, passed mutably to the WAL handler.
     schema_cache: SchemaCache,
+    /// Factory for creating sink instances (snapshot workers need their own).
     sink_factory: SinkFactory,
 }
 
@@ -73,7 +76,7 @@ impl CdcEngine {
     pub async fn run(mut self) -> Result<()> {
         // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)
         self.shared_state
-            .set_stage(Stage::Setup, "Starting gRPC server")
+            .set_stage(Stage::Setup, "Initializing")
             .await;
         self.start_grpc_server();
 

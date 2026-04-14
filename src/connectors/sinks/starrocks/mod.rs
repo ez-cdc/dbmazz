@@ -1,7 +1,41 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! StarRocks sink connector.
+//! # StarRocks Sink Connector
+//!
+//! This module implements a CDC sink for StarRocks, an OLAP database that
+//! provides excellent real-time analytics capabilities. The sink uses
+//! StarRocks' Stream Load HTTP API for high-throughput data ingestion.
+//!
+//! ## Features
+//!
+//! - **Streaming ingestion**: Uses Stream Load HTTP API with `Expect: 100-continue`
+//! - **Upsert support**: Primary Key tables support automatic upsert/delete
+//! - **Partial updates**: TOAST column optimization for PostgreSQL large values
+//! - **Schema evolution**: Automatic column addition when source schema changes
+//! - **Soft deletes**: CDC audit columns track operation type and deletion status
+//!
+//! ## Architecture
+//!
+//! ```text
+//! CdcRecord ---> StarRocksSink ---> StreamLoadClient ---> StarRocks FE
+//!                     |                    |                   |
+//!                     v                    v                   v
+//!               types.rs            stream_load.rs        HTTP 8040
+//!               (mapping)           (curl loader)         (redirect)
+//!                                                              |
+//!                                                              v
+//!                                                         StarRocks BE
+//!                                                         HTTP 8040
+//! ```
+//!
+//! ## CDC Audit Columns
+//!
+//! The sink adds audit columns to track CDC operations:
+//! - `dbmazz_op_type`: Operation type (0=INSERT, 1=UPDATE, 2=DELETE)
+//! - `dbmazz_is_deleted`: Soft delete flag for deletions
+//! - `dbmazz_synced_at`: Timestamp when record was synced
+//! - `dbmazz_cdc_version`: Source LSN/position for ordering
 
 mod config;
 mod setup;

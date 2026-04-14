@@ -1,7 +1,21 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Snapshot worker.
+//! Snapshot worker: reads existing rows from PostgreSQL and loads them into the sink.
+//!
+//! # Algorithm (Flink CDC concurrent snapshot)
+//!
+//! The WAL consumer and snapshot worker run concurrently. Deduplication is handled
+//! by the WAL consumer via `SharedState::should_emit()`.
+//!
+//! For each chunk:
+//! 1. Emit LW watermark via `pg_logical_emit_message`
+//! 2. `SELECT * FROM table WHERE pk >= start AND pk < end`
+//! 3. Emit HW watermark → returns the HW LSN
+//! 4. Convert rows to CdcRecord::Insert → sink.write_batch()
+//! 5. Mark chunk COMPLETE in `dbmazz_snapshot_state`
+//! 6. Register (start_pk, end_pk, hw_lsn) in `SharedState.finished_chunks`
+//! 7. Update `SharedState` snapshot progress counters
 
 use std::collections::HashMap;
 use std::sync::Arc;

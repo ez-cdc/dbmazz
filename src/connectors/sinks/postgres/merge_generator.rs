@@ -1,12 +1,30 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Dynamic MERGE SQL generator.
+//! Dynamic MERGE SQL generator for PostgreSQL >= 15.
+//!
+//! Generates a MERGE statement that applies raw table records to the target table:
+//! - Deduplicates by PK using ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _timestamp DESC)
+//! - Handles INSERT (NOT MATCHED), DELETE (MATCHED), UPDATE (MATCHED)
+//! - Generates one WHEN MATCHED clause per unique TOAST column combination
 
 use super::types::pg_oid_to_target_type;
 use crate::core::traits::SourceTableSchema;
 
-/// Generate a MERGE SQL statement for a batch range.
+/// Generate a complete MERGE SQL statement for a batch range.
+///
+/// Processes all batches in the half-open interval `(from_batch_id, to_batch_id]`.
+/// The ROW_NUMBER dedup (`PARTITION BY pk ORDER BY _timestamp DESC`) handles multiple
+/// batches correctly by keeping the most recent record per PK across the entire range.
+///
+/// # Arguments
+/// * `raw_table` — full name of the raw table (e.g., `_dbmazz._raw_dbmazz_slot`)
+/// * `target_schema` — target table schema (e.g., `public`)
+/// * `source_schema` — source table schema with column definitions and PKs
+/// * `toast_combinations` — unique TOAST column combinations found in this batch range
+///   (e.g., `["", "big_col", "big_col,other_col"]`)
+/// * `from_batch_id` — exclusive lower bound of the batch range
+/// * `to_batch_id` — inclusive upper bound of the batch range
 pub fn generate_merge_range(
     raw_table: &str,
     target_schema: &str,

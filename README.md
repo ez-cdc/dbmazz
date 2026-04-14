@@ -19,7 +19,7 @@ Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
 [![Discussions](https://img.shields.io/badge/GitHub-Discussions-181717?logo=github)](https://github.com/ez-cdc/dbmazz/discussions)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org)
 
-[Quickstart](#-try-it-in-2-minutes) · [What is dbmazz?](#what-is-dbmazz) · [At a glance](#at-a-glance) · [Performance](#-performance) · [Production](#-production-deployment)
+[Quickstart](#-try-it-in-2-minutes) · [What is dbmazz?](#what-is-dbmazz) · [At a glance](#at-a-glance) · [How it works](#how-it-works) · [Performance](#-performance) · [Production](#-production-deployment)
 
 [deb-faq]: https://debezium.io/documentation/faq/
 [air-deploy]: https://docs.airbyte.com/platform/deploying-airbyte
@@ -67,16 +67,18 @@ Each tool optimizes for different things. dbmazz optimizes for **resource effici
 
 ## 🤔 Why dbmazz?
 
-In a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory used: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Per-daemon footprint converges on roughly **1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source is producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
+In a 3-day production load test we ran **40 dbmazz daemons in parallel on a single 2 vCPU / 4 GB worker**, each replicating its own PostgreSQL database to a shared StarRocks instance. Total worker memory: 522 MB out of 4 GB. Total worker CPU: 15 % average, 32 % peak. Every daemon held its own replication slot, parsed pgoutput, and pushed batched writes to the sink — converging on roughly **1 % of one CPU core and ~11 MB of RSS**, regardless of whether the source was producing 1 000 inserts/sec or 1 insert/minute. dbmazz overhead is **fixed-cost per daemon, not load-dependent**. ([Full CDC footprint benchmark](benchmarks/2026-04-13-cdc-footprint-multitenant.md))
 
-dbmazz is the alternative to running a streaming platform: a single Rust binary that connects to your Postgres source on one side and your sink on the other. No brokers, no clusters, no orchestration. Run it, point it at two databases, and you're replicating.
+For backfill at scale, we've also benchmarked **TPC-DS 1 TB at ~110 K rows/sec sustained** on an 8 vCPU worker, with the bottleneck at worker compute — not PostgreSQL or the sink. Full numbers, methodology, and hardware specs in the [snapshot benchmark](benchmarks/2026-03-07-tpcds-1tb-snapshot.md).
 
 ### Where dbmazz wins
 
-- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. No sync windows, no scheduled jobs, no waiting for the next batch. If freshness matters to your downstream, that's the difference between an *operational replica* and a *day-old data lake*.
-- **🪶 Multi-tenant CDC at minimal cost** — dozens of independent replication jobs on a single small worker. The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free.
-- **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes with no Kafka in between.
-- **🌱 Edge or resource-constrained environments** — runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container.
+- **🪶 The smallest CDC footprint that still does real work.** ~30 MB on disk, ~11 MB resident in memory at steady state — about the size of an idle shell session. Runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container. Compare to 256 MB – 4 GB for [Debezium](https://debezium.io/documentation/faq/), 8 GB+ for [Airbyte](https://docs.airbyte.com/platform/deploying-airbyte), or 48–64 GB for [PeerDB enterprise](https://github.com/PeerDB-io/peerdb/issues/2727).
+- **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. No sync windows, no waiting for the next batch. If freshness matters, that's the difference between an *operational replica* and a *day-old data lake*.
+- **🪐 Multi-tenant CDC at minimal cost.** The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free. A `t3.medium` at $0.04/hour can carry your whole CDC fleet.
+- **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between. No Kafka cluster. No ZooKeeper. No schema registry. No Connect cluster. No Temporal stack. No microservices.
+- **🚀 Time to first replication: under 2 minutes.** Install the CLI, point it at two databases, watch the live dashboard. No deployment manifests, no Kubernetes, no SaaS signup.
+- **🦀 Built on Rust.** Memory-safe, no GC pauses, no JVM warm-up time. Predictable performance, predictable footprint.
 
 ---
 
@@ -115,15 +117,51 @@ Use `--json-report results.json` to wire it into CI.
 
 ## 🔌 Supported sources & sinks
 
-| Source | Sink | Status |
-|---|---|:---:|
-| PostgreSQL 12+ | **StarRocks** | ✅ Stable |
-| PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable |
-| PostgreSQL 12+ | **Snowflake** | ✅ Stable |
-| PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap |
-| MySQL | * | 🚧 Roadmap |
+| Source | Sink | Status | Notes |
+|---|---|:---:|---|
+| PostgreSQL 12+ | **StarRocks** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed |
+| PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
+| PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported |
+| PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
+| MySQL | * | 🚧 Roadmap | The source layer is generic; PostgreSQL is the only implementation today |
 
-To add a new source or sink, see [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
+Adding a new sink is intentionally small: implement a 6-method `Sink` trait and CDC + snapshot work automatically. See [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
+
+---
+
+## How it works
+
+```
+PostgreSQL (source)               dbmazz                          Sink (target)
+┌──────────────┐               ┌────────────────────┐          ┌──────────────┐
+│  WAL         │   logical     │ WAL Handler        │          │ StarRocks    │
+│  (INSERT,    │   replication │   │                │          │ PostgreSQL   │
+│   UPDATE,    │ ────────────▶ │   ▼                │          │ Snowflake    │
+│   DELETE)    │   (pgoutput)  │ source/converter   │          │              │
+│              │               │   │                │          │              │
+│              │               │   ▼                │          │              │
+│              │               │ Pipeline           │  write   │              │
+│              │               │   │ batch + flush  │──batch──▶│              │
+│              │               │   ▼                │          │              │
+│              │               │ Checkpoint (LSN)   │          │              │
+│              │ ◀─────────────│  confirm to PG     │          │              │
+└──────────────┘               └────────────────────┘          └──────────────┘
+```
+
+dbmazz reads PostgreSQL's logical replication stream (`pgoutput` protocol), converts each event to a generic `CdcRecord`, batches records in a small in-memory pipeline, and writes them to a sink via a 6-method `Sink` trait. The sink owns its loading strategy entirely — Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake — the engine doesn't care.
+
+The critical invariant: **LSN checkpoints are persisted before being confirmed to PostgreSQL**. If we confirmed first and crashed, the WAL would be discarded with no local record — permanent data loss. dbmazz never does that.
+
+For initial backfill, dbmazz implements the [Flink CDC concurrent snapshot algorithm](https://github.com/apache/flink-cdc): each table is divided into PK-range chunks, processed by N parallel workers, and de-duplicated against the live WAL stream via low/high watermarks emitted with `pg_logical_emit_message`. Snapshot progress is persisted in PostgreSQL, so an interrupted snapshot resumes from the last completed chunk.
+
+### Guarantees
+
+- **At-least-once delivery.** LSN checkpoints are persisted to PostgreSQL *before* being confirmed back to it — never the other way around. After a crash, dbmazz resumes from the last persisted checkpoint; sinks should be idempotent at the primary key.
+- **Transactional ordering preserved.** Events from the same source transaction reach the sink in commit order. Cross-transaction ordering matches the WAL.
+- **Schema evolution detected.** New columns added to source tables are picked up from `pgoutput` Relation messages and propagated to sinks that support `ALTER TABLE ADD COLUMN` automatically (StarRocks, Snowflake). For PostgreSQL sinks, a manual `ALTER` on the target is currently required.
+- **Resumable snapshots.** An interrupted backfill resumes from the last completed PK chunk via state in the `dbmazz_snapshot_state` table.
+
+Full data flow, module map, and design decisions: [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -135,9 +173,9 @@ We publish reproducible benchmarks with full hardware specs and methodology. Num
 
 dbmazz operates in two modes with **fundamentally different resource profiles**. Don't conflate them.
 
-- **Snapshot** (one-time backfill) is a heavy parallel workload: it reads millions of rows from the source, serializes them, and pushes them in batches. The CPU and memory you see in the snapshot benchmark below reflect this *workload* — not steady-state daemon overhead. Snapshot runs once.
+- **Snapshot** (one-time backfill) is a heavy parallel workload. It runs N concurrent `SELECT` chunks over multiple PostgreSQL connections, serializes millions of rows to the sink format, and pushes them in batches. The CPU and memory you see in the snapshot benchmark below reflect this *workload* — N workers each holding a chunk in memory waiting for the sink to ACK — not steady-state daemon overhead. Snapshot runs once.
 
-- **CDC streaming** (steady state) is an entirely different beast. Memory is bounded and the per-daemon cost is nearly constant regardless of source rate. This is what you run 99% of the time, and it costs almost nothing.
+- **CDC streaming** (steady state) is an entirely different beast. dbmazz reads logical replication messages over a *single* PostgreSQL connection, batches them in a small in-memory channel, and flushes to the sink. There is no read-side parallelism because the WAL stream is sequential. Memory is bounded by the channel buffer (a few thousand events, configurable). This is what you run 99% of the time, and it costs almost nothing.
 
 > **TL;DR**: if you see "1.7 GB RSS" in the snapshot benchmark and assume that's what dbmazz uses on your production CDC pipeline — that's the wrong takeaway. CDC steady state runs in a fraction of the resources.
 
@@ -148,13 +186,14 @@ We published a partial TPC-DS 1 TB snapshot run alongside the source code so you
 - **Source**: PostgreSQL 16 on RDS (`us-west-2`), gp3 storage
 - **Sink**: StarRocks on EC2 (same region)
 - **Worker**: c5.2xlarge — 8 vCPU, 16 GB RAM
+- **Workers / chunk size**: 25 concurrent / 50,000 rows
 - **Dataset**: 25 tables, ~6.35 B rows total
 - **Result**: ~110 K rows/sec sustained, ~1.7 GB RSS, 82–91 % CPU sustained
 - **Estimated total time** (full 1 TB): ~16 hours
 
 > **Status**: this is a *partial* run (2,176 of 113,129 chunks completed at the time of recording). A complete end-to-end run is in progress. Full report: [`benchmarks/2026-03-07-tpcds-1tb-snapshot.md`](benchmarks/2026-03-07-tpcds-1tb-snapshot.md).
 
-**Where's the bottleneck?** All 8 vCPUs of the worker are saturated — the bottleneck is *worker compute*, not PostgreSQL or StarRocks. Larger instances scale further until you hit the source DB's read IOPS ceiling (typically ~12 K IOPS on RDS gp3).
+**Where's the bottleneck?** All 8 vCPUs of the worker are saturated on JSON serialization and gzip compression — the bottleneck is *worker compute*, not PostgreSQL or StarRocks. Larger instances scale further until you hit the source DB's read IOPS ceiling (typically ~12 K IOPS on RDS gp3).
 
 ### CDC streaming — per-daemon footprint
 
@@ -166,9 +205,9 @@ In a 3-day production load test, **40 dbmazz daemons ran concurrently on a singl
 | **Moderate-rate** | 50–100 inserts/sec | 20 | **10.7 millicores** | **10.7 MB** |
 | **Low-rate** | 1–5 inserts/min | 10 | **12.3 millicores** | **10.7 MB** |
 
-> **The headline finding**: dbmazz overhead is **fixed-cost per daemon**, not load-dependent. Whether the source is producing 1 000 inserts/sec or 1 insert/minute, a daemon converges on roughly **1 % of one CPU core and ~11 MB of RSS**. The marginal cost per event is invisible at this scale.
+> **The headline finding**: dbmazz overhead is **fixed-cost per daemon**, not load-dependent. Whether the source is producing 1 000 inserts/sec or 1 insert/minute, a daemon converges on roughly **1 % of one CPU core and ~11 MB of RSS**. The cost is dominated by holding the replication slot, parsing pgoutput, and maintaining the sink connection — the marginal cost per event is invisible at this scale.
 
-The same worker reported **15 % total CPU and 522 MB total RAM used (12.7 % of capacity)** with all 40 daemons running. dbmazz scales horizontally on a single host.
+The same worker reported **15 % total CPU and 522 MB total RAM used (12.7 % of capacity)** with all 40 daemons running. dbmazz scales horizontally on a single host: each daemon is an independent Unix process with its own replication slot and sink connection.
 
 Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benchmarks/2026-04-13-cdc-footprint-multitenant.md`](benchmarks/2026-04-13-cdc-footprint-multitenant.md).
 
@@ -178,11 +217,13 @@ Full setup, per-tier breakdown, methodology, queries, and honest caveats: [`benc
 
 ## 🐳 Production deployment
 
-For managed BYOC deployment with auto-healing workers, centralized monitoring, RBAC, audit logs, and a web portal — running dbmazz in your own AWS or GCP account via Terraform — see **[EZ-CDC Cloud](https://ez-cdc.com)**.
+For managed BYOC deployment with auto-healing workers, centralized monitoring, RBAC, audit logs, and a web portal — running dbmazz in your own AWS or GCP account — see **[EZ-CDC Cloud](https://ez-cdc.com)**.
 
 ---
 
 ## 👩‍💻 For developers
+
+### Build and test
 
 ```bash
 cargo build --release
@@ -195,7 +236,25 @@ Requires Rust 1.91.1+. System deps: `protobuf-compiler`, `musl-tools`, `pkg-conf
 
 The end-to-end suite lives in [`e2e-cli/`](e2e-cli/) — it runs the dbmazz daemon against a configured source and sink and validates the result with the 13-check verification harness.
 
-To add a new source or sink connector, see [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
+### Contributing a new sink
+
+The engine is sink-agnostic. Adding a new sink means implementing one trait — six methods, one with a default — modelled after Kafka Connect:
+
+```rust
+#[async_trait]
+pub trait Sink: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> SinkCapabilities;
+    async fn validate_connection(&self) -> Result<()>;
+    async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> { Ok(()) }
+    async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
+    async fn close(&mut self) -> Result<()>;
+}
+```
+
+Snapshot and CDC both go through `write_batch()` — there is no separate snapshot path. The sink owns its loading strategy (Stream Load, `COPY`, S3 staging, `MERGE`, etc.) and the engine doesn't care.
+
+**Full step-by-step guide**: [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
 
 ---
 
@@ -232,4 +291,4 @@ In plain English: **dbmazz is free for commercial and non-commercial use**, incl
 
 **dbmazz is the open-source CDC engine maintained by [EZ-CDC](https://ez-cdc.com).** We're a small team building modern data replication tools for teams that want streaming Postgres CDC without operating a streaming platform — and dbmazz is the daemon at the heart of everything we ship.
 
-The same team also runs **[EZ-CDC Cloud](https://ez-cdc.com)**: a managed BYOC platform that deploys dbmazz into your own AWS or GCP account via Terraform.
+The same team also runs **[EZ-CDC Cloud](https://ez-cdc.com)**: a managed BYOC platform that deploys dbmazz into your own AWS or GCP account.

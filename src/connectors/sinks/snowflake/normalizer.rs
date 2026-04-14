@@ -1,7 +1,12 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Async normalizer task for Snowflake.
+//! Async normalizer for Snowflake: processes raw table batches → MERGE into target tables.
+//!
+//! Runs as a background tokio task. Same pattern as PostgresSink normalizer:
+//! event-driven (mpsc notification) + polling (2s timeout).
+//!
+//! Processes batches ONE AT A TIME to avoid MERGE dedup issues across batches.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
