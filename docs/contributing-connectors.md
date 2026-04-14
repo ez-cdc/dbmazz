@@ -729,35 +729,20 @@ mod tests {
 
 ### End-to-End Tests (required for sink connectors)
 
-All sink connectors are validated by the `ez-cdc` CLI test harness in
-`e2e-cli/`. The suite runs against real databases in Docker and verifies
-behavior end-to-end: snapshot correctness, CDC INSERT/UPDATE/DELETE,
-TOAST handling, schema consistency, and more.
+All sink connectors are validated by the `ez-cdc` CLI test harness, which
+runs against real databases and verifies behavior end-to-end: snapshot
+correctness, CDC INSERT/UPDATE/DELETE, TOAST handling, schema
+consistency, and more.
 
-To add e2e coverage for a new sink:
+To run the harness against your new sink, install the CLI with the
+one-liner installer (see the dbmazz README) and run:
 
-1. **Add a TargetBackend** in `e2e-cli/src/clients/targets/my_sink.rs`:
-   implement the `TargetBackend` trait (see `starrocks.rs` or `postgres.rs`
-   for examples).
+```bash
+ez-cdc verify --source <your-source> --sink <your-sink>
+```
 
-2. **Add a sink spec** in `e2e-cli/src/config/schema.rs`:
-   add a variant to `SinkSpec` and the corresponding inner struct.
-
-3. **Add compose generation** in `e2e-cli/src/compose/builder.rs`:
-   add the container definition for your sink's database.
-
-4. **Run the suite** (make sure your source and sink infrastructure is
-   already running — bring your own docker-compose or cloud
-   databases):
-
-   ```bash
-   ez-cdc verify --source demo-pg --sink my-sink
-   ```
-
-   The verify runner exercises all Tier 1 validations automatically —
-   you don't write test functions, the framework provides them.
-
-See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
+The verify runner exercises all Tier 1 validations automatically — you
+don't write test functions, the framework provides them.
 
 ## Documentation Requirements
 

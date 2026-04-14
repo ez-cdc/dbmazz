@@ -4,6 +4,16 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Removed
+- The `ez-cdc` CLI source code (`e2e-cli/`) and the `install.sh` installer
+  have been moved out of this repository. The CLI binary remains publicly
+  installable via the same kind of one-liner, now hosted at:
+  `curl -sSL https://raw.githubusercontent.com/ez-cdc/ez-cdc-cli-releases/main/install.sh | sh`
+- The `build-ez-cdc` CI job has been removed from the release workflow;
+  dbmazz releases now only build and publish the daemon binaries and the
+  Docker image. CLI binaries are produced and published from a separate
+  repository.
+
 ## [1.6.3] - 2026-04-13
 
 ### Fixed
