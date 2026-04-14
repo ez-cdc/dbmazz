@@ -1,7 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Raw table writer: serializes CdcRecords and writes to the staging table via COPY.
+//! Raw table writer.
 
 use anyhow::{Context, Result};
 use bytes::{BufMut, BytesMut};
@@ -11,15 +11,9 @@ use tokio_postgres::Client;
 
 use crate::core::record::{CdcRecord, ColumnValue, Value};
 
-/// Metadata schema name
 const METADATA_SCHEMA: &str = "_dbmazz";
 
-/// Write a batch of CdcRecords to the raw table via COPY and update metadata.
-/// Everything runs in a single transaction (atomic).
-/// The batch_id is read from metadata and incremented atomically within the transaction
-/// (safe for multiple sink instances writing concurrently, e.g., snapshot workers).
-///
-/// Returns (records_written, bytes_written).
+/// Write a batch of CdcRecords to the raw table and update metadata.
 pub async fn write_batch_to_raw(
     client: &mut Client,
     raw_table: &str,

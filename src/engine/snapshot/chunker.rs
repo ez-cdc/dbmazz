@@ -1,13 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Divides a table into PK-range chunks suitable for parallel snapshot.
-//!
-//! Only integer (BIGINT / INT) primary keys are supported for chunking.
-//! Tables with non-integer PKs are excluded from snapshot with a warning.
-//!
-//! Chunk count is based on estimated row count (`pg_class.reltuples`) when
-//! available, falling back to PK range division for un-ANALYZEd tables.
+//! Table chunker for snapshot. Integer primary keys only.
 
 use anyhow::{Context, Result};
 use tokio_postgres::Client;

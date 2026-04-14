@@ -1,18 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! # Snowflake Sink Connector
-//!
-//! CDC sink for Snowflake using PUT + COPY INTO with Parquet files and a
-//! two-phase pattern (staging raw table + MERGE normalizer).
-//!
-//! Communication with Snowflake is 100% via HTTP — no Java SDK or sidecar.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! CdcRecord → Parquet → PUT (stage) → COPY INTO (raw table) → MERGE (target)
-//! ```
+//! Snowflake sink connector.
 
 pub mod client;
 pub mod config;

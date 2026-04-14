@@ -2,22 +2,6 @@
 // Licensed under the Elastic License v2.0
 
 //! PostgreSQL sink connector.
-//!
-//! Replicates CDC changes to a target PostgreSQL database using a
-//! raw table + normalize pattern (MERGE, PG >= 15).
-//!
-//! ## CDC Flow
-//!
-//! ```text
-//! write_batch(Vec<CdcRecord>)
-//!   ├── COPY INTO _dbmazz._raw_{job} (staging)
-//!   ├── UPDATE _dbmazz._metadata (lsn, sync_batch_id)
-//!   ├── COMMIT (atomic)
-//!   └── Notify normalizer (async background task)
-//!         ├── MERGE INTO dst_table (PG >= 15)
-//!         ├── DELETE FROM raw_table (cleanup)
-//!         └── UPDATE metadata (normalize_batch_id)
-//! ```
 
 mod merge_generator;
 mod normalizer;

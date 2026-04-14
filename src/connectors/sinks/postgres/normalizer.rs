@@ -1,15 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Async normalizer: processes raw table batches → MERGE into target tables.
-//!
-//! Runs as a background tokio task. Wakes up on notification or every 2 seconds
-//! (polling handles snapshot workers that don't share the notify handle).
-//!
-//! Processes ALL pending batches in ONE MERGE pass per wake-up to eliminate
-//! the per-batch serial latency that caused the previous 44-second CDC delay.
-//! Each pass runs in a single transaction:
-//! MERGE (range) + metadata update + raw table cleanup (atomic).
+//! Async normalizer task.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;

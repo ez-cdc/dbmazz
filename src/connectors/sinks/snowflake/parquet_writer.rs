@@ -1,10 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Parquet Writer for Snowflake raw table records.
-//!
-//! Converts `Vec<CdcRecord>` into Parquet bytes (in-memory) with the raw table schema:
-//! `_timestamp, _dst_table, _data, _record_type, _match_data, _batch_id, _toast_columns`
+//! Parquet writer for Snowflake.
 
 use anyhow::{Context, Result};
 use arrow::array::{ArrayRef, Int32Array, Int64Array, StringBuilder, StringDictionaryBuilder};

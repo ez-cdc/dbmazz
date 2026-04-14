@@ -2,17 +2,6 @@
 // Licensed under the Elastic License v2.0
 
 //! Dynamic MERGE SQL generator for Snowflake.
-//!
-//! Generates a MERGE statement that applies raw table records to the target table:
-//! - Deduplicates by PK using ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _TIMESTAMP DESC)
-//! - Handles INSERT (NOT MATCHED), DELETE/soft-delete (MATCHED), UPDATE (MATCHED)
-//! - Generates one WHEN MATCHED clause per unique TOAST column combination
-//!
-//! Key differences from PostgresSink MERGE:
-//! - Column extraction: `_DATA:"col"::TYPE` (VARIANT path) instead of `(_data->>'col')::type`
-//! - Identifiers: UPPERCASE + double-quoted
-//! - Transaction: implicit (MERGE is atomic in Snowflake)
-//! - Delete: configurable soft/hard
 
 use super::types::TypeMapper;
 use crate::core::traits::SourceTableSchema;

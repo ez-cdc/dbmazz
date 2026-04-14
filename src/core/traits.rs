@@ -111,7 +111,6 @@ pub trait Sink: Send + Sync {
     }
 
     /// Writes a batch of CDC records to the sink.
-    /// Each sink decides how to apply them (Stream Load, raw table + MERGE, stage, etc).
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult>;
 
     /// Close the sink: flush pending data and clean up resources.

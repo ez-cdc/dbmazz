@@ -1,16 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Snowflake HTTP Client
-//!
-//! Handles session authentication (password + JWT key-pair) and SQL execution
-//! via the `/queries/v1/query-request` endpoint. All Snowflake communication
-//! goes through this client, including PUT stage operations.
-//!
-//! ## Auth Flows
-//!
-//! - **Password**: POST `/session/v1/login-request` with LOGIN_NAME + PASSWORD
-//! - **JWT key-pair**: Load RSA private key, generate JWT, POST with AUTHENTICATOR=SNOWFLAKE_JWT
+//! Snowflake HTTP client.
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;

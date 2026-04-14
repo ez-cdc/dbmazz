@@ -1,10 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! Persistent state for snapshot chunks in the source PostgreSQL database.
-//!
-//! Stores progress in `dbmazz_snapshot_state` so snapshots can be resumed
-//! after a restart (chunks with status COMPLETE are skipped).
+//! Persistent state for snapshot chunks.
 
 use std::collections::HashSet;
 

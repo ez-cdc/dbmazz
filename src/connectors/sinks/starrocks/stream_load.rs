@@ -1,30 +1,7 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! StarRocks Stream Load HTTP Client
-//!
-//! This module implements the HTTP Stream Load protocol for StarRocks data ingestion.
-//! Stream Load is StarRocks' primary mechanism for high-throughput data loading.
-//!
-//! ## Protocol Details
-//!
-//! StarRocks Stream Load uses a two-phase protocol:
-//!
-//! 1. **FE (Frontend) Request**: Initial request goes to FE (typically port 8040)
-//! 2. **307 Redirect**: FE returns a redirect to a BE (Backend) node
-//! 3. **BE Request**: Actual data upload goes to BE
-//!
-//! The protocol requires proper handling of:
-//! - `Expect: 100-continue` header for large payloads
-//! - 307 redirects with potential 127.0.0.1 rewriting
-//! - JSON format with array stripping
-//!
-//! ## Why libcurl?
-//!
-//! We use libcurl (via the `curl` crate) instead of reqwest/hyper because:
-//! - Correct handling of `Expect: 100-continue` protocol
-//! - Proven reliability with StarRocks Stream Load
-//! - Better control over HTTP/1.1 chunked transfers
+//! StarRocks Stream Load HTTP client.
 
 use anyhow::{anyhow, Result};
 use curl::easy::{Easy, List};

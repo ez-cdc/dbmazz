@@ -3,18 +3,13 @@ use bytes::{Buf, Bytes};
 use memchr::memchr;
 use simdutf8::basic::from_utf8;
 
-/// Wrapper que incluye LSN del WAL para checkpointing.
-/// Deprecated: use pipeline::PipelineEvent instead. Kept for backward compatibility.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct CdcEvent {
-    pub lsn: u64, // LSN del WAL donde ocurrió este evento
+    pub lsn: u64,
     pub message: CdcMessage,
 }
 
-/// pgoutput WAL protocol messages. Fields are parsed from the wire format and
-/// stored even if not all are currently consumed — they are part of the spec
-/// and will be used as the feature set expands.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum CdcMessage {
