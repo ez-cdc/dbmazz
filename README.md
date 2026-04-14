@@ -32,8 +32,6 @@ Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
 
 dbmazz is what CDC looks like without the JVM tax: a single Rust binary, built and maintained by **[EZ-CDC](https://ez-cdc.com)**, that reads the PostgreSQL WAL via logical replication and streams every `INSERT`, `UPDATE`, and `DELETE` into your sink in **real time, with sub-second replication lag in steady state**. No Kafka, no Flink, no ZooKeeper, no Connect cluster, no schema registry — and no batch windows.
 
-The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — about the size of an idle shell session, not a database tool. It ships with a Prometheus endpoint for monitoring. Run it from the official Docker image or build it from source. Each instance handles one replication job.
-
 <div align="center">
   <img src="assets/demo.gif" alt="dbmazz TUI dashboard demo" width="90%">
   <br>
