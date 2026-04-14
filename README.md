@@ -146,20 +146,9 @@ PostgreSQL (source)               dbmazz                          Sink (target)
 └──────────────┘               └────────────────────┘          └──────────────┘
 ```
 
-dbmazz reads PostgreSQL's logical replication stream (`pgoutput` protocol), converts each event to a generic `CdcRecord`, batches records in a small in-memory pipeline, and writes them to a sink via a 6-method `Sink` trait. The sink owns its loading strategy entirely — Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake — the engine doesn't care.
+dbmazz reads PostgreSQL's logical replication stream (`pgoutput`), batches events, and writes them to a sink. Each sink owns its loading strategy — Stream Load, binary `COPY`, or Parquet staging — the engine doesn't care.
 
-The critical invariant: **LSN checkpoints are persisted before being confirmed to PostgreSQL**. If we confirmed first and crashed, the WAL would be discarded with no local record — permanent data loss. dbmazz never does that.
-
-For initial backfill, dbmazz implements the [Flink CDC concurrent snapshot algorithm](https://github.com/apache/flink-cdc): each table is divided into PK-range chunks, processed by N parallel workers, and de-duplicated against the live WAL stream via low/high watermarks emitted with `pg_logical_emit_message`. Snapshot progress is persisted in PostgreSQL, so an interrupted snapshot resumes from the last completed chunk.
-
-### Guarantees
-
-- **At-least-once delivery.** LSN checkpoints are persisted to PostgreSQL *before* being confirmed back to it — never the other way around. After a crash, dbmazz resumes from the last persisted checkpoint; sinks should be idempotent at the primary key.
-- **Transactional ordering preserved.** Events from the same source transaction reach the sink in commit order. Cross-transaction ordering matches the WAL.
-- **Schema evolution detected.** New columns added to source tables are picked up from `pgoutput` Relation messages and propagated to sinks that support `ALTER TABLE ADD COLUMN` automatically (StarRocks, Snowflake). For PostgreSQL sinks, a manual `ALTER` on the target is currently required.
-- **Resumable snapshots.** An interrupted backfill resumes from the last completed PK chunk via state in the `dbmazz_snapshot_state` table.
-
-Full data flow, module map, and design decisions: [`docs/architecture.md`](docs/architecture.md).
+Full architecture, guarantees, and design decisions: [`docs/architecture.md`](docs/architecture.md).
 
 ---
 

@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "dbmazz"
-version = "1.6.3"
+version = "1.6.8"
 dependencies = [
  "anyhow",
  "arrow",
