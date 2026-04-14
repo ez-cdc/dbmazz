@@ -262,29 +262,6 @@ Snapshot and CDC both go through `write_batch()` — there is no separate snapsh
 
 ---
 
-## 📖 Reference
-
-The README intentionally keeps just the high-level surface here. For the full specs, follow the links inside each block to the dedicated docs.
-
-<details>
-<summary><strong>⚙️ Configuration — key environment variables</strong></summary>
-
-The most-used variables. **Full reference (every variable, every sink, every default)**: [`docs/configuration.md`](docs/configuration.md).
-
-| Variable | Required | Description |
-|---|:---:|---|
-| `SOURCE_URL` | yes | PostgreSQL connection string (`?replication=database`) |
-| `TABLES` | yes | Comma-separated list of tables to replicate |
-| `SINK_TYPE` | yes | `starrocks` \| `postgres` \| `snowflake` |
-| `SINK_URL` | yes | Sink connection URL |
-| `SINK_DATABASE` | yes | Target database |
-| `DO_SNAPSHOT` | no | `true` to run initial backfill on first start |
-| `RUST_LOG` | no | Log level (`info`, `debug`, etc.) |
-
-</details>
-
----
-
 ## 💬 Community
 
 - **GitHub Discussions** — questions, ideas, show & tell: [github.com/ez-cdc/dbmazz/discussions](https://github.com/ez-cdc/dbmazz/discussions)
