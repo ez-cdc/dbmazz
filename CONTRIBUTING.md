@@ -24,14 +24,6 @@ cd dbmazz
 cargo build --release
 ```
 
-### Run Demo
-
-```bash
-cd demo
-./demo-start.sh      # Start PostgreSQL + StarRocks + dbmazz
-./demo-stop.sh       # Stop everything
-```
-
 ### Tests
 
 ```bash
@@ -143,15 +135,7 @@ test: add tests for schema evolution
 ## Debugging
 
 ```bash
-# Detailed logs
 RUST_LOG=debug cargo run
-
-# gRPC API
-grpcurl -plaintext localhost:50051 list
-grpcurl -plaintext localhost:50051 dbmazz.HealthService/Check
-
-# Demo logs
-docker logs -f dbmazz-demo-cdc
 ```
 
 ---

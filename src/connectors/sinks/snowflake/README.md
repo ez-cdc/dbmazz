@@ -47,8 +47,7 @@ sequentially to preserve ordering.
 
 ## Configuration
 
-The sink reads these environment variables (all set by the control-plane
-or by the `e2e-cli/.env.snowflake` file in local runs):
+The sink reads these environment variables:
 
 | Variable | Description | Default |
 |---|---|---|

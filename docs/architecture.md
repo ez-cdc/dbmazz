@@ -29,7 +29,6 @@ PostgreSQL (source)             dbmazz                          Sink (target)
 
 ```
 Engine::run()
-  ├── Start gRPC server (health checks must respond immediately)
   ├── Connect to source PostgreSQL
   │     ├── Verify tables exist
   │     ├── Set REPLICA IDENTITY FULL
@@ -200,11 +199,6 @@ src/
 │           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
 │           └── types.rs             PG → Snowflake type mapping
-├── grpc/                            gRPC server
-│   ├── mod.rs                       gRPC server startup
-│   ├── state.rs                     SharedState (metrics, dedup, control)
-│   ├── services.rs                  Health, Control, Status, Metrics
-│   └── cpu_metrics.rs               CPU usage metrics collection
 ├── state_store.rs                   LSN checkpoint persistence
 └── utils.rs                         SQL validation, type helpers
 ```
@@ -244,7 +238,6 @@ See [`e2e-cli/README.md`](../e2e-cli/README.md) for details.
 - **tokio async runtime** — single-threaded by default, multi-threaded for snapshot workers
 - **Pipeline**: single task, receives from WAL handler via mpsc channel
 - **Snapshot**: N parallel workers (semaphore-bounded), each with its own PG connection and sink instance
-- **gRPC server**: spawned as background task
 - **SharedState**: `Arc` with atomics for counters, `RwLock` for schema/dedup state
 
 ## Checkpointing & Recovery

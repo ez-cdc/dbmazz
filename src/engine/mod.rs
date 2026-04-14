@@ -41,10 +41,6 @@ pub struct CdcEngine {
 }
 
 impl CdcEngine {
-    /// Create new CdcEngine.
-    ///
-    /// Connects to PostgreSQL for checkpoint storage. The gRPC server is started
-    /// first in `run()` so the worker-agent health check can succeed immediately.
     pub async fn new(config: Config) -> Result<Self> {
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
@@ -80,7 +76,7 @@ impl CdcEngine {
     pub async fn run(mut self) -> Result<()> {
         // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)
         self.shared_state
-            .set_stage(Stage::Setup, "Starting gRPC server")
+            .set_stage(Stage::Setup, "Initializing")
             .await;
         self.start_grpc_server();
 
@@ -172,8 +168,6 @@ impl CdcEngine {
             .await
     }
 
-    /// Record a setup error in SharedState and block forever so the gRPC server
-    /// keeps running (the control plane can query the error via Health Check).
     async fn halt_on_setup_error(&self, msg: &str) -> ! {
         self.shared_state
             .set_setup_error(Some(msg.to_string()))
@@ -422,7 +416,7 @@ impl CdcEngine {
 
         match current_state {
             CdcState::Stopped => {
-                info!("CDC stopped by control plane. Exiting immediately.");
+                info!("CDC stopped. Exiting immediately.");
                 Some(ControlFlow::Break)
             }
             CdcState::Draining => {

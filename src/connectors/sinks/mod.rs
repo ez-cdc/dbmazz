@@ -11,6 +11,7 @@
 //!
 //! - **StarRocks**: OLAP database with Stream Load API support
 //! - **PostgreSQL**: Relational database via raw table + MERGE (PG >= 15)
+//! - **Snowflake**: Cloud data warehouse via Parquet stage + COPY INTO + MERGE
 //!
 //! ## Usage
 //!

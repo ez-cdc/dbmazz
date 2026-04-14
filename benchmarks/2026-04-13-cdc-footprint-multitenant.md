@@ -2,7 +2,7 @@
 
 **Date analyzed**: 2026-04-13
 **Test period**: 2026-02-21 → 2026-02-23 (3 days)
-**Status**: Final — derived from production EZ-CDC platform load test
+**Status**: Final
 
 ---
 
@@ -31,16 +31,16 @@ invisible at this scale.
 
 ## Setup
 
-| Component | Spec | Source |
-|---|---|---|
-| Worker (dbmazz host) | ~t3.medium — **2 vCPU, ~4 GB RAM** (deduced from worker-level metrics) | inferred from `worker_memory_bytes`, `worker_cpu_percent` |
-| Source databases | 5× RDS PostgreSQL 16, `db.t3.large` / `db.r5.large` / `db.r5.xlarge`, us-west-2 | [`dev-stack/terraform/environments/load-test-databases/variables.tf`](../../dev-stack/terraform/environments/load-test-databases/variables.tf) |
-| Source DB count | 40 (10 high-rate + 20 moderate + 10 low-rate) | [`dev-stack/scripts/load-test/config.py`](../../dev-stack/scripts/load-test/config.py) |
-| Sink | StarRocks on `m5.2xlarge` (8 vCPU, 32 GB), shared across all 40 jobs | same |
-| Tables per source | `orders`, `events`, `products` (some sources also `wide_records`, 50 cols) | same |
-| Workload generator | Custom Python — random insert/update/delete mix, 70 / 20 / 10 ratio | [`dev-stack/scripts/load-test/`](../../dev-stack/scripts/load-test/) |
-| Job count | 40 dbmazz daemons concurrent (peak) | confirmed by `worker_active_daemons` peak = 40 |
-| dbmazz version | 1.4.x (pre-rename, see `daemon_versions` table) | — |
+| Component | Spec |
+|---|---|
+| Worker (dbmazz host) | ~t3.medium — **2 vCPU, ~4 GB RAM** |
+| Source databases | 5× RDS PostgreSQL 16, `db.t3.large` / `db.r5.large` / `db.r5.xlarge`, us-west-2 |
+| Source DB count | 40 (10 high-rate + 20 moderate + 10 low-rate) |
+| Sink | StarRocks on `m5.2xlarge` (8 vCPU, 32 GB), shared across all 40 jobs |
+| Tables per source | `orders`, `events`, `products` (some sources also `wide_records`, 50 cols) |
+| Workload generator | Custom Python — random insert/update/delete mix, 70 / 20 / 10 ratio |
+| Job count | 40 dbmazz daemons concurrent (peak) |
+| dbmazz version | 1.4.x |
 
 The workload was multi-tenant by design: each of the 40 dbmazz daemons
 replicated its own dedicated PostgreSQL database on the source side, all
@@ -48,37 +48,16 @@ writing to the same StarRocks instance on the sink side.
 
 ## Methodology
 
-Metrics were collected by the EZ-CDC worker-agent during the live test
-and persisted to Victoria Metrics. They were extracted on 2026-04-13 via
-the EZ-CDC Grafana datasource proxy API (read-only service-account
-token), aggregated server-side with PromQL, and post-processed with
-`jq` for per-tier statistics.
+Per-process metrics (CPU and RSS) were collected from each dbmazz daemon
+during the live test, persisted to a Prometheus-compatible time-series
+store, and aggregated server-side over the full 3-day window. CPU was
+measured directly by each daemon from `/proc/<self_pid>/stat` and
+converted to millicores; RSS was sampled per-process from the OS so that
+each daemon's footprint is reported independently of the host or any
+sibling processes.
 
-The two metrics that matter for this report come from per-process
-measurements, not system-wide aggregates:
-
-- **CPU (`ezcdc_cpu_millicores`)** — the dbmazz daemon reads its own
-  `/proc/<self_pid>/stat` and converts user + kernel ticks to
-  millicores. See [`src/grpc/cpu_metrics.rs`](../src/grpc/cpu_metrics.rs).
-- **RSS (`ezcdc_memory_rss_bytes`)** — the worker-agent reads each
-  spawned dbmazz daemon's actual resident set size from the OS
-  (`read_process_rss_bytes(pid)`) and pushes it as a separate series
-  per `job_id`.
-
-Both metrics carry per-job labels (`deployment_id`, `job_id`,
-`job_name`, `worker_id`, `tenant_id`), so they are not aggregated with
-the worker-agent's own resource consumption.
-
-The aggregations below use:
-
-```promql
-avg by (job_name) (avg_over_time(ezcdc_cpu_millicores{deployment_id="…"}[3d]))
-avg by (job_name) (avg_over_time(ezcdc_memory_rss_bytes{deployment_id="…"}[3d]))
-sum by (job_name) (increase(ezcdc_ops_total{deployment_id="…"}[3d]))
-max by (job_name) (max_over_time(ezcdc_ops_per_second{deployment_id="…"}[3d]))
-```
-
-evaluated at the end of the test window.
+Aggregations were computed per job over the 3-day window using `avg`,
+`min`, `max`, and `p50`.
 
 ## Per-tier results
 
@@ -136,7 +115,7 @@ following over the test period:
 
 The per-daemon RAM derived from the worker total (~13 MB) is consistent
 with the per-process RSS measured directly (~11 MB) — the small delta
-covers the worker-agent process itself plus some OS overhead.
+covers OS overhead and supporting host processes.
 
 ## What this benchmark proves
 
@@ -148,8 +127,8 @@ covers the worker-agent process itself plus some OS overhead.
    tier and the low-rate tier differed by ~4 orders of magnitude in
    configured insert rate, yet the per-daemon CPU and RSS averages are
    within ~15 % of each other. The fixed cost of running a CDC daemon
-   (replication slot, pgoutput parsing, sink connection) dominates;
-   the marginal cost per event is too small to register at this scale.
+   (replication slot, pgoutput parsing, sink connection) dominates; the
+   marginal cost per event is too small to register at this scale.
 
 3. **dbmazz scales horizontally on a single host.** 40 independent
    daemons fit comfortably on a 2-vCPU / 4-GB worker with ~70 % of the
@@ -166,19 +145,18 @@ This is a footprint study, not a throughput study. Specifically:
   the data does not bound dbmazz's ceiling.
 
 - **The total-events column includes snapshot work, not pure CDC
-  streaming.** Several jobs migrated between workers during the test
-  (the orchestrator rebalances jobs on worker churn), and each
-  migration triggers a fresh snapshot of the seed data. The fact that
-  the *low-rate* tier processed *more* total events than the
-  *high-rate* tier (663 K vs 322 K per job) is explained by migration
-  churn, not by CDC throughput. Treat the total-events numbers as
-  "events the daemon processed", not as "events the source produced".
+  streaming.** Several jobs were restarted during the test (rebalancing
+  on host churn), and each restart triggers a fresh snapshot of the
+  seed data. The fact that the *low-rate* tier processed *more* total
+  events than the *high-rate* tier (663 K vs 322 K per job) is
+  explained by restart churn, not by CDC throughput. Treat the
+  total-events numbers as "events the daemon processed", not as
+  "events the source produced".
 
 - **End-to-end replication lag was below the metric reporting
-  threshold** (`ezcdc_replication_lag_ms` stayed at 0 for all 40
-  daemons across the 3 days). The workload was light enough that
-  there was no measurable lag, but this also means we cannot make a
-  defensible p50 / p99 lag claim from this data.
+  threshold** for all 40 daemons across the 3 days. The workload was
+  light enough that there was no measurable lag, but this also means
+  we cannot make a defensible p50 / p99 lag claim from this data.
 
 A reproducible CDC streaming benchmark with a sustained workload that
 actually saturates the daemon — and with measurable lag — is tracked
@@ -187,35 +165,25 @@ separately in [issue #71](https://github.com/ez-cdc/dbmazz/issues/71).
 ## Caveats
 
 - **Worker instance type is deduced**, not directly observed. The
-  values `worker_memory_bytes` (~522 MB used out of ~4.1 GB total) and
-  `worker_cpu_percent` (peak 32 % with ~520 millicores of total
-  daemon CPU summed across 40 jobs ≈ 1.6 cores) are consistent with
-  `t3.medium` (2 vCPU, 4 GB). The exact instance type was not
-  preserved in any label at the time of the test.
+  measured ~522 MB used out of ~4.1 GB total and a peak of 32 % of two
+  cores are consistent with `t3.medium` (2 vCPU, 4 GB). The exact
+  instance type was not preserved at the time of the test.
 
-- **`ezcdc_ops_per_second` is a sampled gauge**, not a derived rate.
-  It under-reports short bursts that fall between samples. The
-  "ops/sec average" column above counts only samples where the gauge
-  was non-zero, which is why it is much higher than the configured
-  target rate divided by 60.
+- **The ops/sec gauge is sampled**, not a derived rate. It under-reports
+  short bursts that fall between samples. The "ops/sec average" column
+  above counts only samples where the gauge was non-zero, which is why
+  it is higher than the configured target rate divided by 60.
 
 - The exact workload generator behaviour (request rates, retry policy,
-  per-table mix) is documented in
-  [`dev-stack/scripts/load-test/config.py`](../../dev-stack/scripts/load-test/config.py)
-  — the configured *target* rates do not always match what the
-  generator actually produced.
+  per-table mix) was custom Python and the configured *target* rates do
+  not always match what the generator actually produced.
 
 ## Reproducibility
 
-The benchmark itself is not directly reproducible from this repo (the
-test infrastructure was deployed via Terraform in the EZ-CDC Cloud
-account and the run was orchestrated by a Python load-test harness in
-`dev-stack/`). However, the methodology, queries, and aggregation
-logic are fully documented above, and the raw per-job results that
-fed the per-tier tables can be regenerated from any
-PostgreSQL → StarRocks deployment with worker-agent metrics enabled
-by running the same PromQL queries against your own Victoria Metrics
-instance.
+The exact infrastructure used for this run is internal and not directly
+reproducible from this repo. The methodology — per-process CPU and RSS
+sampling aggregated over a multi-day window — applies to any
+PostgreSQL → StarRocks setup with per-process metrics enabled.
 
 For a future run that *is* fully reproducible (single dbmazz daemon
 against a controlled `pgbench` workload, with a published script),

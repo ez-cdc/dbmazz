@@ -36,20 +36,6 @@
 //! - `dbmazz_is_deleted`: Soft delete flag for deletions
 //! - `dbmazz_synced_at`: Timestamp when record was synced
 //! - `dbmazz_cdc_version`: Source LSN/position for ordering
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use dbmazz::connectors::sinks::starrocks::StarRocksSink;
-//! use dbmazz::config::SinkConfig;
-//!
-//! let sink = StarRocksSink::new(&config)?;
-//! sink.validate_connection().await?;
-//!
-//! // Write batch of CDC records
-//! let result = sink.write_batch(records).await?;
-//! info!("Wrote {} records", result.records_written);
-//! ```
 
 mod config;
 mod setup;
