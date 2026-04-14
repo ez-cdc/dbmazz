@@ -4,6 +4,18 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Fixed
+- **PostgreSQL sink: last-write-wins on multiple operations for the same
+  PK inside a single batch.** The raw-table writer stamped every record in
+  a batch with the same `_timestamp`, and the normalizer MERGE uses
+  `ROW_NUMBER() OVER (PARTITION BY pk ORDER BY _timestamp DESC)` to pick
+  the surviving row per PK. When two UPDATEs on the same row landed in
+  one batch (e.g. `BEGIN; UPDATE; UPDATE; COMMIT;`), the tiebreaker was
+  effectively random and the non-final write could win, silently
+  corrupting the target. Records now carry a monotonic per-row offset
+  (`batch_base + rows_written`) so the MERGE deterministically selects
+  the last write within the batch.
+
 ## [1.6.8] - 2026-04-14
 
 ### Changed

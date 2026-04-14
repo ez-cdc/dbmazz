@@ -54,7 +54,13 @@ pub async fn write_batch_to_raw(
 
     let mut buf = BytesMut::with_capacity(records.len() * 256);
     let mut rows_written = 0usize;
-    let now_nanos = SystemTime::now()
+    // Batch base timestamp. Each written record uses `batch_base + rows_written`
+    // so the MERGE tiebreaker `ORDER BY _timestamp DESC` is deterministic for
+    // multiple operations on the same PK inside a single batch (e.g. two
+    // sequential UPDATEs on the same row in one transaction). Without the
+    // per-row offset every record in the batch shared the same `_timestamp`
+    // and ROW_NUMBER() picked an arbitrary survivor, losing the final write.
+    let batch_base_nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as i64;
@@ -66,7 +72,7 @@ pub async fn write_batch_to_raw(
                 write_copy_row(
                     &mut buf,
                     &RawRow {
-                        timestamp: now_nanos,
+                        timestamp: batch_base_nanos + rows_written as i64,
                         dst_table: &table.qualified_name(),
                         data_json: &data_json,
                         record_type: 0,
@@ -89,7 +95,7 @@ pub async fn write_batch_to_raw(
                 write_copy_row(
                     &mut buf,
                     &RawRow {
-                        timestamp: now_nanos,
+                        timestamp: batch_base_nanos + rows_written as i64,
                         dst_table: &table.qualified_name(),
                         data_json: &data_json,
                         record_type: 1,
@@ -106,7 +112,7 @@ pub async fn write_batch_to_raw(
                 write_copy_row(
                     &mut buf,
                     &RawRow {
-                        timestamp: now_nanos,
+                        timestamp: batch_base_nanos + rows_written as i64,
                         dst_table: &table.qualified_name(),
                         data_json: &data_json,
                         record_type: 2,
