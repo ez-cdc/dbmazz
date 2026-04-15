@@ -204,15 +204,21 @@ pub fn source_type_to_data_type(type_id: u32) -> DataType {
     }
 }
 
-/// Convert source-specific column definitions to ColumnDef
+/// Convert source-specific column definitions to ColumnDef.
+///
+/// Note: only the PostgreSQL source populates `pg_type_id` (via
+/// `ColumnDef::with_pg_oid`). Other sources construct `ColumnDef`
+/// directly with `pg_type_id: None`, since `pg_type_id` is consumed
+/// only by the PG sink.
 pub fn columns_to_defs(source_columns: &[SourceColumn]) -> Vec<ColumnDef> {
     source_columns
         .iter()
-        .map(|col| ColumnDef::new(
-            col.name.clone(),
-            source_type_to_data_type(col.type_id),
-            col.nullable,
-        ))
+        .map(|col| ColumnDef {
+            name: col.name.clone(),
+            data_type: source_type_to_data_type(col.type_id),
+            nullable: col.nullable,
+            pg_type_id: None,
+        })
         .collect()
 }
 

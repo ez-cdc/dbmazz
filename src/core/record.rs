@@ -73,20 +73,27 @@ impl ColumnValue {
     }
 }
 
-/// A column definition for schema changes
+/// A column definition for schema changes.
+///
+/// `pg_type_id` is source-specific: only the PostgreSQL source populates it,
+/// other sources leave it `None`. The PG sink consumes it to emit
+/// `ALTER TABLE ... ADD COLUMN <name> <type>` and to preserve type identity
+/// across restarts via `_dbmazz._schema_tracking`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnDef {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
+    pub pg_type_id: Option<u32>,
 }
 
 impl ColumnDef {
-    pub fn new(name: String, data_type: DataType, nullable: bool) -> Self {
+    pub fn with_pg_oid(name: String, data_type: DataType, nullable: bool, pg_type_id: u32) -> Self {
         Self {
             name,
             data_type,
             nullable,
+            pg_type_id: Some(pg_type_id),
         }
     }
 }

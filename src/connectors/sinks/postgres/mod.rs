@@ -13,7 +13,7 @@
 //!   ├── COPY INTO _dbmazz._raw_{job} (staging)
 //!   ├── UPDATE _dbmazz._metadata (lsn, sync_batch_id)
 //!   ├── COMMIT (atomic)
-//!   └── Notify normalizer (async background task)
+//!   └── Wake normalizer via watch::Sender (async background task)
 //!         ├── MERGE INTO dst_table (PG >= 15)
 //!         ├── DELETE FROM raw_table (cleanup)
 //!         └── UPDATE metadata (normalize_batch_id)
@@ -22,16 +22,18 @@
 mod merge_generator;
 mod normalizer;
 mod raw_table;
+pub mod schema_tracking;
 mod setup;
 mod types;
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 use tracing::{error, info, warn};
@@ -42,6 +44,7 @@ use crate::core::record::CdcRecord;
 use crate::core::traits::{
     LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult, SourceTableSchema, StageFormat,
 };
+use schema_tracking::SchemaState;
 
 /// PostgreSQL sink — writes CDC records to a target PostgreSQL database.
 pub struct PostgresSink {
@@ -58,12 +61,14 @@ pub struct PostgresSink {
     client: Option<Client>,
     /// Full name of the raw table (e.g., _dbmazz._raw_dbmazz_slot)
     raw_table_name: String,
-    /// Notify handle to wake the normalizer when new batches are written.
-    normalize_notify: Option<Arc<Notify>>,
     /// Shutdown flag for the normalizer background task.
     normalize_shutdown: Option<Arc<AtomicBool>>,
     /// JoinHandle for the normalizer task — awaited in close().
     normalizer_handle: Option<JoinHandle<()>>,
+    /// Watch sender for schema state updates. Populated after setup(). The
+    /// normalizer holds the corresponding Receiver. Dropped after the
+    /// normalizer has joined in close().
+    schema_tx: Option<watch::Sender<SchemaState>>,
     /// Sink operating mode
     mode: SinkMode,
 }
@@ -92,6 +97,23 @@ impl PostgresSink {
             config.database, pg_config.schema, pg_config.job_name
         );
 
+        // Snapshot workers never have `setup()` called on them (the engine only
+        // calls setup() on the primary sink) and never see SchemaChange events
+        // (snapshot phase reads source via SELECT, not WAL decode). Wire a no-op
+        // watch channel here so `write_batch_to_raw`'s Phase 1 snapshot read and
+        // Phase 3 broadcast both have a valid sender to talk to. The receiver is
+        // dropped immediately — `send_replace` is infallible regardless of
+        // receiver count, and `pending_diffs` is always empty for snapshot
+        // workers because their batches never contain SchemaChange records.
+        // For Primary mode, schema_tx stays None until setup() populates it.
+        let schema_tx = match mode {
+            SinkMode::SnapshotWorker => {
+                let (tx, _rx) = watch::channel(Arc::new(HashMap::new()));
+                Some(tx)
+            }
+            SinkMode::Primary => None,
+        };
+
         Ok(Self {
             url: config.url.clone(),
             schema: pg_config.schema.clone(),
@@ -99,9 +121,9 @@ impl PostgresSink {
             database: config.database.clone(),
             client: None,
             raw_table_name,
-            normalize_notify: None,
             normalize_shutdown: None,
             normalizer_handle: None,
+            schema_tx,
             mode,
         })
     }
@@ -135,7 +157,7 @@ impl Sink for PostgresSink {
         SinkCapabilities {
             supports_upsert: true,
             supports_delete: true,
-            supports_schema_evolution: false,
+            supports_schema_evolution: true,
             supports_transactions: true,
             loading_model: LoadingModel::StagedBatch {
                 stage_format: StageFormat::Json,
@@ -181,23 +203,45 @@ impl Sink for PostgresSink {
     }
 
     async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> {
-        let schema = self.schema.clone();
+        let target_schema = self.schema.clone();
         let job_name = self.job_name.clone();
-        let client = self.connect().await?;
-        setup::run_setup(&*client, &schema, &job_name, source_schemas).await?;
+        let url = self.url.clone();
+        let raw_table = self.raw_table_name.clone();
+        let mode = self.mode;
 
-        // Spawn normalizer background task (skip for snapshot worker instances —
-        // the primary sink's normalizer handles all batches via polling)
-        if self.mode == SinkMode::Primary {
+        // Step 1: run structural setup (raw table, metadata table, target tables).
+        // We take an immutable borrow first via &*client, then drop it before the
+        // mutable borrow needed by initialize_schema_state.
+        {
+            let client = self.connect().await?;
+            setup::run_setup(&*client, &target_schema, &job_name, source_schemas)
+                .await
+                .context("PostgresSink: setup failed")?;
+        }
+
+        // Step 2: bootstrap schema tracking state (requires &mut Client for txns).
+        let initial_map = {
+            let client = self.connect().await?;
+            setup::initialize_schema_state(client, &target_schema, &job_name, source_schemas)
+                .await
+                .context("PostgresSink: initialize_schema_state failed")?
+        };
+
+        // Step 3: wrap in watch::channel so the normalizer can receive updates.
+        let initial_state: SchemaState = Arc::new(initial_map);
+        let (schema_tx, schema_rx) = watch::channel(initial_state);
+        self.schema_tx = Some(schema_tx);
+
+        // Step 4: spawn normalizer only in Primary mode.
+        if mode == SinkMode::Primary {
             let normalizer_config = normalizer::NormalizerConfig {
-                url: self.url.clone(),
-                target_schema: self.schema.clone(),
-                job_name: self.job_name.clone(),
-                raw_table: self.raw_table_name.clone(),
-                table_schemas: source_schemas.to_vec(),
+                url,
+                target_schema,
+                job_name: job_name.clone(),
+                raw_table,
+                schema_rx,
             };
-            let (notify, shutdown, handle) = normalizer::spawn_normalizer(normalizer_config);
-            self.normalize_notify = Some(notify);
+            let (shutdown, handle) = normalizer::spawn_normalizer(normalizer_config);
             self.normalize_shutdown = Some(shutdown);
             self.normalizer_handle = Some(handle);
 
@@ -206,11 +250,18 @@ impl Sink for PostgresSink {
                 source_schemas.len()
             );
         } else {
+            // Snapshot-worker mode: no normalizer. Drop the receiver here (Risk #4).
+            // schema_tx stays on self so Section 4's `send_replace` calls from
+            // raw_table still have a valid sender. `send_replace` is infallible
+            // regardless of whether any receivers exist — it always overwrites
+            // the stored value and returns the previous one.
+            drop(schema_rx);
             info!(
                 "PostgresSink: setup complete ({} tables, normalizer skipped — snapshot worker)",
                 source_schemas.len()
             );
         }
+
         Ok(())
     }
 
@@ -239,18 +290,50 @@ impl Sink for PostgresSink {
             _ => 0,
         };
 
-        // Clone values needed after mutable borrow
+        // Clone values needed after mutable borrow of self.
         let raw_table = self.raw_table_name.clone();
         let job_name = self.job_name.clone();
+        let target_schema = self.schema.clone();
 
-        let client = self.connect().await?;
-        let (records_written, bytes_written) =
-            raw_table::write_batch_to_raw(client, &raw_table, &job_name, lsn, &records).await?;
-
-        // Notify normalizer (non-blocking — if it's already awake it will catch up)
-        if let Some(ref notify) = self.normalize_notify {
-            notify.notify_one();
+        // Establish (or reuse) the lazy connection. connect() takes &mut self, so
+        // it must complete before we borrow self.schema_tx immutably below.
+        // The two fields (client vs schema_tx) are disjoint, but Rust's borrow
+        // checker cannot prove that across a method boundary, so we inline the
+        // lazy-connect logic here to split the borrows by field.
+        if self.client.is_none() {
+            let (pg_client, connection) = tokio_postgres::connect(&self.url, NoTls)
+                .await
+                .context("PostgresSink: failed to connect to target PostgreSQL")?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    error!("PostgresSink connection error: {}", e);
+                }
+            });
+            self.client = Some(pg_client);
         }
+
+        // Both borrows below are now on disjoint fields: `client` (from
+        // self.client) and `schema_tx` (from self.schema_tx). The compiler
+        // can verify this because we access them directly via field paths,
+        // not through a shared &mut self method call.
+        let schema_tx = self.schema_tx.as_ref().expect(
+            "PostgresSink::write_batch called before setup() — schema_tx must be initialized",
+        );
+        let client = self
+            .client
+            .as_mut()
+            .expect("client was just initialized above");
+
+        let (records_written, bytes_written) = raw_table::write_batch_to_raw(
+            client,
+            &raw_table,
+            &target_schema,
+            &job_name,
+            lsn,
+            &records,
+            schema_tx,
+        )
+        .await?;
 
         Ok(SinkResult {
             records_written,
@@ -262,12 +345,10 @@ impl Sink for PostgresSink {
     async fn close(&mut self) -> Result<()> {
         info!("PostgresSink: closing...");
 
-        // Signal normalizer to shut down and process remaining batches.
+        // Signal normalizer to shut down. The shutdown flag will be picked up
+        // within 2 seconds by the normalizer's polling fallback.
         if let Some(ref shutdown) = self.normalize_shutdown {
             shutdown.store(true, Ordering::Relaxed);
-        }
-        if let Some(ref notify) = self.normalize_notify {
-            notify.notify_one();
         }
 
         // Await normalizer completion with a 30-second timeout.
@@ -287,7 +368,10 @@ impl Sink for PostgresSink {
             }
         }
 
-        self.normalize_notify = None;
+        // Drop schema_tx AFTER the normalizer has joined (Risk #1 mitigation).
+        // The Receiver inside the normalizer task is already gone at this point,
+        // so this drop is a no-op for the channel itself.
+        self.schema_tx = None;
         self.normalize_shutdown = None;
         self.client = None;
         info!("PostgresSink: closed");

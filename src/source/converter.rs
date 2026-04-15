@@ -41,7 +41,14 @@ pub fn convert_message(
         } => {
             let column_defs = columns
                 .iter()
-                .map(|c| ColumnDef::new(c.name.clone(), pg_type_to_data_type(c.type_id), true))
+                .map(|c| {
+                    ColumnDef::with_pg_oid(
+                        c.name.clone(),
+                        pg_type_to_data_type(c.type_id),
+                        true,
+                        c.type_id,
+                    )
+                })
                 .collect();
 
             Some(CdcRecord::SchemaChange {

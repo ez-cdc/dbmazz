@@ -28,8 +28,6 @@ RUN chmod +x /usr/local/bin/dbmazz
 
 USER dbmazz
 
-# 8080 = HTTP API + web UI (feature http-api, now default)
-# 50051 = gRPC server
 EXPOSE 8080 50051
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
