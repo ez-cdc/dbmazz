@@ -145,7 +145,7 @@ postgres/
 SinkCapabilities {
     supports_upsert: true,
     supports_delete: true,
-    supports_schema_evolution: false,
+    supports_schema_evolution: true,
     supports_transactions: true,
     loading_model: LoadingModel::StagedBatch { stage_format: StageFormat::Json },
     min_batch_size: Some(1),
@@ -158,7 +158,7 @@ SinkCapabilities {
 
 - **Requires PostgreSQL >= 15** for MERGE support (no fallback for older versions)
 - **Soft delete not supported** — DELETE records result in hard deletes
-- **Schema evolution not supported** — new columns in source require manual `ALTER TABLE` on target
+- **Schema evolution: ADD COLUMN only** — new columns at source are detected from pgoutput Relation messages and applied to the target via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` inside the same transaction as the batch commit. State is tracked in `_dbmazz._schema_tracking` and reconciled on restart. Type changes and column drops are logged loudly but not propagated — both require manual operator intervention.
 - **Arrays and bytea** use direct casting from JSON (may fail for complex nested arrays)
 - **User-defined types** fall back to `text`
 

@@ -365,4 +365,43 @@ mod tests {
         // Must not contain any single-value batch filter
         assert!(!sql.contains("_batch_id = "));
     }
+
+    #[test]
+    fn test_generate_merge_picks_up_new_column() {
+        // Build on top of the baseline schema and push a new `description TEXT` column.
+        let mut schema = test_schema();
+        schema.columns.push(SourceColumn {
+            name: "description".to_string(),
+            data_type: DataType::String,
+            nullable: true,
+            pg_type_id: 25, // text
+        });
+
+        let sql = generate_merge_range(
+            "_dbmazz._raw_test",
+            "public",
+            &schema,
+            &["".to_string()],
+            0,
+            1,
+        );
+
+        // 1. The col_extracts CTE must contain the JSONB extraction for `description`.
+        assert!(
+            sql.contains("(_data->>'description')::text AS \"description\""),
+            "col_extracts CTE must include the description column extraction; got:\n{sql}"
+        );
+
+        // 2. `description` must appear in the INSERT column list.
+        assert!(
+            sql.contains("\"description\""),
+            "INSERT column list must include \"description\"; got:\n{sql}"
+        );
+
+        // 3. `description` must appear in at least one WHEN MATCHED UPDATE SET clause.
+        assert!(
+            sql.contains("\"description\" = src.\"description\""),
+            "UPDATE SET must include description = src.description; got:\n{sql}"
+        );
+    }
 }

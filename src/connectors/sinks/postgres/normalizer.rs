@@ -3,8 +3,22 @@
 
 //! Async normalizer: processes raw table batches → MERGE into target tables.
 //!
-//! Runs as a background tokio task. Wakes up on notification or every 2 seconds
-//! (polling handles snapshot workers that don't share the notify handle).
+//! Runs as a background tokio task. Wakes up on a schema-state change delivered
+//! via a `watch::Receiver<SchemaState>` OR every 2 seconds (polling fallback for
+//! snapshot workers that create their own sink instances and never call
+//! `send_replace` on the channel).
+//!
+//! The `watch::Receiver` replaces the old `Arc<Notify>` wake mechanism:
+//! - `.changed().await` is the wake primitive (replaces `notify.notified()`).
+//! - `.borrow_and_update()` clones the latest `Arc<HashMap>` for each iteration,
+//!   so the normalizer always works from the schema snapshot that was current
+//!   when the COPY-to-raw transaction committed.
+//!
+//! Note (Risk #2 / #11): `tokio::sync::watch::channel` marks the initial value
+//! as "unseen", so the very first `.changed().await` resolves immediately without
+//! waiting for a `send_replace`. This is intentional — we want the normalizer to
+//! run at least one `process_pending` pass on startup to pick up any batches that
+//! landed before the task was spawned.
 //!
 //! Processes ALL pending batches in ONE MERGE pass per wake-up. Each pass runs
 //! in a single transaction: MERGE (range) + metadata update + raw table cleanup (atomic).
@@ -13,51 +27,60 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, warn};
 
 use super::merge_generator;
+use super::schema_tracking::SchemaState;
 use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name
 const METADATA_SCHEMA: &str = "_dbmazz";
 
-/// Polling interval when no notification received (seconds)
+/// Polling interval when no schema-change notification received (seconds).
+/// Snapshot workers use the same normalizer code but do not share the watch
+/// sender, so the polling fallback ensures they still drain the raw table.
 const POLL_INTERVAL_SECS: u64 = 2;
 
-/// Normalizer configuration
+/// Normalizer configuration.
 pub struct NormalizerConfig {
     pub url: String,
     pub target_schema: String,
     pub job_name: String,
     pub raw_table: String,
-    pub table_schemas: Vec<SourceTableSchema>,
+    /// Receiver end of the schema-state watch channel.
+    ///
+    /// The sender is held by `PostgresSink` and calls `send_replace` after each
+    /// COPY-to-raw transaction commits. `changed().await` wakes the normalizer;
+    /// `borrow_and_update()` snapshots the latest schema map for that iteration.
+    ///
+    /// Snapshot-worker sinks create a dummy channel (`watch::channel(Arc::new(…))`)
+    /// and never send to it — the 2-second polling fallback covers that path.
+    pub schema_rx: watch::Receiver<SchemaState>,
 }
 
 /// Start the normalizer as a background task.
 ///
-/// Returns a `(Notify, AtomicBool, JoinHandle)` triple:
-/// - `Arc<Notify>` — call `.notify_one()` after each batch write to wake the normalizer immediately.
-/// - `Arc<AtomicBool>` — set to `true` to request a graceful shutdown (normalizer flushes then exits).
+/// Returns an `(Arc<AtomicBool>, JoinHandle<()>)` pair:
+/// - `Arc<AtomicBool>` — set to `true` to request a graceful shutdown (normalizer
+///   flushes pending work then exits).
 /// - `JoinHandle<()>` — await to confirm the normalizer has stopped.
-pub fn spawn_normalizer(
-    config: NormalizerConfig,
-) -> (Arc<Notify>, Arc<AtomicBool>, JoinHandle<()>) {
-    let notify = Arc::new(Notify::new());
+///
+/// The old `Arc<Notify>` parameter is gone: the `watch::Receiver<SchemaState>`
+/// embedded in `config` subsumes it.
+pub fn spawn_normalizer(config: NormalizerConfig) -> (Arc<AtomicBool>, JoinHandle<()>) {
     let shutdown = Arc::new(AtomicBool::new(false));
-
-    let notify_clone = Arc::clone(&notify);
     let shutdown_clone = Arc::clone(&shutdown);
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = normalizer_loop(config, notify_clone, shutdown_clone).await {
+        if let Err(e) = normalizer_loop(config, shutdown_clone).await {
             error!("Normalizer exited with error: {}", e);
         }
     });
 
-    (notify, shutdown, handle)
+    (shutdown, handle)
 }
 
 /// Connect to target PostgreSQL.
@@ -76,29 +99,39 @@ async fn connect(url: &str) -> Result<Client> {
 }
 
 /// Main normalizer loop.
-async fn normalizer_loop(
-    config: NormalizerConfig,
-    notify: Arc<Notify>,
-    shutdown: Arc<AtomicBool>,
-) -> Result<()> {
+async fn normalizer_loop(mut config: NormalizerConfig, shutdown: Arc<AtomicBool>) -> Result<()> {
     let mut client = connect(&config.url).await?;
 
     info!("Normalizer started (job: {})", config.job_name);
 
-    let schema_map: HashMap<String, &SourceTableSchema> = config
-        .table_schemas
-        .iter()
-        .map(|s| (format!("{}.{}", s.schema, s.name), s))
-        .collect();
-
     loop {
-        // Wait for an explicit notification OR fall back to polling.
-        // Polling is necessary because snapshot workers use their own sink instances
-        // and do not share the notify handle.
+        // Wake on: (a) fresh schema snapshot delivered via the watch channel,
+        // (b) periodic polling fallback for snapshot workers that never call
+        // send_replace, or (c) implicit wake from the initial unseen value
+        // (see module-level doc comment on Risk #2 / #11).
+        //
+        // `biased;` ensures the schema-change branch is always checked first when
+        // both branches are ready simultaneously, matching the plan pseudocode.
+        //
+        // Risk #1: if the watch::Sender is dropped before this task finishes (e.g.
+        // PostgresSink is cleaned up before the normalizer task is joined), `.changed()`
+        // returns `Err(RecvError)`. We deliberately ignore that error — the shutdown
+        // flag and polling fallback are the authoritative termination mechanism.
         tokio::select! {
-            _ = notify.notified() => {}
+            biased;
+            _ = config.schema_rx.changed() => {}
             _ = tokio::time::sleep(tokio::time::Duration::from_secs(POLL_INTERVAL_SECS)) => {}
         }
+
+        // Snapshot the current schema state. `borrow_and_update` marks the value
+        // "seen" so the next `changed()` only fires on the NEXT `send_replace`.
+        // Cloning an `Arc<HashMap>` is a reference-count increment — O(1).
+        let schemas: SchemaState = config.schema_rx.borrow_and_update().clone();
+
+        // Build an ephemeral borrow map for this iteration. The values borrow
+        // from `schemas` (the Arc), so this map lives only for this iteration.
+        let schema_map: HashMap<String, &SourceTableSchema> =
+            schemas.iter().map(|(k, v)| (k.clone(), v)).collect();
 
         if let Err(e) = process_pending(&mut client, &config, &schema_map).await {
             error!("Normalizer: process_pending error: {}", e);
@@ -118,7 +151,13 @@ async fn normalizer_loop(
         // Check shutdown AFTER processing so the final flush always happens.
         if shutdown.load(Ordering::Relaxed) {
             info!("Normalizer: shutdown requested, final flush...");
-            let _ = process_pending(&mut client, &config, &schema_map).await;
+            // Use the latest available schema snapshot for the final pass.
+            let final_schemas: SchemaState = config.schema_rx.borrow().clone();
+            let final_schema_map: HashMap<String, &SourceTableSchema> =
+                final_schemas.iter().map(|(k, v)| (k.clone(), v)).collect();
+            if let Err(e) = process_pending(&mut client, &config, &final_schema_map).await {
+                error!("Normalizer: final flush error during shutdown: {}", e);
+            }
             info!("Normalizer: shutdown complete");
             break;
         }

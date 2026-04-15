@@ -6,6 +6,7 @@
 # Only gitignore Cargo.lock in library crates.
 
 /skills-lock.json
+/Dockerfile.dev
 
 # Byproducts
 *.log

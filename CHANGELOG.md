@@ -4,6 +4,55 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+- **PostgreSQL sink: automatic schema evolution for added columns.** Source
+  `ALTER TABLE ... ADD COLUMN` is now detected via pgoutput `Relation`
+  messages and applied to the target table transactionally with the batch
+  it accompanies. The DDL runs inside the same `BEGIN/COMMIT` as the COPY
+  to the raw staging table and the metadata update, so a partial state is
+  impossible — either the column lands on the target along with the data
+  or nothing changes and the batch is retried.
+- **PostgreSQL sink: `_dbmazz._schema_tracking` metadata table.** New
+  per-job tracking table records every column dbmazz has materialized on
+  the target, with the source PG type OID and the LSN at which it was
+  added. Created and seeded on first run; rehydrated and reconciled on
+  every subsequent startup so that source-side `ALTER TABLE`s applied
+  while the daemon was down are caught up before replication resumes.
+  Same `job_name` discriminator pattern as `_dbmazz._metadata`, so
+  multiple daemons targeting different schemas in the same target DB
+  coexist cleanly.
+- **PostgreSQL sink: `supports_schema_evolution` capability flag flipped
+  to `true`.** Reflects the new behavior in `Sink::capabilities()`.
+
+### Changed
+- **PostgreSQL sink: normalizer now wakes via `tokio::sync::watch::Receiver`
+  instead of `tokio::sync::Notify`.** The watch channel both wakes the
+  normalizer AND delivers the latest schema snapshot, so the normalizer
+  always builds its MERGE against the schema state that was current when
+  the COPY-to-raw transaction committed. Replaces the previous frozen
+  `Vec<SourceTableSchema>` snapshot taken once at sink setup. The 2-second
+  polling fallback is preserved for snapshot-worker sinks that do not
+  share the watch channel.
+- **`ColumnDef` carries an optional `pg_type_id: Option<u32>`.** Populated
+  only by the PostgreSQL source; consumed only by the PostgreSQL sink to
+  emit `ALTER TABLE ... ADD COLUMN <name> <pg_type>` and to preserve type
+  identity across restarts. Other sources construct `ColumnDef` directly
+  with `pg_type_id: None` — see `docs/contributing-connectors.md` for the
+  pattern.
+
+### Fixed
+- **PostgreSQL sink: silent data loss when a source table gained a new
+  column mid-stream.** Previously, the `CdcRecord::SchemaChange` event
+  emitted by the converter was discarded by the raw-table writer (`_ =>
+  continue`), and the MERGE generator kept projecting against a frozen
+  schema captured at `setup()` time. Subsequent writes succeeded but the
+  new column's values were silently dropped on the target — the bug was
+  invisible until a downstream reader queried the column. See
+  [`internal-docs/pg-sink-schema-evolution.md`](internal-docs/pg-sink-schema-evolution.md)
+  for the full root cause analysis. The fix materializes added columns
+  transactionally and broadcasts the new schema state to the normalizer
+  via `watch::Sender::send_replace` after each successful commit.
+
 ## [1.6.9] - 2026-04-14
 
 ### Fixed
