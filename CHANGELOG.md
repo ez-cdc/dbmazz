@@ -4,6 +4,8 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [1.6.9] - 2026-04-14
+
 ### Fixed
 - **PostgreSQL sink: last-write-wins on multiple operations for the same
   PK inside a single batch.** The raw-table writer stamped every record in
