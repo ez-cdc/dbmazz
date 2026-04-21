@@ -4,6 +4,8 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-04-15
+
 ### Added
 - **PostgreSQL sink: automatic schema evolution for added columns.** Source
   `ALTER TABLE ... ADD COLUMN` is now detected via pgoutput `Relation`
