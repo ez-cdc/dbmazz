@@ -58,19 +58,6 @@ You'll also need:
   ```bash
   curl -sSL https://raw.githubusercontent.com/ez-cdc/ez-cdc-cli-releases/main/install.sh | sh
   ```
-- **`gh` CLI** — optional, for opening PRs from the terminal.
-
-### Enable the repo's git hooks (one-time)
-
-dbmazz ships a pre-push hook that prevents accidental direct pushes to
-`main`. Enable it immediately after cloning:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-Without this, nothing stops a local `git push origin main` from
-attempting the push. Don't skip this step.
 
 ---
 
@@ -85,7 +72,7 @@ cargo clippy -- -D warnings   # lint (CI enforces this)
 
 Unit tests live inline in each module (`#[cfg(test)]` blocks). There is
 no `tests/` directory — end-to-end validation is done through the
-`ez-cdc` CLI (see step 4.7 below).
+`ez-cdc` CLI (see step 4.8 below).
 
 ---
 
@@ -105,15 +92,40 @@ adjustments) or "let's talk first." **Wait for that response before
 opening a PR.** This keeps us from rejecting work at review time for
 reasons that could have been flagged upfront.
 
-### 4.2 Branch from `main`
+### 4.2 Fork and clone
 
-Never commit or push to `main` directly. The pre-push hook from step 2
-will block the push, but the discipline matters even before you hit
-the hook.
+External contributors don't have write access to `ez-cdc/dbmazz`, so
+you work from a personal fork and open the PR from there. One-time
+setup:
 
 ```bash
+# 1. Fork ez-cdc/dbmazz on GitHub (click "Fork" in the web UI).
+
+# 2. Clone YOUR fork (not the upstream).
+git clone git@github.com:<your-user>/dbmazz.git
+cd dbmazz
+
+# 3. Add the upstream remote so you can pull in new changes later.
+git remote add upstream git@github.com:ez-cdc/dbmazz.git
+git remote -v     # sanity check: origin → your fork, upstream → ez-cdc/dbmazz
+```
+
+Before every new change, sync `main` with upstream so your branch
+starts from the latest commit:
+
+```bash
+git fetch upstream
 git checkout main
-git pull
+git merge --ff-only upstream/main
+```
+
+### 4.3 Create a feature branch
+
+`main` is protected — direct pushes are rejected regardless of where
+they come from. Every change lands through a PR from a feature branch
+on your fork.
+
+```bash
 git checkout -b <type>/<short-description>
 ```
 
@@ -124,7 +136,7 @@ git checkout -b <type>/<short-description>
 - `fix/pg-sink-toast-unchanged`
 - `perf/batch-flush-zero-copy`
 
-### 4.3 Make the change
+### 4.4 Make the change
 
 Conventions CI and review will enforce:
 
@@ -142,7 +154,7 @@ Conventions CI and review will enforce:
 - **Naming**: `snake_case` for functions/modules, `PascalCase` for
   types, `SCREAMING_SNAKE_CASE` for constants.
 
-### 4.4 Update `CHANGELOG.md` (mandatory for user-visible changes)
+### 4.5 Update `CHANGELOG.md` (mandatory for user-visible changes)
 
 Every change that affects user-visible behavior **must** update
 `CHANGELOG.md` under the `[Unreleased]` section in the same PR. Follow
@@ -164,7 +176,7 @@ What does **not** count (skip the changelog):
 - CI/build pipeline changes that don't affect what ships.
 - This file and other contributor-facing docs.
 
-### 4.5 Bump `Cargo.toml` if the change is user-visible
+### 4.6 Bump `Cargo.toml` if the change is user-visible
 
 Releases are driven by `Cargo.toml`. If your PR ships a user-visible
 change, bump `[package].version` in the same PR following Semantic
@@ -189,7 +201,7 @@ will silently no-op on merge** and your change won't ship in a new
 version until someone else bumps the file. Don't rely on a maintainer
 catching this in review — bump it yourself.
 
-### 4.6 Build a local dbmazz image
+### 4.7 Build a local dbmazz image
 
 dbmazz ships a `Dockerfile.dev` designed for exactly this workflow. It
 compiles dbmazz inside Docker and produces a runtime image with the
@@ -200,7 +212,7 @@ same entrypoint, ports, and healthcheck as the official image, so the
 docker build -f Dockerfile.dev -t my-dbmazz:dev .
 ```
 
-### 4.7 Run the full test harness against your image
+### 4.8 Run the full test harness against your image
 
 Point the `ez-cdc` CLI at your local image with `--dbmazz-image` (or
 set `DBMAZZ_IMAGE`) and exercise the three commands that matter:
@@ -238,7 +250,7 @@ any other sink whose code path your change might have affected.
 
 Save the output — you'll attach it to the PR.
 
-### 4.8 Commit
+### 4.9 Commit
 
 Use [Conventional Commits](https://www.conventionalcommits.org/):
 
@@ -276,12 +288,23 @@ feat: Add X.             # capitalized, trailing period
 feat: adds X             # wrong tense
 ```
 
-### 4.9 Push and open the PR
+### 4.10 Push to your fork and open the PR
+
+Push to your fork (`origin`), not to upstream:
 
 ```bash
 git push -u origin <your-branch>
+```
+
+Then open a PR from your fork's branch to `ez-cdc/dbmazz:main`. The
+`gh` CLI detects the fork relationship automatically:
+
+```bash
 gh pr create --title "<type>: <description>" --body "..."
 ```
+
+Or use the GitHub web UI: after pushing, GitHub shows a "Compare &
+pull request" banner on your fork.
 
 The PR body must include:
 
@@ -294,7 +317,7 @@ The PR body must include:
 - **Breaking-change call-out** — if this is a MAJOR bump, spell out
   exactly what breaks and how users upgrade.
 
-### 4.10 Review
+### 4.11 Review
 
 - Respond to review comments rather than force-pushing silently.
 - Rebase on `main` if the PR falls behind.
