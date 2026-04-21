@@ -58,19 +58,6 @@ You'll also need:
   ```bash
   curl -sSL https://raw.githubusercontent.com/ez-cdc/ez-cdc-cli-releases/main/install.sh | sh
   ```
-- **`gh` CLI** — optional, for opening PRs from the terminal.
-
-### Enable the repo's git hooks (one-time)
-
-dbmazz ships a pre-push hook that prevents accidental direct pushes to
-`main`. Enable it immediately after cloning:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-Without this, nothing stops a local `git push origin main` from
-attempting the push. Don't skip this step.
 
 ---
 
@@ -107,9 +94,8 @@ reasons that could have been flagged upfront.
 
 ### 4.2 Branch from `main`
 
-Never commit or push to `main` directly. The pre-push hook from step 2
-will block the push, but the discipline matters even before you hit
-the hook.
+All changes land on `main` through a reviewed PR — `main` is
+protected, so a direct push is rejected.
 
 ```bash
 git checkout main
