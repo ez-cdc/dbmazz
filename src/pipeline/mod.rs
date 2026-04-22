@@ -1,7 +1,7 @@
 pub mod schema_cache;
 
+use crate::control::state::SharedState;
 use crate::core::{CdcRecord, Sink};
-use crate::grpc::state::SharedState;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -62,7 +62,7 @@ impl Pipeline {
         loop {
             // Check if paused before processing
             if let Some(state) = &self.shared_state {
-                if state.state() == crate::grpc::state::CdcState::Paused {
+                if state.state() == crate::control::state::CdcState::Paused {
                     // Flush pending batch before pausing
                     if !batch.is_empty() && !self.flush_batch(&mut batch, last_lsn).await {
                         break; // Stop on flush failure
@@ -171,7 +171,7 @@ impl Pipeline {
 
                 // Set CDC state to Stopped to signal error
                 if let Some(state) = &self.shared_state {
-                    state.set_state(crate::grpc::state::CdcState::Stopped);
+                    state.set_state(crate::control::state::CdcState::Stopped);
                     error!("CRITICAL: CDC state set to Stopped due to sink failure");
                 }
 

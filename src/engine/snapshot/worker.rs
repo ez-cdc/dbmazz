@@ -31,10 +31,10 @@ use super::quote_ident;
 use super::state_store;
 use super::utils::find_integer_pk_column;
 use crate::config::Config;
+use crate::control::state::{CdcState, SharedState, Stage};
 use crate::core::position::SourcePosition;
 use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::Sink;
-use crate::grpc::state::{CdcState, SharedState, Stage};
 use crate::source::postgres::strip_replication_param;
 use tokio::time::Duration;
 

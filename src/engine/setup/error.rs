@@ -32,7 +32,7 @@ pub enum SetupError {
 }
 
 impl SetupError {
-    /// Descriptive message for gRPC Health Check
+    /// Descriptive message surfaced on the health check
     pub fn to_grpc_message(&self) -> String {
         match self {
             SetupError::PgConnectionFailed { host, error } => {

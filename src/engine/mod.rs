@@ -13,9 +13,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::connectors::sinks::create_sink;
+use crate::control::state::SharedState;
+use crate::control::{self, CdcConfig, CdcState, Stage};
 use crate::core::SinkMode;
-use crate::grpc::state::SharedState;
-use crate::grpc::{self, CdcConfig, CdcState, Stage};
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::pipeline::{Pipeline, PipelineEvent};
 use crate::replication::{
@@ -74,11 +74,10 @@ impl CdcEngine {
 
     /// Execute CDC engine
     pub async fn run(mut self) -> Result<()> {
-        // Stage: SETUP - gRPC Server (start FIRST so health checks respond immediately)
         self.shared_state
             .set_stage(Stage::Setup, "Initializing")
             .await;
-        self.start_grpc_server();
+        self.start_control_server();
 
         // Stage: SETUP - Source setup (replication slot, publication)
         self.shared_state
@@ -182,7 +181,7 @@ impl CdcEngine {
     }
 
     /// Spawn a snapshot worker task. Used for both initial (DO_SNAPSHOT=true)
-    /// and on-demand (StartSnapshot gRPC RPC) snapshots.
+    /// and on-demand (trigger API) snapshots.
     fn spawn_snapshot_worker(&self, shutdown_on_complete: bool) {
         let snap_config = Arc::new(self.config.clone());
         let snap_state = self.shared_state.clone();
@@ -232,14 +231,13 @@ impl CdcEngine {
         Ok(start_lsn)
     }
 
-    /// Start gRPC server in background
-    fn start_grpc_server(&self) {
-        let grpc_state = self.shared_state.clone();
-        let grpc_port = self.config.grpc_port;
+    fn start_control_server(&self) {
+        let shared = self.shared_state.clone();
+        let port = self.config.control_port;
 
         tokio::spawn(async move {
-            if let Err(e) = grpc::start_grpc_server(grpc_port, grpc_state).await {
-                error!("gRPC server error: {}", e);
+            if let Err(e) = control::start_control_server(port, shared).await {
+                error!("server error: {}", e);
             }
         });
     }
@@ -318,7 +316,7 @@ impl CdcEngine {
         S::Error: std::error::Error + Send + Sync + 'static,
     {
         let mut shutdown_rx = self.shared_state.shutdown_tx.subscribe();
-        // Subscribe to on-demand snapshot trigger (fired by StartSnapshot gRPC RPC)
+        // Subscribe to on-demand snapshot trigger
         let mut snapshot_trigger_rx = self.shared_state.subscribe_snapshot_trigger();
         let mut iteration = 0u64;
 
@@ -350,7 +348,7 @@ impl CdcEngine {
                     }
                 }
 
-                // On-demand snapshot trigger (from StartSnapshot gRPC RPC)
+                // On-demand snapshot trigger
                 Ok(()) = snapshot_trigger_rx.changed() => {
                     if *snapshot_trigger_rx.borrow() && !self.shared_state.is_snapshot_active() {
                         info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");

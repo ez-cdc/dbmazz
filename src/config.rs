@@ -198,8 +198,7 @@ pub struct Config {
     pub flush_size: usize,
     pub flush_interval_ms: u64,
 
-    // gRPC
-    pub grpc_port: u16,
+    pub control_port: u16,
 
     // Snapshot / backfill
     pub do_snapshot: bool,
@@ -215,7 +214,7 @@ impl std::fmt::Debug for Config {
             .field("sink", &self.sink)
             .field("flush_size", &self.flush_size)
             .field("flush_interval_ms", &self.flush_interval_ms)
-            .field("grpc_port", &self.grpc_port)
+            .field("control_port", &self.control_port)
             .finish()
     }
 }
@@ -325,8 +324,8 @@ impl Config {
             .parse()
             .unwrap_or(5000);
 
-        // gRPC configuration
-        let grpc_port: u16 = env::var("GRPC_PORT")
+        let control_port: u16 = env::var("DBMAZZ_CONTROL_PORT")
+            .or_else(|_| env::var("GRPC_PORT"))
             .unwrap_or_else(|_| "50051".to_string())
             .parse()
             .unwrap_or(50051);
@@ -361,7 +360,7 @@ impl Config {
             sink,
             flush_size,
             flush_interval_ms,
-            grpc_port,
+            control_port,
             do_snapshot,
             snapshot_chunk_size,
             snapshot_parallel_workers,
@@ -408,7 +407,7 @@ impl Config {
             "Flush: {} msgs or {}ms interval",
             self.flush_size, self.flush_interval_ms
         );
-        info!("gRPC: port {}", self.grpc_port);
+        info!("Port: {}", self.control_port);
         info!("Tables: {:?}", self.source.tables);
     }
 }
@@ -443,6 +442,7 @@ mod tests {
         env::remove_var("FLUSH_SIZE");
         env::remove_var("FLUSH_INTERVAL_MS");
         env::remove_var("GRPC_PORT");
+        env::remove_var("DBMAZZ_CONTROL_PORT");
         env::remove_var("INITIAL_SNAPSHOT_ONLY");
     }
 
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(config.sink.password, "");
         assert_eq!(config.flush_size, 10000);
         assert_eq!(config.flush_interval_ms, 5000);
-        assert_eq!(config.grpc_port, 50051);
+        assert_eq!(config.control_port, 50051);
 
         clear_env_vars();
     }
@@ -634,7 +634,7 @@ mod tests {
         // Pipeline
         assert_eq!(config.flush_size, 5000);
         assert_eq!(config.flush_interval_ms, 3000);
-        assert_eq!(config.grpc_port, 50052);
+        assert_eq!(config.control_port, 50052);
 
         clear_env_vars();
     }
