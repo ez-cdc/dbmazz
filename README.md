@@ -90,15 +90,17 @@ dbmazz is operated through the `ez-cdc` CLI. Install it with one command:
 curl -sSL https://raw.githubusercontent.com/ez-cdc/ez-cdc-cli-releases/main/install.sh | sh
 ```
 
-Then point it at a PostgreSQL source and a sink:
+Then spin up a self-contained demo (PostgreSQL source + sink already seeded) and watch a pipeline run:
 
 ```bash
-ez-cdc datasource init                                    # write a starter config
-ez-cdc datasource add                                     # interactive wizard for source + sink
-ez-cdc quickstart --source my-pg --sink my-warehouse      # spin up dbmazz + live dashboard
+ez-cdc quickstart --demo
 ```
 
-The CLI runs on Linux and macOS (`amd64` and `arm64`). Press `t` in the dashboard to generate live traffic, `q` to quit.
+That boots the demo stack, starts dbmazz, and drops you into the live dashboard — no config files, no databases of your own required. Press `t` to generate live traffic, `q` to quit.
+
+The CLI runs on Linux and macOS (`amd64` and `arm64`).
+
+> Want to point dbmazz at your own databases? The full CLI walkthrough — `datasource init` / `add` / `quickstart`, running the daemon, verify suite — lives at [docs.ez-cdc.com/self-hosted/cli](https://docs.ez-cdc.com/self-hosted/cli).
 
 ### Run the verification suite
 
