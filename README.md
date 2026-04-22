@@ -100,18 +100,7 @@ That boots the demo stack, starts dbmazz, and drops you into the live dashboard 
 
 The CLI runs on Linux and macOS (`amd64` and `arm64`).
 
-> Want to point dbmazz at your own databases? The full CLI walkthrough — `datasource init` / `add` / `quickstart`, running the daemon, verify suite — lives at [docs.ez-cdc.com/self-hosted/cli](https://docs.ez-cdc.com/self-hosted/cli).
-
-### Run the verification suite
-
-The CLI also ships with a 13-check end-to-end test harness that validates every supported sink: schema, snapshot integrity, CDC `INSERT`/`UPDATE`/`DELETE`, TOAST handling, NULL roundtrip, and idempotency drift over time.
-
-```bash
-ez-cdc verify --source my-pg --sink my-warehouse           # full suite
-ez-cdc verify --source my-pg --sink my-warehouse --quick   # skip slow checks
-```
-
-Use `--json-report results.json` to wire it into CI.
+> Want to point dbmazz at your own databases, run the verification suite, or dig into the full CLI reference? See [docs.ez-cdc.com/self-hosted/cli](https://docs.ez-cdc.com/self-hosted/cli).
 
 ---
 
