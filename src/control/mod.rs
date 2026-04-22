@@ -1,5 +1,6 @@
 mod cpu_metrics;
 mod handlers;
+mod metrics_sampler;
 pub mod state;
 
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use axum::{
 };
 use tracing::info;
 
+pub use metrics_sampler::run_metrics_sampler;
 pub use state::{CdcConfig, CdcState, SharedState, Stage};
 
 pub async fn start_control_server(port: u16, shared_state: Arc<SharedState>) -> anyhow::Result<()> {

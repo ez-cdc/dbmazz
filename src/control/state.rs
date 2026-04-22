@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -41,6 +42,19 @@ pub struct CdcConfig {
 
 /// Maps relation_id → {(start_pk, end_pk) → hw_lsn} for snapshot deduplication.
 type FinishedChunksMap = HashMap<u32, BTreeMap<(i64, i64), u64>>;
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MetricsSample {
+    pub timestamp: u64,
+    pub events_per_second: f64,
+    pub lag_bytes: u64,
+    pub lag_events: u64,
+    pub memory_bytes: u64,
+    pub total_events_processed: u64,
+    pub total_batches_sent: u64,
+    pub cpu_millicores: u64,
+    pub replication_lag_ms: u64,
+}
 
 /// Per-table snapshot progress counters.
 #[derive(Debug, Clone, Default)]
@@ -89,6 +103,9 @@ pub struct SharedState {
     /// Relation PK column indices: relation_id -> list of column indices that form the PK
     /// Populated from Relation messages by the WAL handler
     pub relation_pk_cols: RwLock<HashMap<u32, Vec<usize>>>,
+    /// Latest metrics sample, refreshed every second by the background sampler.
+    /// Handlers read this directly instead of computing samples in-request.
+    pub latest_metrics: RwLock<MetricsSample>,
 }
 
 impl SharedState {
@@ -121,6 +138,7 @@ impl SharedState {
             table_progress: RwLock::new(HashMap::new()),
             finished_chunks: RwLock::new(HashMap::new()),
             relation_pk_cols: RwLock::new(HashMap::new()),
+            latest_metrics: RwLock::new(MetricsSample::default()),
         })
     }
 

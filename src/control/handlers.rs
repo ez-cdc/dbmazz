@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Query, State},
@@ -7,10 +6,8 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::interval;
 
-use super::cpu_metrics::CpuTracker;
-use super::state::{CdcState, SharedState, Stage};
+use super::state::{CdcState, MetricsSample, SharedState, Stage};
 
 #[derive(Serialize)]
 pub struct HealthResponse {
@@ -48,19 +45,6 @@ pub struct TableProgressEntry {
     pub chunks_total: u64,
     pub chunks_done: u64,
     pub rows_synced: u64,
-}
-
-#[derive(Serialize)]
-pub struct MetricsSample {
-    pub timestamp: u64,
-    pub events_per_second: f64,
-    pub lag_bytes: u64,
-    pub lag_events: u64,
-    pub memory_bytes: u64,
-    pub total_events_processed: u64,
-    pub total_batches_sent: u64,
-    pub cpu_millicores: u64,
-    pub replication_lag_ms: u64,
 }
 
 #[derive(Deserialize, Default)]
@@ -320,49 +304,11 @@ pub async fn metrics(
         ));
     }
 
-    let mut cpu_tracker = CpuTracker::new();
-    let mut ticker = interval(Duration::from_millis(q.interval_ms));
-    let mut last_events = state.events_processed();
-    let mut last_time = std::time::Instant::now();
-    let mut out = Vec::with_capacity(q.samples as usize);
-
-    for _ in 0..q.samples {
-        ticker.tick().await;
-
-        let current_events = state.events_processed();
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(last_time).as_secs_f64();
-        let events_per_second = if elapsed > 0.0 {
-            current_events.saturating_sub(last_events) as f64 / elapsed
-        } else {
-            0.0
-        };
-        last_events = current_events;
-        last_time = now;
-
-        let current_lsn = state.current_lsn();
-        let confirmed_lsn = state.confirmed_lsn();
-        let lag_bytes = current_lsn.saturating_sub(confirmed_lsn);
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        out.push(MetricsSample {
-            timestamp,
-            events_per_second,
-            lag_bytes,
-            lag_events: state.pending_events(),
-            memory_bytes: state.estimate_memory(),
-            total_events_processed: current_events,
-            total_batches_sent: state.batches_sent(),
-            cpu_millicores: cpu_tracker.cpu_millicores(),
-            replication_lag_ms: state.replication_lag_ms(),
-        });
-    }
-
-    Ok(Json(out))
+    // Samples are produced asynchronously by the background sampler; the
+    // handler returns the most recent snapshot. `samples` still controls
+    // the response length for callers that expect an array.
+    let latest = state.latest_metrics.read().await.clone();
+    Ok(Json(vec![latest; q.samples as usize]))
 }
 
 fn state_str(s: CdcState) -> &'static str {
