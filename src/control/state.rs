@@ -69,11 +69,11 @@ pub struct SharedState {
     // If true, don't drop the replication slot on shutdown (for upgrades/restarts)
     pub skip_slot_cleanup: AtomicBool,
     pub replication_lag_ms: AtomicU64,
-    // Snapshot progress (written by snapshot worker, read by gRPC status service)
+    // Snapshot progress (written by snapshot worker, read by the status handler)
     pub snapshot_chunks_total: AtomicU64,
     pub snapshot_chunks_done: AtomicU64,
     pub snapshot_rows_synced: AtomicU64,
-    // Signal channel for on-demand snapshot trigger (set by StartSnapshot RPC)
+    // Signal channel for on-demand snapshot trigger
     pub snapshot_trigger: watch::Sender<bool>,
     // True while the snapshot worker is running
     pub snapshot_active: AtomicBool,
@@ -81,7 +81,7 @@ pub struct SharedState {
     pub snapshot_error: RwLock<Option<String>>,
     // True when snapshot is paused by execution window schedule
     pub snapshot_paused: AtomicBool,
-    /// Per-table snapshot progress (written by snapshot worker, read by gRPC status service)
+    /// Per-table snapshot progress (written by snapshot worker, read by the status handler)
     pub table_progress: RwLock<HashMap<String, TableProgress>>,
     /// Finished snapshot chunks: relation_id -> {(start_pk, end_pk) -> hw_lsn}
     /// Written by snapshot worker after each chunk, read by WAL handler for should_emit()
@@ -279,7 +279,7 @@ impl SharedState {
         self.snapshot_trigger.subscribe()
     }
 
-    /// Signal that a snapshot should start (called by StartSnapshot gRPC handler).
+    /// Signal that a snapshot should start.
     pub fn trigger_snapshot(&self) {
         let _ = self.snapshot_trigger.send(true);
     }

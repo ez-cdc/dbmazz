@@ -137,12 +137,8 @@ pub fn parse_pg_array(text: &str, element_type: &str) -> String {
             out.push_str("null");
         } else {
             match element_type {
-                "int" => {
-                    if elem.parse::<i64>().is_ok() {
-                        out.push_str(elem);
-                    } else {
-                        json_quote_into(&mut out, elem);
-                    }
+                "int" if elem.parse::<i64>().is_ok() => {
+                    out.push_str(elem);
                 }
                 "float" => match elem.parse::<f64>() {
                     Ok(f) if f.is_finite() => out.push_str(elem),

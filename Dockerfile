@@ -28,9 +28,9 @@ RUN chmod +x /usr/local/bin/dbmazz
 
 USER dbmazz
 
-EXPOSE 8080 50051
+EXPOSE 50051
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
-  CMD curl -sf http://127.0.0.1:8080/healthz || exit 1
+  CMD curl -sf http://127.0.0.1:50051/api/v1/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/dbmazz"]

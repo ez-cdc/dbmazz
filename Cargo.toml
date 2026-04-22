@@ -1,6 +1,6 @@
 [package]
 name = "dbmazz"
-version = "1.7.0"
+version = "2.0.0"
 edition = "2021"
 license = "Elastic-2.0"
 # Minimum Supported Rust Version.
@@ -8,8 +8,7 @@ license = "Elastic-2.0"
 rust-version = "1.91.1"
 
 [features]
-default = ["sink-starrocks", "sink-postgres", "sink-snowflake", "grpc-reflection", "http-api"]
-http-api = ["dep:axum", "dep:tower-http"]
+default = ["sink-starrocks", "sink-postgres", "sink-snowflake"]
 sink-starrocks = ["dep:curl", "dep:mysql_async", "dep:openssl-sys"]
 sink-postgres = []
 sink-snowflake = [
@@ -17,7 +16,6 @@ sink-snowflake = [
     "dep:jsonwebtoken", "dep:rsa", "dep:pem", "dep:sha2",
     "dep:aws-sigv4", "dep:aws-credential-types", "dep:uuid",
 ]
-grpc-reflection = ["dep:tonic-reflection"]
 
 [dependencies]
 # Materialize fork with full support for logical replication
@@ -47,8 +45,8 @@ hashbrown = "0.16.1"
 async-trait = "0.1.89"
 memchr = "2.7.6"
 simdutf8 = "0.1.5"
-tonic = "0.12"
-prost = "0.13"
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
 serde_json = "1.0"
 libc = "0.2"
 url = "2.5"
@@ -72,18 +70,8 @@ aws-sigv4 = { version = "1.2", optional = true }
 aws-credential-types = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
-# --- Optional: gRPC reflection ---
-tonic-reflection = { version = "0.12", optional = true }
-
-# --- Optional: HTTP API ---
-axum = { version = "0.7", features = ["json"], optional = true }
-tower-http = { version = "0.5", features = ["cors"], optional = true }
-
 [dev-dependencies]
 serial_test = "3.0"
-
-[build-dependencies]
-tonic-build = "0.12"
 
 [profile.release]
 debug = 1             # Line tables only (flamegraphs work, smaller binary)

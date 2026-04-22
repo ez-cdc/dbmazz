@@ -4,7 +4,7 @@ use futures_util::SinkExt;
 use tokio::sync::mpsc;
 use tracing::error;
 
-use crate::grpc::state::SharedState;
+use crate::control::state::SharedState;
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::pipeline::PipelineEvent;
 use crate::source::converter;
@@ -115,24 +115,20 @@ pub async fn handle_xlog_data(
 
             // For row changes during an active snapshot: check should_emit()
             match &cdc_msg {
-                CdcMessage::Insert { relation_id, tuple } => {
-                    if shared_state.is_snapshot_active() {
-                        let pk = extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
-                        if !shared_state.should_emit(*relation_id, lsn, pk).await {
-                            return Ok(());
-                        }
+                CdcMessage::Insert { relation_id, tuple } if shared_state.is_snapshot_active() => {
+                    let pk = extract_int_pk(shared_state, *relation_id, &tuple.cols).await;
+                    if !shared_state.should_emit(*relation_id, lsn, pk).await {
+                        return Ok(());
                     }
                 }
                 CdcMessage::Update {
                     relation_id,
                     new_tuple,
                     ..
-                } => {
-                    if shared_state.is_snapshot_active() {
-                        let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
-                        if !shared_state.should_emit(*relation_id, lsn, pk).await {
-                            return Ok(());
-                        }
+                } if shared_state.is_snapshot_active() => {
+                    let pk = extract_int_pk(shared_state, *relation_id, &new_tuple.cols).await;
+                    if !shared_state.should_emit(*relation_id, lsn, pk).await {
+                        return Ok(());
                     }
                 }
                 CdcMessage::Delete { .. } => {

@@ -4,6 +4,23 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-04-22
+
+### Breaking
+
+- Internal transport between worker-agent and dbmazz has changed. Pair
+  this release with worker-agent ≥ 2.0.0 — older agents are not
+  compatible.
+- Env var `GRPC_PORT` renamed to `DBMAZZ_CONTROL_PORT`. The legacy name
+  is still read for the duration of the rollout.
+- Dropped `tonic`, `prost`, `tonic-build`, `tonic-reflection`. The
+  `grpc-reflection` feature flag is gone.
+
+### Changed
+
+- Config field `grpc_port` renamed to `control_port`.
+- Internal module restructure: `src/grpc/` is now `src/control/`.
+
 ## [1.7.0] - 2026-04-15
 
 ### Added
