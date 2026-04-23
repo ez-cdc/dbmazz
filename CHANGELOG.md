@@ -4,6 +4,17 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-04-23
+
+### Changed
+
+- Metrics collection moved to a background sampler. The
+  `GET /cdc/metrics` handler now returns in near-constant time
+  (previously blocked for `samples * interval_ms`, up to several
+  seconds). Response shape and fields are unchanged; the `samples`
+  query param still controls the response length, and `interval_ms`
+  is accepted but no longer influences timing.
+
 ## [2.0.0] - 2026-04-22
 
 ### Breaking
