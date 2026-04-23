@@ -210,7 +210,7 @@ cargo fmt -- --check
 cargo clippy -- -D warnings
 ```
 
-Requires Rust 1.91.1+. System deps: `protobuf-compiler`, `musl-tools`, `pkg-config`, `perl`, `make`.
+Requires Rust 1.91.1+. System deps: `musl-tools`, `pkg-config`, `perl`, `make`.
 
 ### Contributing a new sink
 
