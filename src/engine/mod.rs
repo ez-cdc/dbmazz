@@ -78,6 +78,7 @@ impl CdcEngine {
             .set_stage(Stage::Setup, "Initializing")
             .await;
         self.start_control_server();
+        self.spawn_metrics_sampler();
 
         // Stage: SETUP - Source setup (replication slot, publication)
         self.shared_state
@@ -239,6 +240,13 @@ impl CdcEngine {
             if let Err(e) = control::start_control_server(port, shared).await {
                 error!("server error: {}", e);
             }
+        });
+    }
+
+    fn spawn_metrics_sampler(&self) {
+        let shared = self.shared_state.clone();
+        tokio::spawn(async move {
+            control::run_metrics_sampler(shared).await;
         });
     }
 
