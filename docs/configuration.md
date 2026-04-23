@@ -64,7 +64,7 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `HTTP_API_PORT` | `8080` | HTTP API port. Serves the Prometheus metrics endpoint. Enabled by default; disabled only when built with `--no-default-features`. |
+| `DBMAZZ_CONTROL_PORT` | `50051` | Port the internal HTTP control plane binds to (health, status, metrics, control). Formerly `GRPC_PORT`; the legacy name is still read for rolling compatibility. |
 
 ## Logging
 

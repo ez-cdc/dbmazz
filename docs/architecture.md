@@ -29,6 +29,7 @@ PostgreSQL (source)             dbmazz                          Sink (target)
 
 ```
 Engine::run()
+  ├── Start HTTP control server (health checks must respond immediately)
   ├── Connect to source PostgreSQL
   │     ├── Verify tables exist
   │     ├── Set REPLICA IDENTITY FULL
@@ -199,6 +200,11 @@ src/
 │           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
 │           └── types.rs             PG → Snowflake type mapping
+├── control/                         HTTP control plane (axum)
+│   ├── mod.rs                       Router + server startup
+│   ├── state.rs                     SharedState (metrics, dedup, control)
+│   ├── handlers.rs                  Health, control, status, metrics handlers
+│   └── cpu_metrics.rs               CPU usage sampling
 ├── state_store.rs                   LSN checkpoint persistence
 └── utils.rs                         SQL validation, type helpers
 ```

@@ -42,12 +42,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # System dependencies (Debian/Ubuntu).
 sudo apt-get install -y \
-  protobuf-compiler musl-tools pkg-config perl make \
+  musl-tools pkg-config perl make \
   libssl-dev libcurl4-openssl-dev
 ```
 
-macOS (Homebrew): `brew install protobuf`. `musl-tools` is not needed
-for local `cargo build` — it's only used by the release workflow for
+macOS (Homebrew): no additional system packages are needed for a local
+`cargo build`. `musl-tools` is only used by the release workflow for
 the static Linux binary cross-compile.
 
 You'll also need:
