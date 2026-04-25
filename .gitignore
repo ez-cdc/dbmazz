@@ -37,3 +37,6 @@ skills-lock.json
 
 # Misc
 *.old
+
+# SDD feature folders (per .claude/sdd/SPEC.md, not committed)
+features/
