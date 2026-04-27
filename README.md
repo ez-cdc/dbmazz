@@ -46,21 +46,19 @@ The whole thing is **~30 MB on disk** and **~11 MB resident in memory** — abou
 
 How dbmazz compares to other open-source CDC tools on **resource footprint** and **deployment complexity** — the two dimensions where dbmazz is purpose-built to win.
 
-|  | **dbmazz** | Debezium (standard) | PeerDB | Airbyte | Sequin |
-|---|---|---|---|---|---|
-| **Language / runtime** | Rust (static binary) | Java / JVM | Go + Temporal | Java / Python | Elixir / BEAM |
-| **Replication mode** | **Real-time CDC** (sub-second WAL streaming) | Real-time CDC (sub-second WAL streaming) | Near-real-time (~10 s freshness at high throughput) | **Batch ETL** (scheduled syncs, minutes – hours) | Real-time CDC (~55 ms p50) |
-| **Components for one PG → sink pipeline** | **1** (single binary) | 2–7 (JVM + Kafka + …) | 3–4 (Server + Postgres + Temporal) | 7–10+ (microservices) | 2 (Container + Postgres) |
-| **External dependencies** | **none** | Kafka, ZooKeeper | Temporal, MinIO / S3 | Postgres, Temporal, scheduler | Postgres |
-| **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 48–64 GB (enterprise tier) | 8 GB+ minimum recommended | not published |
-| **Deployment** | **Single CLI** | Compose / K8s with multiple services | Docker Compose with Temporal stack | Docker Compose / K8s with microservices | Docker + Postgres |
+|  | **dbmazz** | Debezium (standard) | Airbyte |
+|---|---|---|---|
+| **Language / runtime** | Rust (static binary) | Java / JVM | Java / Python |
+| **Replication mode** | **Real-time CDC** (sub-second WAL streaming) | Real-time CDC (sub-second WAL streaming) | **Batch ETL** (scheduled syncs, minutes – hours) |
+| **Components for one PG → sink pipeline** | **1** (single binary) | 2–7 (JVM + Kafka + …) | 7–10+ (microservices) |
+| **External dependencies** | **none** | Kafka, ZooKeeper | Postgres, Temporal, scheduler |
+| **Published min memory** | **~11 MB RSS** | 256 MB – 4 GB | 8 GB+ minimum recommended |
+| **Deployment** | **Single CLI** | Compose / K8s with multiple services | Docker Compose / K8s with microservices |
 
 Each tool optimizes for different things. dbmazz optimizes for **resource efficiency and operational simplicity**. The numbers above are from each project's own documentation:
 
 - **Debezium**: [official FAQ](https://debezium.io/documentation/faq/) (256 MB – 2 GB typical heap), with 4 GB+ for high-throughput per [RisingWave's deployment guide](https://risingwave.com/blog/debezium-kubernetes-deployment-production/).
-- **PeerDB**: [GitHub issue #2727](https://github.com/PeerDB-io/peerdb/issues/2727) (enterprise flow workers; smaller deployments are not published).
 - **Airbyte**: [official deployment docs](https://docs.airbyte.com/platform/deploying-airbyte) (4 vCPU + 8 GB minimum recommended).
-- **Sequin**: their docs do not publish a memory footprint as of this comparison; we list it as "not published" rather than guess.
 - **dbmazz**: from [our own benchmark report](benchmarks/2026-04-13-cdc-footprint-multitenant.md) (40 daemons concurrent on a single 2 vCPU / 4 GB worker, ~11 MB RSS each).
 
 ---
@@ -73,7 +71,7 @@ For backfill at scale, we've also benchmarked **TPC-DS 1 TB at ~110 K rows/sec s
 
 ### Where dbmazz wins
 
-- **🪶 The smallest CDC footprint that still does real work.** ~30 MB on disk, ~11 MB resident in memory at steady state — about the size of an idle shell session. Runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container. Compare to 256 MB – 4 GB for [Debezium](https://debezium.io/documentation/faq/), 8 GB+ for [Airbyte](https://docs.airbyte.com/platform/deploying-airbyte), or 48–64 GB for [PeerDB enterprise](https://github.com/PeerDB-io/peerdb/issues/2727).
+- **🪶 The smallest CDC footprint that still does real work.** ~30 MB on disk, ~11 MB resident in memory at steady state — about the size of an idle shell session. Runs comfortably on a `t3.micro`, a Raspberry Pi, or as a sidecar to your application container. Compare to 256 MB – 4 GB for [Debezium](https://debezium.io/documentation/faq/) or 8 GB+ for [Airbyte](https://docs.airbyte.com/platform/deploying-airbyte).
 - **⚡ Real-time streaming, not scheduled batch syncs.** dbmazz delivers WAL events as they happen, with sub-second replication lag in steady state. No sync windows, no waiting for the next batch. If freshness matters, that's the difference between an *operational replica* and a *day-old data lake*.
 - **🪐 Multi-tenant CDC at minimal cost.** The benchmark shows 40 daemons on a 2 vCPU / 4 GB box with ~70 % memory headroom still free. A `t3.medium` at $0.04/hour can carry your whole CDC fleet.
 - **🏔️ Postgres → analytical warehouse without a streaming platform** — direct sink writes (Stream Load for StarRocks, binary `COPY` for Postgres, Parquet staging for Snowflake), no Kafka in between. No Kafka cluster. No ZooKeeper. No schema registry. No Connect cluster. No Temporal stack. No microservices.
