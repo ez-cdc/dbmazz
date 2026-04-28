@@ -29,8 +29,13 @@ coverage/
 .plans/
 .claude/agents/
 .claude/skills/
+.claude/commands/
 session-logs/
 skills-lock.json
+
+# OpenSpec — local-only by policy. Specs and changes are private working
+# artifacts; only CLAUDE.md and AGENTS.md should reflect AI guidance in git.
+openspec/
 
 # Internal-only docs (not part of the public surface)
 /internal-docs/
