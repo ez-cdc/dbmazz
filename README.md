@@ -106,9 +106,9 @@ The CLI runs on Linux and macOS (`amd64` and `arm64`).
 
 | Source | Sink | Status | Notes |
 |---|---|:---:|---|
-| PostgreSQL 12+ | **StarRocks** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed |
+| PostgreSQL 12+ | **StarRocks 3.2+** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed, schema evolution requires per-table `fast_schema_evolution=true` |
 | PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
-| PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported |
+| PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported; requires `ALTER TABLE` privilege on target schema |
 | PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
 | MySQL | * | 🚧 Roadmap | The source layer is generic; PostgreSQL is the only implementation today |
 
