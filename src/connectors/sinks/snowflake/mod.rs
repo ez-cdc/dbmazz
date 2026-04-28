@@ -19,24 +19,32 @@ pub mod config;
 pub mod merge_generator;
 pub mod normalizer;
 pub mod parquet_writer;
+pub(crate) mod schema_evolution;
 pub mod setup;
 pub mod stage;
 pub(crate) mod types;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::info;
 
 use crate::config::SinkConfig;
+use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
 use crate::core::traits::{SourceTableSchema, StageFormat};
 use crate::core::{CdcRecord, LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult};
 
 use self::client::SnowflakeClient;
 pub use self::config::SnowflakeSinkConfig;
+use self::schema_evolution::SnowflakeSchemaEvolution;
 use self::stage::StageManager;
+
+/// Shared cache type — same shape as PG sink's `SchemaState`.
+/// Keyed by `<src_schema>.<src_table>`.
+pub(crate) type SchemaState = Arc<RwLock<HashMap<String, SourceTableSchema>>>;
 
 /// Default file accumulation threshold before triggering COPY INTO.
 const DEFAULT_FLUSH_THRESHOLD_FILES: usize = 20;
@@ -92,8 +100,18 @@ pub struct SnowflakeSink {
     staged_records: u64,
     flush_threshold_files: usize,
     flush_threshold_bytes: u64,
-    // Schema cache for normalizer
-    source_schemas: Vec<SourceTableSchema>,
+    /// Shared source schema state — `Arc<RwLock<...>>` so the writer can
+    /// update it after a successful schema-evolution batch and the
+    /// normalizer reads the post-evolution columns at the start of each
+    /// drain. Keyed by `<src_schema>.<src_table>`.
+    schema_state: SchemaState,
+    /// Shared `Vec<SourceTableSchema>` consumed by the normalizer's MERGE
+    /// generator. Mirrors the same data as `schema_state` but pre-shaped
+    /// for the normalizer's existing iteration. Updated transactionally
+    /// alongside `schema_state` after each ALTER.
+    table_schemas: Arc<RwLock<Vec<SourceTableSchema>>>,
+    /// Schema-evolution machinery. Lazily built once `client` is connected.
+    schema_evolution: Option<Arc<SnowflakeSchemaEvolution>>,
 }
 
 impl SnowflakeSink {
@@ -132,7 +150,9 @@ impl SnowflakeSink {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_FLUSH_THRESHOLD_BYTES),
-            source_schemas: Vec::new(),
+            schema_state: Arc::new(RwLock::new(HashMap::new())),
+            table_schemas: Arc::new(RwLock::new(Vec::new())),
+            schema_evolution: None,
         })
     }
 
@@ -292,7 +312,9 @@ impl Sink for SnowflakeSink {
     async fn setup(&mut self, source_schemas: &[SourceTableSchema]) -> Result<()> {
         let client = self.ensure_client().await?;
 
-        // Run DDL setup
+        // Run DDL setup (target table creation + audit columns).
+        // The audit-column ALTER inside `run_setup` implicitly validates
+        // the role's ALTER TABLE privilege — failures bubble up loud.
         setup::run_setup(
             &client,
             &self.config.database,
@@ -304,16 +326,41 @@ impl Sink for SnowflakeSink {
         .await
         .context("Snowflake setup failed")?;
 
-        self.source_schemas = source_schemas.to_vec();
+        // Build the schema_evolution helper (now that client is connected).
+        let schema_evolution = Arc::new(SnowflakeSchemaEvolution::new(
+            client.clone(),
+            self.config.database.clone(),
+            self.config.schema.clone(),
+        ));
+        schema_evolution.validate_alter_privilege();
+        schema_evolution
+            .reconcile_target_schema(source_schemas)
+            .await
+            .context("Snowflake reconcile_target_schema failed")?;
+        self.schema_evolution = Some(schema_evolution);
 
-        // Spawn normalizer (Primary mode only)
+        // Seed the shared schema state so the diff in write_batch() has a
+        // real baseline (avoiding cold-start re-emission of every column).
+        {
+            let mut state = self.schema_state.write().await;
+            for src in source_schemas {
+                state.insert(format!("{}.{}", src.schema, src.name), src.clone());
+            }
+        }
+        {
+            let mut tables = self.table_schemas.write().await;
+            *tables = source_schemas.to_vec();
+        }
+
+        // Spawn normalizer (Primary mode only). Pass the shared
+        // `table_schemas` so it sees post-evolution schema on every drain.
         if self.mode == SinkMode::Primary {
             let normalizer_config = normalizer::NormalizerConfig {
                 client_config: self.config.clone(),
                 database: self.config.database.clone(),
                 target_schema: self.config.schema.clone(),
                 job_name: self.config.safe_job_name(),
-                table_schemas: source_schemas.to_vec(),
+                table_schemas: self.table_schemas.clone(),
                 merge_interval_ms: self.config.merge_interval_ms,
                 soft_delete: self.config.soft_delete,
             };
@@ -338,6 +385,59 @@ impl Sink for SnowflakeSink {
         }
 
         let _client = self.ensure_client().await?;
+
+        // ─── Phase 1: schema evolution pre-pass ──────────────────────────
+        // Walk the batch's `SchemaChange` events, compute per-table diffs,
+        // apply ALTERs inside transactions. The shared
+        // `compute_schema_evolution_plan` already logs DROP/MODIFY/RENAME
+        // as warn-only; only ADD diffs reach `pending_diffs`.
+        //
+        // Halt-loud on ALTER failure: bubbling the error up causes the
+        // pipeline to set CdcState::Stopped via the existing pipeline
+        // error path.
+        let snapshot = self.schema_state.read().await.clone();
+        let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
+
+        if !pending_diffs.is_empty() {
+            let schema_evolution = self.schema_evolution.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "snowflake_sink: schema_evolution helper not initialized (setup() must run first)"
+                )
+            })?;
+
+            for (table, diff) in &pending_diffs {
+                schema_evolution
+                    .apply_diff(&table.name, diff)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "snowflake_sink: schema evolution failed for table {}",
+                            table.name
+                        )
+                    })?;
+            }
+
+            // Update the shared cache so the next normalizer drain sees
+            // the post-evolution columns when generating MERGE.
+            {
+                let mut state = self.schema_state.write().await;
+                *state = working;
+            }
+            // Mirror into the normalizer-shaped Vec.
+            {
+                let state_snapshot = self.schema_state.read().await.clone();
+                let mut tables = self.table_schemas.write().await;
+                *tables = state_snapshot.into_values().collect();
+            }
+        } else {
+            // Even with no pending diffs, the working map may have absorbed
+            // a no-op SchemaChange (e.g. column ordering reshuffle). Update
+            // anyway to keep state coherent.
+            let mut state = self.schema_state.write().await;
+            *state = working;
+        }
+
+        // ─── Phase 2: data writes ────────────────────────────────────────
 
         // Track last position
         let last_position = records.iter().rev().find_map(|r| match r {

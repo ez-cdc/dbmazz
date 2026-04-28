@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use super::client::SnowflakeClient;
@@ -33,7 +33,10 @@ pub struct NormalizerConfig {
     pub database: String,
     pub target_schema: String,
     pub job_name: String,
-    pub table_schemas: Vec<SourceTableSchema>,
+    /// Shared with `SnowflakeSink`: the writer updates this `Arc<RwLock<...>>`
+    /// after each successful schema-evolution batch so the MERGE generator
+    /// here picks up the new columns in the next drain cycle.
+    pub table_schemas: Arc<RwLock<Vec<SourceTableSchema>>>,
     #[allow(dead_code)]
     pub merge_interval_ms: u64,
     pub soft_delete: bool,
@@ -218,11 +221,16 @@ async fn normalize_batch_inner(
         return Ok(());
     }
 
+    // Snapshot the shared table_schemas at the start of this drain so the
+    // MERGE generator sees post-evolution columns. Read lock is held only
+    // for the clone; subsequent SQL execution holds no lock.
+    let table_schemas_snapshot = config.table_schemas.read().await.clone();
+
     // 2. For each table: get TOAST combinations, generate MERGE, execute
     for dst_table in &tables {
         // Find the source schema for this table
         let table_name = dst_table.split('.').next_back().unwrap_or(dst_table);
-        let source_schema = config.table_schemas.iter().find(|s| s.name == table_name);
+        let source_schema = table_schemas_snapshot.iter().find(|s| s.name == table_name);
 
         let source_schema = match source_schema {
             Some(s) => s,
