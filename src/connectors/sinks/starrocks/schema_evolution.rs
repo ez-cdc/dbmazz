@@ -120,9 +120,8 @@ impl StarRocksSchemaEvolution {
             .await
             .map_err(|e| anyhow!("Failed to query StarRocks server version: {}", e))?;
 
-        let version_str = raw_version.ok_or_else(|| {
-            anyhow!("StarRocks `SELECT current_version()` returned no row")
-        })?;
+        let version_str = raw_version
+            .ok_or_else(|| anyhow!("StarRocks `SELECT current_version()` returned no row"))?;
 
         let (major, minor) = parse_server_version(&version_str).ok_or_else(|| {
             anyhow!(
@@ -164,10 +163,7 @@ impl StarRocksSchemaEvolution {
     /// for a single table degrades that table to disabled and continues
     /// (rather than failing setup entirely). The catalog query itself
     /// failing for a known reason (permissions, missing table) bubbles up.
-    pub async fn detect_fast_schema_evolution_per_table(
-        &self,
-        tables: &[String],
-    ) -> Result<()> {
+    pub async fn detect_fast_schema_evolution_per_table(&self, tables: &[String]) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let mut enabled = self.schema_evolution_enabled.write().await;
 
@@ -252,14 +248,15 @@ impl StarRocksSchemaEvolution {
             let mut diff = SchemaDiff::default();
             for (i, src_col) in source.columns.iter().enumerate() {
                 if !target_names.contains(&src_col.name.to_lowercase()) {
-                    diff.added.push(crate::connectors::sinks::schema_evolution::AddedColumn {
-                        name: src_col.name.clone(),
-                        data_type: src_col.data_type.clone(),
-                        nullable: true, // always nullable on reconcile
-                        #[allow(clippy::cast_possible_wrap)]
-                        ordinal: i as i32,
-                        pg_type_id: Some(src_col.pg_type_id),
-                    });
+                    diff.added
+                        .push(crate::connectors::sinks::schema_evolution::AddedColumn {
+                            name: src_col.name.clone(),
+                            data_type: src_col.data_type.clone(),
+                            nullable: true, // always nullable on reconcile
+                            #[allow(clippy::cast_possible_wrap)]
+                            ordinal: i as i32,
+                            pg_type_id: Some(src_col.pg_type_id),
+                        });
                 }
             }
 
@@ -272,12 +269,14 @@ impl StarRocksSchemaEvolution {
                 added_count = diff.added.len(),
                 "starrocks_sink: reconcile_on_startup applying ALTERs"
             );
-            self.apply_diff(&source.name, &diff).await.with_context(|| {
-                format!(
-                    "starrocks_sink: reconcile_on_startup failed for table {}",
-                    source.name
-                )
-            })?;
+            self.apply_diff(&source.name, &diff)
+                .await
+                .with_context(|| {
+                    format!(
+                        "starrocks_sink: reconcile_on_startup failed for table {}",
+                        source.name
+                    )
+                })?;
         }
 
         Ok(())
@@ -417,14 +416,23 @@ impl StarRocksSchemaEvolution {
                 (&self.database, table_name, column_name),
             )
             .await
-            .map_err(|e| anyhow!("Failed to verify ALTER for {}.{}: {}", table_name, column_name, e))?;
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to verify ALTER for {}.{}: {}",
+                    table_name,
+                    column_name,
+                    e
+                )
+            })?;
 
         if exists.is_none() {
             return Err(anyhow!(
                 "starrocks_sink: ALTER TABLE {}.{} ADD COLUMN {} reported success \
                  but the column did not appear in INFORMATION_SCHEMA. \
                  Check fast_schema_evolution=true is set on the table.",
-                self.database, table_name, column_name
+                self.database,
+                table_name,
+                column_name
             ));
         }
         Ok(())
@@ -509,6 +517,81 @@ fn properties_contain_fast_schema_evolution(properties: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::sinks::schema_evolution::AddedColumn;
+    use crate::core::record::DataType;
+
+    fn test_config() -> StarRocksSinkConfig {
+        StarRocksSinkConfig {
+            http_url: "http://localhost:9999".to_string(),
+            mysql_port: 9999,
+            database: "testdb".to_string(),
+            user: "root".to_string(),
+            password: String::new(),
+            timeout_secs: 30,
+            max_filter_ratio: 0.2,
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_diff_empty_returns_ok_without_connecting() {
+        // Pool::new doesn't establish a connection; only the first
+        // get_conn() does. apply_diff with an empty diff short-circuits
+        // before that, so this test verifies the fast path is genuinely
+        // pure (no network).
+        let se = StarRocksSchemaEvolution::new(&test_config()).unwrap();
+        let diff = SchemaDiff::default();
+        let result = se.apply_diff("orders", &diff).await;
+        assert!(
+            result.is_ok(),
+            "empty diff must return Ok without contacting the server"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_schema_evolution_enabled_defaults_to_false() {
+        let se = StarRocksSchemaEvolution::new(&test_config()).unwrap();
+        assert!(
+            !se.is_schema_evolution_enabled("orders").await,
+            "tables not added to the enabled set must default to false (degraded mode)"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_schema_evolution_enabled_true_after_manual_insert() {
+        // Manually populate the set to verify the read-side logic without
+        // running the catalog query.
+        let se = StarRocksSchemaEvolution::new(&test_config()).unwrap();
+        se.schema_evolution_enabled
+            .write()
+            .await
+            .insert("orders".to_string());
+        assert!(se.is_schema_evolution_enabled("orders").await);
+        assert!(!se.is_schema_evolution_enabled("other").await);
+    }
+
+    #[tokio::test]
+    async fn apply_diff_validates_table_name() {
+        let se = StarRocksSchemaEvolution::new(&test_config()).unwrap();
+        let mut diff = SchemaDiff::default();
+        diff.added.push(AddedColumn {
+            name: "tax".to_string(),
+            data_type: DataType::Int32,
+            nullable: true,
+            ordinal: 1,
+            pg_type_id: Some(23),
+        });
+        // Table name with semicolon — must be rejected before any DB call.
+        let result = se.apply_diff("orders; DROP TABLE", &diff).await;
+        assert!(
+            result.is_err(),
+            "invalid table name must be rejected at validation"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Invalid table name") || err.contains("SQL injection"),
+            "error must reference table-name validation; got: {err}"
+        );
+    }
 
     #[test]
     fn parse_version_simple() {

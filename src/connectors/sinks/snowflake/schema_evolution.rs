@@ -141,12 +141,14 @@ impl SnowflakeSchemaEvolution {
                 added_count = diff.added.len(),
                 "snowflake_sink: reconcile_on_startup applying ALTERs"
             );
-            self.apply_diff(&source.name, &diff).await.with_context(|| {
-                format!(
-                    "snowflake_sink: reconcile_on_startup failed for table {}",
-                    source.name
-                )
-            })?;
+            self.apply_diff(&source.name, &diff)
+                .await
+                .with_context(|| {
+                    format!(
+                        "snowflake_sink: reconcile_on_startup failed for table {}",
+                        source.name
+                    )
+                })?;
         }
 
         Ok(())
@@ -332,6 +334,12 @@ mod tests {
             message: String::new(),
         }
     }
+
+    // Note: full `SnowflakeSchemaEvolution::apply_diff` tests require a
+    // live `SnowflakeClient` (which only constructs via a real `connect`
+    // call). The verify suite in ez-cdc-cli covers those integration tests
+    // end-to-end. Here we cover only the pure helpers that don't require
+    // a client.
 
     #[test]
     fn parse_rows_empty_data() {

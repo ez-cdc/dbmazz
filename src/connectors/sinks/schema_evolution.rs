@@ -257,10 +257,7 @@ pub fn compute_schema_evolution_plan(
             }
 
             if !diff.added.is_empty() {
-                let src_schema = table
-                    .schema
-                    .clone()
-                    .unwrap_or_else(|| "public".to_string());
+                let src_schema = table.schema.clone().unwrap_or_else(|| "public".to_string());
                 let qn = table.qualified_name();
 
                 // Ensure the table exists in `working` before pushing columns.
