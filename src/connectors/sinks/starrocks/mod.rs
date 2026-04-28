@@ -388,11 +388,7 @@ impl Sink for StarRocksSink {
 
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult> {
         if records.is_empty() {
-            return Ok(SinkResult {
-                records_written: 0,
-                bytes_written: 0,
-                last_position: None,
-            });
+            return Ok(SinkResult::default());
         }
 
         // ─── Phase 1: schema evolution pre-pass ──────────────────────────
@@ -405,6 +401,7 @@ impl Sink for StarRocksSink {
         // `pipeline::flush_batch`).
         let snapshot = self.schema_cache.read().await.clone();
         let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
+        let mut schema_evolution_skipped: u64 = 0;
 
         for (table, diff) in &pending_diffs {
             let table_name = table.name.as_str();
@@ -424,10 +421,8 @@ impl Sink for StarRocksSink {
                     })?;
             } else {
                 // Degraded mode: table doesn't have fast_schema_evolution=true.
-                // Emit a per-event WARN per added column. The metric counter
-                // (`schema_evolution_skipped_total`) is wired in section 4
-                // of the change spec; until then the WARN log is the
-                // observability surface.
+                // Emit a per-column WARN; the pipeline adds the count to
+                // `schema_evolution_skipped_total` exposed via /metrics.
                 for added in &diff.added {
                     warn!(
                         table = %table_name,
@@ -437,6 +432,7 @@ impl Sink for StarRocksSink {
                          New column will NOT be propagated; data writes \
                          continue without it."
                     );
+                    schema_evolution_skipped += 1;
                 }
             }
         }
@@ -496,6 +492,7 @@ impl Sink for StarRocksSink {
             records_written: total_written as usize,
             bytes_written: total_bytes,
             last_position,
+            schema_evolution_skipped,
         })
     }
 

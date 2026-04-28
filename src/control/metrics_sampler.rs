@@ -54,6 +54,7 @@ pub async fn run_metrics_sampler(shared: Arc<SharedState>) {
                     total_batches_sent: shared.batches_sent(),
                     cpu_millicores: cpu.cpu_millicores(),
                     replication_lag_ms: shared.replication_lag_ms(),
+                    schema_evolution_skipped_total: shared.schema_evolution_skipped(),
                 };
 
                 *shared.latest_metrics.write().await = sample;

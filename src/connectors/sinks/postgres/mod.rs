@@ -267,11 +267,7 @@ impl Sink for PostgresSink {
 
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult> {
         if records.is_empty() {
-            return Ok(SinkResult {
-                records_written: 0,
-                bytes_written: 0,
-                last_position: None,
-            });
+            return Ok(SinkResult::default());
         }
 
         // Track last position for checkpoint
@@ -339,6 +335,7 @@ impl Sink for PostgresSink {
             records_written,
             bytes_written,
             last_position,
+            schema_evolution_skipped: 0,
         })
     }
 

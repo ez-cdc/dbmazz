@@ -66,6 +66,21 @@ every option documented inline. The default location is
 |---|---|---|
 | `DBMAZZ_CONTROL_PORT` | `50051` | Port the internal HTTP control plane binds to (health, status, metrics, control). Formerly `GRPC_PORT`; the legacy name is still read for rolling compatibility. |
 
+## Observability
+
+The HTTP control plane exposes runtime metrics at `GET /api/v1/cdc/metrics`. Notable counters:
+
+| Field | Description |
+|---|---|
+| `events_per_second` | Throughput of CDC events processed in the last second. |
+| `lag_bytes` | Difference between `current_lsn` and `confirmed_lsn` (PostgreSQL source). |
+| `lag_events` | Pending events queued in the in-memory pipeline channel. |
+| `replication_lag_ms` | End-to-end lag from source commit timestamp to sink ack. |
+| `schema_evolution_skipped_total` | Cumulative count of `SchemaChange` events skipped because the target table doesn't satisfy the sink's schema-evolution prerequisite (e.g. StarRocks `fast_schema_evolution=true` not set). A non-zero value here means the daemon emitted a `WARN: schema change skipped` log somewhere — review the logs for the specific table/column. |
+| `total_events_processed` | Cumulative event count since daemon start. |
+| `total_batches_sent` | Cumulative batches flushed to sink. |
+| `cpu_millicores` | Process CPU usage (1000 = 1 full core). |
+
 ## Logging
 
 | Variable | Default | Description |

@@ -377,11 +377,7 @@ impl Sink for SnowflakeSink {
 
     async fn write_batch(&mut self, records: Vec<CdcRecord>) -> Result<SinkResult> {
         if records.is_empty() {
-            return Ok(SinkResult {
-                records_written: 0,
-                bytes_written: 0,
-                last_position: None,
-            });
+            return Ok(SinkResult::default());
         }
 
         let _client = self.ensure_client().await?;
@@ -461,6 +457,7 @@ impl Sink for SnowflakeSink {
                 records_written: 0,
                 bytes_written: 0,
                 last_position,
+                schema_evolution_skipped: 0,
             });
         }
 
@@ -496,6 +493,7 @@ impl Sink for SnowflakeSink {
             records_written: data_count,
             bytes_written: file_size,
             last_position,
+            schema_evolution_skipped: 0,
         })
     }
 
