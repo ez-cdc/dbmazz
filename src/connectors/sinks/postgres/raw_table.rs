@@ -12,13 +12,13 @@ use bytes::{BufMut, BytesMut};
 use futures_util::SinkExt;
 use tokio::sync::watch;
 use tokio_postgres::Client;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use super::schema_tracking::{self, SchemaState};
 use super::types::pg_oid_to_target_type;
-use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
-use crate::core::traits::{SourceColumn, SourceTableSchema};
-use crate::source::converter::pg_type_to_data_type;
+use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
+use crate::core::record::{CdcRecord, ColumnValue, Value};
+use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name
 const METADATA_SCHEMA: &str = "_dbmazz";
@@ -62,12 +62,15 @@ pub async fn write_batch_to_raw(
     //     is complete (Risk #6). A COPY failure rolls back the DDL too.
     for (table, diff) in &pending_diffs {
         for added in &diff.added {
+            let pg_type_id = added
+                .pg_type_id
+                .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
             let sql = format!(
                 r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
                 target_schema,
                 table.name,
                 added.name,
-                pg_oid_to_target_type(added.pg_type_id)
+                pg_oid_to_target_type(pg_type_id)
             );
             tx.batch_execute(&sql).await.with_context(|| {
                 format!(
@@ -228,95 +231,9 @@ pub async fn write_batch_to_raw(
     Ok((rows_written, bytes_written))
 }
 
-/// Pure pre-pass: clone the current schema snapshot and walk the batch's
-/// `SchemaChange` records to compute the per-table schema diffs that need
-/// DDL applied during the transaction.
-///
-/// Returns `(working, pending_diffs)` where:
-/// - `working` is the post-batch schema state — the snapshot with every
-///   added column folded in. This is the value that Phase 3 broadcasts on
-///   the watch channel after a successful commit.
-/// - `pending_diffs` is the list of `(TableRef, SchemaDiff)` pairs that
-///   actually have new columns and require ALTER TABLE during Phase 2a.
-///   Type-change-only and drop-only diffs are logged here and excluded
-///   from this list (they need no DDL).
-///
-/// Pure function — no DB, no I/O, no locking. Safe to unit-test.
-fn compute_schema_evolution_plan(
-    snapshot: &HashMap<String, SourceTableSchema>,
-    records: &[CdcRecord],
-) -> (
-    HashMap<String, SourceTableSchema>,
-    Vec<(TableRef, schema_tracking::SchemaDiff)>,
-) {
-    // Clone the snapshot into a mutable working map.
-    // Each SchemaChange in the batch is diffed against `working` (not the
-    // original snapshot), and `working` is mutated in-place after each diff so
-    // that a second SchemaChange for the same table in the same batch sees the
-    // already-added columns and does not re-emit them.
-    //
-    // After this loop, `working` reflects the schema state that will exist AFTER
-    // the entire batch is committed. It is broadcast in Phase 3.
-    let mut working: HashMap<String, SourceTableSchema> = snapshot.clone();
-
-    // Only diffs with non-empty `added` need DDL work. Type-change-only and
-    // drop-only diffs are logged here and are no-ops for the transaction.
-    let mut pending_diffs: Vec<(TableRef, schema_tracking::SchemaDiff)> = Vec::new();
-
-    for record in records {
-        if let CdcRecord::SchemaChange { table, columns, .. } = record {
-            let diff = schema_tracking::diff_against_cache(&working, table, columns);
-
-            // Log type changes (no DDL — operator intervention required).
-            for tc in &diff.type_changed {
-                error!(
-                    table = %table.qualified_name(),
-                    column = %tc.name,
-                    old_oid = tc.old_pg_type_id,
-                    new_oid = tc.new_pg_type_id,
-                    "pg_sink: type change not supported, MERGE keeps old cast"
-                );
-            }
-
-            // Log drops (no DDL — target keeps dead column).
-            for dropped in &diff.dropped {
-                warn!(
-                    table = %table.qualified_name(),
-                    column = %dropped,
-                    "pg_sink: column drop ignored, target keeps dead column"
-                );
-            }
-
-            if !diff.added.is_empty() {
-                let src_schema = table.schema.clone().unwrap_or_else(|| "public".to_string());
-                let qn = table.qualified_name();
-
-                // Ensure the table exists in `working` before pushing columns.
-                let entry = working.entry(qn).or_insert_with(|| SourceTableSchema {
-                    schema: src_schema,
-                    name: table.name.clone(),
-                    columns: Vec::new(),
-                    primary_keys: Vec::new(),
-                });
-
-                // Advance working map so subsequent SchemaChange events for the
-                // same table see these columns and don't re-emit them (Risk #7).
-                for added in &diff.added {
-                    entry.columns.push(SourceColumn {
-                        name: added.name.clone(),
-                        data_type: pg_type_to_data_type(added.pg_type_id),
-                        nullable: added.nullable,
-                        pg_type_id: added.pg_type_id,
-                    });
-                }
-
-                pending_diffs.push((table.clone(), diff));
-            }
-        }
-    }
-
-    (working, pending_diffs)
-}
+// `compute_schema_evolution_plan` lives in
+// `crate::connectors::sinks::schema_evolution` and is imported at the top
+// of this file. The PG sink consumes the shared, sink-agnostic version.
 
 /// Fields for a single raw table row.
 struct RawRow<'a> {
@@ -437,8 +354,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::position::SourcePosition;
-    use crate::core::record::{ColumnDef, ColumnValue, DataType};
+    use crate::core::record::ColumnValue;
 
     #[test]
     fn test_columns_to_json() {
@@ -545,135 +461,8 @@ mod tests {
         assert!(result["nested"].is_array());
     }
 
-    // ------------------------------------------------------------------
-    // compute_schema_evolution_plan tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_compute_schema_evolution_plan_no_schema_change() {
-        // Snapshot contains one table.
-        let mut snapshot: HashMap<String, SourceTableSchema> = HashMap::new();
-        snapshot.insert(
-            "public.orders".to_string(),
-            SourceTableSchema {
-                schema: "public".to_string(),
-                name: "orders".to_string(),
-                columns: vec![SourceColumn {
-                    name: "id".to_string(),
-                    data_type: DataType::Int32,
-                    nullable: false,
-                    pg_type_id: 23,
-                }],
-                primary_keys: vec!["id".to_string()],
-            },
-        );
-
-        // Batch contains only an Insert — no SchemaChange.
-        let records = vec![CdcRecord::Insert {
-            table: TableRef::new(Some("public".into()), "orders".into()),
-            columns: vec![],
-            position: SourcePosition::Lsn(0),
-        }];
-
-        let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
-
-        assert!(
-            pending_diffs.is_empty(),
-            "Insert-only batch must produce no pending diffs"
-        );
-        // working must be identical to the input snapshot.
-        assert_eq!(
-            working
-                .get("public.orders")
-                .expect("table must exist in working")
-                .columns
-                .len(),
-            1,
-            "working schema must equal the input snapshot when no SchemaChange is present"
-        );
-    }
-
-    #[test]
-    fn test_compute_schema_evolution_plan_cold_start_added_column() {
-        // Cold start: empty snapshot — table has never been seen.
-        let snapshot: HashMap<String, SourceTableSchema> = HashMap::new();
-
-        let records = vec![CdcRecord::SchemaChange {
-            table: TableRef::new(Some("public".into()), "orders".into()),
-            columns: vec![
-                ColumnDef::with_pg_oid("id".into(), DataType::Int32, false, 23),
-                ColumnDef::with_pg_oid("description".into(), DataType::String, true, 25),
-            ],
-            position: SourcePosition::Lsn(100),
-        }];
-
-        let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
-
-        assert_eq!(
-            pending_diffs.len(),
-            1,
-            "one SchemaChange for a new table must produce exactly one pending diff"
-        );
-        assert_eq!(
-            pending_diffs[0].1.added.len(),
-            2,
-            "both columns are new (cold-start) — both must appear in added"
-        );
-        assert_eq!(
-            working
-                .get("public.orders")
-                .expect("public.orders must be in working after cold-start SchemaChange")
-                .columns
-                .len(),
-            2,
-            "working must contain both columns after cold-start SchemaChange"
-        );
-    }
-
-    #[test]
-    fn test_compute_schema_evolution_plan_intra_batch_dedup() {
-        // Snapshot has public.orders with one column — id.
-        let mut snapshot: HashMap<String, SourceTableSchema> = HashMap::new();
-        snapshot.insert(
-            "public.orders".to_string(),
-            SourceTableSchema {
-                schema: "public".to_string(),
-                name: "orders".to_string(),
-                columns: vec![SourceColumn {
-                    name: "id".to_string(),
-                    data_type: DataType::Int32,
-                    nullable: false,
-                    pg_type_id: 23,
-                }],
-                primary_keys: vec!["id".to_string()],
-            },
-        );
-
-        // Two SchemaChange records for the same table in the same batch,
-        // both declaring the same `description` column.
-        // The second SchemaChange must see `description` already in the
-        // working map and produce an empty diff (Risk #7 invariant).
-        let schema_change = CdcRecord::SchemaChange {
-            table: TableRef::new(Some("public".into()), "orders".into()),
-            columns: vec![
-                ColumnDef::with_pg_oid("id".into(), DataType::Int32, false, 23),
-                ColumnDef::with_pg_oid("description".into(), DataType::String, true, 25),
-            ],
-            position: SourcePosition::Lsn(200),
-        };
-        let records = vec![schema_change.clone(), schema_change];
-
-        let (_working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
-
-        assert_eq!(
-            pending_diffs.len(),
-            1,
-            "two identical SchemaChange events in the same batch must produce only one pending diff (Risk #7)"
-        );
-        assert_eq!(
-            pending_diffs[0].1.added.len(),
-            1,
-            "only `description` should be in the added set — `id` was already in the snapshot"
-        );
-    }
+    // compute_schema_evolution_plan tests live in
+    // `crate::connectors::sinks::schema_evolution` (the shared module),
+    // since the function is sink-agnostic. The PG sink tests here cover
+    // only PG-sink-specific helpers.
 }

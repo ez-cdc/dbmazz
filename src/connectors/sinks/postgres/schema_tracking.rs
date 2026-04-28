@@ -25,9 +25,17 @@ use tokio_postgres::{Client, Transaction};
 use tracing::{error, info, warn};
 
 use crate::connectors::sinks::postgres::types::pg_oid_to_target_type;
-use crate::core::record::{ColumnDef, TableRef};
+use crate::connectors::sinks::schema_evolution::AddedColumn;
+use crate::core::record::TableRef;
 use crate::core::traits::{SourceColumn, SourceTableSchema};
 use crate::source::converter::pg_type_to_data_type;
+
+// Re-export the shared diff function so any future external caller of
+// `schema_tracking::diff_against_cache` keeps compiling. Internal PG-sink
+// callers (raw_table.rs) consume the function directly from the shared
+// module via `crate::connectors::sinks::schema_evolution`.
+#[allow(unused_imports)]
+pub use crate::connectors::sinks::schema_evolution::diff_against_cache;
 
 /// In-memory schema cache: qualified table name → `SourceTableSchema`.
 ///
@@ -39,50 +47,10 @@ pub type SchemaState = Arc<HashMap<String, SourceTableSchema>>;
 pub const TRACKING_TABLE: &str = "_dbmazz._schema_tracking";
 
 // ---------------------------------------------------------------------------
-// Public types
+// Public types — moved to `crate::connectors::sinks::schema_evolution`.
+// `SchemaDiff`, `AddedColumn`, `TypeChange`, and `diff_against_cache` are
+// imported above and re-exported for backward-compatible call sites.
 // ---------------------------------------------------------------------------
-
-/// Result of diffing a `SchemaChange` event against the current target cache.
-/// Computed per table, per batch. Empty diffs are no-ops.
-#[derive(Debug, Default)]
-pub struct SchemaDiff {
-    /// Columns present in the new schema that are missing from the cache.
-    /// Only entries with `pg_type_id.is_some()` are included.
-    pub added: Vec<AddedColumn>,
-    /// Columns whose `pg_type_id` in the cache disagrees with the new schema.
-    /// Handled by `error!` log; no DDL.
-    pub type_changed: Vec<TypeChange>,
-    /// Columns present in the cache but absent from the new schema (source
-    /// dropped the column while the daemon was running).
-    /// Handled by `warn!` log; no DDL. Target keeps the column as dead data.
-    pub dropped: Vec<String>,
-}
-
-/// A new column that needs to be materialized on the target.
-#[derive(Debug, Clone)]
-pub struct AddedColumn {
-    pub name: String,
-    pub pg_type_id: u32,
-    pub nullable: bool,
-    /// Zero-based ordinal relative to the current tracking state.
-    pub ordinal: i32,
-}
-
-/// A column whose type OID changed between cache and the incoming schema.
-#[derive(Debug, Clone)]
-pub struct TypeChange {
-    pub name: String,
-    pub old_pg_type_id: u32,
-    pub new_pg_type_id: u32,
-}
-
-impl SchemaDiff {
-    /// Returns `true` when there is nothing to do (no DDL, no logs).
-    #[allow(dead_code)]
-    pub fn is_noop(&self) -> bool {
-        self.added.is_empty() && self.type_changed.is_empty() && self.dropped.is_empty()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DDL helpers
@@ -303,6 +271,13 @@ pub async fn insert_tracked_columns(
     let lsn_i64 = lsn as i64;
 
     for col in added {
+        // pg_type_id is `Option<u32>` on the shared `AddedColumn` (sink-agnostic).
+        // The PG source always populates it; `.expect()` makes the contract loud
+        // for any future non-PG source that wires SchemaChange events into
+        // this PG sink path (which would be a misconfiguration).
+        let pg_type_id = col
+            .pg_type_id
+            .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
         tx.execute(
             &format!(
                 "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, ordinal, nullable, added_at_lsn)
@@ -316,7 +291,7 @@ pub async fn insert_tracked_columns(
                 &src_schema,
                 &table.name,
                 &col.name,
-                &col.pg_type_id,
+                &pg_type_id,
                 &col.ordinal,
                 &col.nullable,
                 &lsn_i64,
@@ -335,141 +310,10 @@ pub async fn insert_tracked_columns(
 }
 
 // ---------------------------------------------------------------------------
-// Diff logic (pure)
+// Diff logic — moved to `crate::connectors::sinks::schema_evolution`.
+// `diff_against_cache` is re-exported at the top of this module for
+// backward compatibility with existing call sites.
 // ---------------------------------------------------------------------------
-
-/// Compute a `SchemaDiff` between the cached `SourceTableSchema` for `table`
-/// and the `new_cols` coming from a `CdcRecord::SchemaChange`. Pure
-/// function — no DB, no locking. Safe to call without a tx.
-///
-/// If the table is not in the cache at all, every `new_col` that has
-/// `pg_type_id.is_some()` becomes an `Added` entry (cold-start case —
-/// should normally not occur after setup).
-///
-/// Columns with `pg_type_id == None` are silently skipped from `added`
-/// (an `error!` is emitted; the branch is unreachable for the PG source
-/// in practice, but must not panic).
-///
-/// MUST diff by column NAME, not position (Risk #5 — pgoutput Relation
-/// messages carry all columns, and source column order can change
-/// independently of the column set).
-///
-/// **Ordinal contract**: `added[i].ordinal` is computed as
-/// `cached_schema.columns.len() + (i-th additive column)` — i.e. it is
-/// **absolute against the cache passed in**, not absolute against the
-/// tracking table. Callers that diff multiple `SchemaChange` events for
-/// the same table within a single batch (Section 4 of the implementation
-/// plan) MUST fold each diff back into the working cache BEFORE calling
-/// `diff_against_cache` for the next event, so successive ordinals stay
-/// monotonic. The Phase 1 pre-pass in `raw_table::write_batch_to_raw`
-/// does exactly this via the `working: HashMap<String, SourceTableSchema>`
-/// local map.
-pub fn diff_against_cache(
-    cache: &HashMap<String, SourceTableSchema>,
-    table: &TableRef,
-    new_cols: &[ColumnDef],
-) -> SchemaDiff {
-    let src_schema = table.schema.as_deref().unwrap_or("public");
-    let qn = format!("{}.{}", src_schema, table.name);
-
-    let mut diff = SchemaDiff::default();
-
-    // Build a name→pg_type_id map for the incoming columns so we can
-    // cross-reference against the cache in O(n) rather than O(n²).
-    let mut new_by_name: HashMap<&str, &ColumnDef> = HashMap::with_capacity(new_cols.len());
-    for col in new_cols {
-        new_by_name.insert(col.name.as_str(), col);
-    }
-
-    match cache.get(&qn) {
-        None => {
-            // Cold-start: table not in cache at all — every new col is Added.
-            let mut ordinal: i32 = 0;
-            for col in new_cols {
-                match col.pg_type_id {
-                    Some(pg_type_id) => {
-                        diff.added.push(AddedColumn {
-                            name: col.name.clone(),
-                            pg_type_id,
-                            nullable: col.nullable,
-                            ordinal,
-                        });
-                        ordinal += 1;
-                    }
-                    None => {
-                        error!(
-                            table = %qn,
-                            column = %col.name,
-                            "pg_sink: SchemaChange column has no pg_type_id, skipping (non-PG source?)"
-                        );
-                    }
-                }
-            }
-        }
-        Some(cached_schema) => {
-            // Build name→pg_type_id for the cached columns.
-            let cached_by_name: HashMap<&str, &SourceColumn> = cached_schema
-                .columns
-                .iter()
-                .map(|c| (c.name.as_str(), c))
-                .collect();
-
-            // Check each incoming column against the cache.
-            // Ordinal for Added entries starts after the last cached ordinal.
-            let mut next_ordinal: i32 = cached_schema.columns.len() as i32;
-
-            for col in new_cols {
-                match cached_by_name.get(col.name.as_str()) {
-                    None => {
-                        // Column is new.
-                        match col.pg_type_id {
-                            Some(pg_type_id) => {
-                                diff.added.push(AddedColumn {
-                                    name: col.name.clone(),
-                                    pg_type_id,
-                                    nullable: col.nullable,
-                                    ordinal: next_ordinal,
-                                });
-                                next_ordinal += 1;
-                            }
-                            None => {
-                                error!(
-                                    table = %qn,
-                                    column = %col.name,
-                                    "pg_sink: SchemaChange column has no pg_type_id, skipping (non-PG source?)"
-                                );
-                            }
-                        }
-                    }
-                    Some(cached_col) => {
-                        // Column exists — check for type change.
-                        if let Some(new_oid) = col.pg_type_id {
-                            if cached_col.pg_type_id != new_oid {
-                                diff.type_changed.push(TypeChange {
-                                    name: col.name.clone(),
-                                    old_pg_type_id: cached_col.pg_type_id,
-                                    new_pg_type_id: new_oid,
-                                });
-                            }
-                        }
-                        // If pg_type_id is None on the incoming side we cannot
-                        // determine the new OID, so we skip the type-change
-                        // check silently (non-PG source path, unreachable here).
-                    }
-                }
-            }
-
-            // Check for dropped columns (present in cache, absent from new).
-            for cached_col in &cached_schema.columns {
-                if !new_by_name.contains_key(cached_col.name.as_str()) {
-                    diff.dropped.push(cached_col.name.clone());
-                }
-            }
-        }
-    }
-
-    diff
-}
 
 // ---------------------------------------------------------------------------
 // Startup reconciliation
@@ -526,9 +370,10 @@ pub async fn reconcile_on_startup(
                     // Column in source but not in tracking → ADD COLUMN.
                     let added = AddedColumn {
                         name: source_col.name.clone(),
-                        pg_type_id: source_col.pg_type_id,
+                        data_type: source_col.data_type.clone(),
                         nullable: true, // always nullable on reconcile (Risk §5.7)
                         ordinal: next_ordinal,
+                        pg_type_id: Some(source_col.pg_type_id),
                     };
 
                     let sql = alter_add_column_sql(target_schema, &source.name, &added);
@@ -616,11 +461,14 @@ pub async fn reconcile_on_startup(
                     primary_keys: source.primary_keys.clone(),
                 });
             for added in newly_added {
+                let pg_type_id = added
+                    .pg_type_id
+                    .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
                 entry.columns.push(SourceColumn {
                     name: added.name,
-                    data_type: pg_type_to_data_type(added.pg_type_id),
+                    data_type: pg_type_to_data_type(pg_type_id),
                     nullable: added.nullable,
-                    pg_type_id: added.pg_type_id,
+                    pg_type_id,
                 });
             }
         }
@@ -642,7 +490,10 @@ pub async fn reconcile_on_startup(
 /// "<col_name>" <type>`. Always nullable with no default — matches backfill
 /// semantics (NULL for pre-existing rows). All identifiers are double-quoted.
 fn alter_add_column_sql(target_schema: &str, table_name: &str, column: &AddedColumn) -> String {
-    let col_type = pg_oid_to_target_type(column.pg_type_id);
+    let pg_type_id = column
+        .pg_type_id
+        .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
+    let col_type = pg_oid_to_target_type(pg_type_id);
     format!(
         r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
         target_schema, table_name, column.name, col_type
@@ -658,204 +509,9 @@ mod tests {
     use super::*;
     use crate::core::record::DataType;
 
-    // ------------------------------------------------------------------
-    // Helpers — build fixtures inline per test
-    // ------------------------------------------------------------------
-
-    fn make_source_col(name: &str, pg_type_id: u32) -> SourceColumn {
-        SourceColumn {
-            name: name.to_owned(),
-            data_type: pg_type_to_data_type(pg_type_id),
-            nullable: true,
-            pg_type_id,
-        }
-    }
-
-    fn make_col_def(name: &str, pg_type_id: Option<u32>) -> ColumnDef {
-        ColumnDef {
-            name: name.to_owned(),
-            data_type: DataType::String,
-            nullable: true,
-            pg_type_id,
-        }
-    }
-
-    fn make_schema(schema: &str, name: &str, cols: Vec<SourceColumn>) -> SourceTableSchema {
-        SourceTableSchema {
-            schema: schema.to_owned(),
-            name: name.to_owned(),
-            columns: cols,
-            primary_keys: vec!["id".to_owned()],
-        }
-    }
-
-    fn table_ref(schema: &str, name: &str) -> TableRef {
-        TableRef {
-            schema: Some(schema.to_owned()),
-            name: name.to_owned(),
-        }
-    }
-
-    fn cache_with(
-        schema: &str,
-        name: &str,
-        cols: Vec<SourceColumn>,
-    ) -> HashMap<String, SourceTableSchema> {
-        let mut m = HashMap::new();
-        m.insert(
-            format!("{}.{}", schema, name),
-            make_schema(schema, name, cols),
-        );
-        m
-    }
-
-    // ------------------------------------------------------------------
-    // diff_against_cache tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_diff_against_cache_no_change() {
-        let cache = cache_with(
-            "public",
-            "orders",
-            vec![make_source_col("id", 23), make_source_col("amount", 1700)],
-        );
-        let new_cols = vec![
-            make_col_def("id", Some(23)),
-            make_col_def("amount", Some(1700)),
-        ];
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert!(diff.is_noop(), "expected no-op diff for identical schemas");
-    }
-
-    #[test]
-    fn test_diff_against_cache_only_added() {
-        let cache = cache_with("public", "orders", vec![make_source_col("id", 23)]);
-        let new_cols = vec![
-            make_col_def("id", Some(23)),
-            make_col_def("description", Some(25)), // new text column
-        ];
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert_eq!(diff.added.len(), 1);
-        assert_eq!(diff.added[0].name, "description");
-        assert_eq!(diff.added[0].pg_type_id, 25);
-        assert!(diff.type_changed.is_empty());
-        assert!(diff.dropped.is_empty());
-    }
-
-    #[test]
-    fn test_diff_against_cache_only_type_changed() {
-        let cache = cache_with(
-            "public",
-            "orders",
-            vec![make_source_col("amount", 23)], // int4
-        );
-        let new_cols = vec![make_col_def("amount", Some(20))]; // int8
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert!(diff.added.is_empty());
-        assert_eq!(diff.type_changed.len(), 1);
-        assert_eq!(diff.type_changed[0].name, "amount");
-        assert_eq!(diff.type_changed[0].old_pg_type_id, 23);
-        assert_eq!(diff.type_changed[0].new_pg_type_id, 20);
-        assert!(diff.dropped.is_empty());
-    }
-
-    #[test]
-    fn test_diff_against_cache_only_dropped() {
-        let cache = cache_with(
-            "public",
-            "orders",
-            vec![make_source_col("id", 23), make_source_col("legacy", 25)],
-        );
-        let new_cols = vec![make_col_def("id", Some(23))]; // "legacy" missing
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert!(diff.added.is_empty());
-        assert!(diff.type_changed.is_empty());
-        assert_eq!(diff.dropped.len(), 1);
-        assert_eq!(diff.dropped[0], "legacy");
-    }
-
-    #[test]
-    fn test_diff_against_cache_mixed() {
-        // id: unchanged, status: type change int4→int8, description: new, legacy: dropped
-        let cache = cache_with(
-            "public",
-            "orders",
-            vec![
-                make_source_col("id", 23),
-                make_source_col("status", 23),
-                make_source_col("legacy", 25),
-            ],
-        );
-        let new_cols = vec![
-            make_col_def("id", Some(23)),
-            make_col_def("status", Some(20)), // type change
-            make_col_def("description", Some(25)), // new
-                                              // "legacy" absent → dropped
-        ];
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert_eq!(diff.added.len(), 1, "should have one added column");
-        assert_eq!(diff.added[0].name, "description");
-        assert_eq!(diff.type_changed.len(), 1, "should have one type change");
-        assert_eq!(diff.type_changed[0].name, "status");
-        assert_eq!(diff.dropped.len(), 1, "should have one dropped column");
-        assert_eq!(diff.dropped[0], "legacy");
-    }
-
-    #[test]
-    fn test_diff_against_cache_cold_start() {
-        // Table not in cache at all — every incoming column with Some(pg_type_id) → Added.
-        let cache: HashMap<String, SourceTableSchema> = HashMap::new();
-        let new_cols = vec![make_col_def("id", Some(23)), make_col_def("name", Some(25))];
-        let diff = diff_against_cache(&cache, &table_ref("public", "customers"), &new_cols);
-        assert_eq!(diff.added.len(), 2);
-        assert!(diff.type_changed.is_empty());
-        assert!(diff.dropped.is_empty());
-    }
-
-    #[test]
-    fn test_diff_against_cache_skips_missing_pg_oid() {
-        let cache = cache_with("public", "orders", vec![make_source_col("id", 23)]);
-        let new_cols = vec![
-            make_col_def("id", Some(23)),
-            make_col_def("mystery", None), // no pg_type_id — must be skipped
-        ];
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        // "mystery" must not appear in added (pg_type_id is None).
-        assert!(
-            diff.added.is_empty(),
-            "column with None pg_type_id must not be added"
-        );
-        assert!(
-            diff.is_noop(),
-            "only a no-pg-oid column change — must be noop for DDL purposes"
-        );
-    }
-
-    #[test]
-    fn test_diff_against_cache_ignores_column_order() {
-        // Same columns, different order in the incoming SchemaChange — must be no-op.
-        let cache = cache_with(
-            "public",
-            "orders",
-            vec![
-                make_source_col("id", 23),
-                make_source_col("amount", 1700),
-                make_source_col("name", 25),
-            ],
-        );
-        // Incoming order reversed
-        let new_cols = vec![
-            make_col_def("name", Some(25)),
-            make_col_def("amount", Some(1700)),
-            make_col_def("id", Some(23)),
-        ];
-        let diff = diff_against_cache(&cache, &table_ref("public", "orders"), &new_cols);
-        assert!(
-            diff.is_noop(),
-            "reordered columns must produce a noop diff (Risk #5)"
-        );
-    }
+    // Diff-logic tests live in `crate::connectors::sinks::schema_evolution`
+    // (the shared module). Tests here cover the PG-sink-specific helpers
+    // (`alter_add_column_sql`).
 
     // ------------------------------------------------------------------
     // alter_add_column_sql tests
@@ -865,9 +521,10 @@ mod tests {
     fn test_alter_add_column_sql_basic() {
         let col = AddedColumn {
             name: "description".to_owned(),
-            pg_type_id: 25, // text
+            data_type: DataType::String,
             nullable: true,
             ordinal: 3,
+            pg_type_id: Some(25), // text
         };
         let sql = alter_add_column_sql("public", "orders", &col);
         assert_eq!(
@@ -881,9 +538,13 @@ mod tests {
         // Table name that is a reserved word must be quoted correctly.
         let col = AddedColumn {
             name: "amount".to_owned(),
-            pg_type_id: 1700, // numeric
+            data_type: DataType::Decimal {
+                precision: 38,
+                scale: 9,
+            },
             nullable: true,
             ordinal: 1,
+            pg_type_id: Some(1700), // numeric
         };
         let sql = alter_add_column_sql("public", "order", &col);
         assert!(
