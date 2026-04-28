@@ -38,19 +38,22 @@
 //! - `dbmazz_cdc_version`: Source LSN/position for ordering
 
 mod config;
+pub(crate) mod schema_evolution;
 mod setup;
 pub mod stream_load;
 pub(crate) mod types;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tokio::sync::RwLock;
+use tracing::{info, warn};
 
 use crate::config::SinkConfig;
+use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
 use crate::core::traits::SourceTableSchema;
 use crate::core::{
     CdcRecord, ColumnValue, LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult,
@@ -58,6 +61,7 @@ use crate::core::{
 };
 
 pub use self::config::StarRocksSinkConfig;
+use self::schema_evolution::StarRocksSchemaEvolution;
 use self::stream_load::{StreamLoadClient, StreamLoadOptions};
 use self::types::TypeMapper;
 
@@ -86,12 +90,20 @@ fn is_internal_table(table_name: &str) -> bool {
 /// table model.
 pub struct StarRocksSink {
     /// Configuration for the StarRocks connection
-    #[allow(dead_code)]
     config: StarRocksSinkConfig,
     /// HTTP Stream Load client
     stream_load: StreamLoadClient,
     /// Type mapper for converting CDC types to StarRocks types
     type_mapper: TypeMapper,
+    /// Schema-evolution machinery: per-table flag detection, target column
+    /// cache, runtime ALTER application. Shared between `setup()` and
+    /// `write_batch()`.
+    schema_evolution: StarRocksSchemaEvolution,
+    /// In-memory snapshot of the schema dbmazz currently believes is in
+    /// effect on the target. Keyed by `<src_schema>.<src_table>`.
+    /// Populated in `setup()` from the introspected source schemas, mutated
+    /// in `write_batch()` after each successful schema-evolution batch.
+    schema_cache: Arc<RwLock<HashMap<String, SourceTableSchema>>>,
 }
 
 impl StarRocksSink {
@@ -116,6 +128,7 @@ impl StarRocksSink {
             sr_config.user.clone(),
             sr_config.password.clone(),
         );
+        let schema_evolution = StarRocksSchemaEvolution::new(&sr_config)?;
 
         info!("StarRocksSink initialized:");
         info!("  HTTP URL: {}", sr_config.http_url);
@@ -126,6 +139,8 @@ impl StarRocksSink {
             config: sr_config,
             stream_load,
             type_mapper: TypeMapper::new(),
+            schema_evolution,
+            schema_cache: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -343,6 +358,31 @@ impl Sink for StarRocksSink {
         let sr_setup = setup::StarRocksSetup::new(self.config.clone())?;
         let tables: Vec<String> = source_schemas.iter().map(|s| s.name.clone()).collect();
         sr_setup.run(&tables).await?;
+
+        // Schema evolution validation:
+        //   1. Server version must be ≥ 3.2.0 (hard requirement, fail loud).
+        //   2. Detect `fast_schema_evolution=true` per table — tables without
+        //      it operate in degraded mode (loud WARN at runtime, ALTERs skipped).
+        //   3. Reconcile target schema against source for tables with the flag.
+        self.schema_evolution.validate_server_version().await?;
+        self.schema_evolution
+            .detect_fast_schema_evolution_per_table(&tables)
+            .await?;
+        self.schema_evolution
+            .reconcile_target_schema(source_schemas)
+            .await?;
+
+        // Seed the schema cache with the introspected source state so the
+        // diff in write_batch() has a real baseline (avoiding cold-start
+        // re-emission of every column on the first SchemaChange).
+        {
+            let mut cache = self.schema_cache.write().await;
+            for src in source_schemas {
+                cache.insert(format!("{}.{}", src.schema, src.name), src.clone());
+            }
+        }
+
+        info!("[OK] StarRocksSink schema evolution setup complete");
         Ok(())
     }
 
@@ -354,6 +394,62 @@ impl Sink for StarRocksSink {
                 last_position: None,
             });
         }
+
+        // ─── Phase 1: schema evolution pre-pass ──────────────────────────
+        // Walk the batch's `SchemaChange` events, compute per-table diffs,
+        // apply ALTERs on tables with `fast_schema_evolution=true`, and
+        // emit loud WARN logs for tables without the flag (degraded mode).
+        //
+        // Halt-loud on ALTER failure: bubbling the error up causes the
+        // pipeline to set CdcState::Stopped (existing behaviour in
+        // `pipeline::flush_batch`).
+        let snapshot = self.schema_cache.read().await.clone();
+        let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
+
+        for (table, diff) in &pending_diffs {
+            let table_name = table.name.as_str();
+            if self
+                .schema_evolution
+                .is_schema_evolution_enabled(table_name)
+                .await
+            {
+                self.schema_evolution
+                    .apply_diff(table_name, diff)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "starrocks_sink: schema evolution failed for table {}",
+                            table_name
+                        )
+                    })?;
+            } else {
+                // Degraded mode: table doesn't have fast_schema_evolution=true.
+                // Emit a per-event WARN per added column. The metric counter
+                // (`schema_evolution_skipped_total`) is wired in section 4
+                // of the change spec; until then the WARN log is the
+                // observability surface.
+                for added in &diff.added {
+                    warn!(
+                        table = %table_name,
+                        column = %added.name,
+                        "starrocks_sink: schema change skipped — \
+                         fast_schema_evolution=true not set on target table. \
+                         New column will NOT be propagated; data writes \
+                         continue without it."
+                    );
+                }
+            }
+        }
+
+        // Update the cache so the next batch sees the post-evolution state
+        // even for tables in degraded mode (avoids re-emitting the same
+        // WARN on every batch for the same column).
+        {
+            let mut cache = self.schema_cache.write().await;
+            *cache = working;
+        }
+
+        // ─── Phase 2: data writes ────────────────────────────────────────
 
         // Cache timestamp for entire batch
         let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
