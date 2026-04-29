@@ -54,6 +54,12 @@ pub struct MetricsSample {
     pub total_batches_sent: u64,
     pub cpu_millicores: u64,
     pub replication_lag_ms: u64,
+    /// Cumulative count of `CdcRecord::SchemaChange` events that the sink
+    /// could not auto-apply because the target table does not have the
+    /// per-sink prerequisite (e.g. StarRocks `fast_schema_evolution=true`).
+    /// A non-zero value here means the operator should review the daemon
+    /// logs for `WARN: schema change skipped` entries.
+    pub schema_evolution_skipped_total: u64,
 }
 
 /// Per-table snapshot progress counters.
@@ -74,6 +80,8 @@ pub struct SharedState {
     pub pending_events: AtomicU64,
     pub events_processed: AtomicU64,
     pub batches_sent: AtomicU64,
+    /// Counter for SchemaChange events that the sink couldn't auto-apply.
+    pub schema_evolution_skipped: AtomicU64,
     pub shutdown_tx: watch::Sender<bool>,
     pub config: RwLock<CdcConfig>,
     // Timestamp of last processed event (to calculate events/sec)
@@ -122,6 +130,7 @@ impl SharedState {
             pending_events: AtomicU64::new(0),
             events_processed: AtomicU64::new(0),
             batches_sent: AtomicU64::new(0),
+            schema_evolution_skipped: AtomicU64::new(0),
             shutdown_tx,
             config: RwLock::new(config),
             last_event_time: RwLock::new(std::time::Instant::now()),
@@ -189,6 +198,19 @@ impl SharedState {
 
     pub fn batches_sent(&self) -> u64 {
         self.batches_sent.load(Ordering::Relaxed)
+    }
+
+    /// Increment the schema-evolution skip counter. Called by sinks when a
+    /// `SchemaChange` event arrives for a table that doesn't satisfy the
+    /// sink's schema-evolution prerequisite (StarRocks: missing the
+    /// `fast_schema_evolution=true` table property).
+    pub fn increment_schema_evolution_skipped(&self) {
+        self.schema_evolution_skipped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn schema_evolution_skipped(&self) -> u64 {
+        self.schema_evolution_skipped.load(Ordering::Relaxed)
     }
 
     #[allow(dead_code)]

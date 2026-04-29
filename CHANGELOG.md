@@ -4,6 +4,63 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Schema evolution for the StarRocks and Snowflake sinks.** Source-side
+  `ALTER TABLE ADD COLUMN` is now propagated automatically to the target table
+  in both sinks, bringing them to parity with the Postgres sink (which gained
+  this in v1.7.0). The conservative policy is shared across all three sinks:
+  ADD applies, DROP/MODIFY/RENAME log a warning and require operator
+  intervention via the snapshot trigger. Closes the silent data-loss window
+  where new source columns were dropped by Stream Load (StarRocks) or skipped
+  by the MERGE projection (Snowflake).
+- **Shared `compute_schema_evolution_plan` module** at
+  `src/connectors/sinks/schema_evolution.rs` consumed by all three sinks. The
+  per-sink dialect-specific DDL lives in
+  `<sink>/schema_evolution.rs` modules.
+- **`schema_evolution_skipped_total` metric** exposed at
+  `GET /api/v1/cdc/metrics`. Cumulative count of `SchemaChange` events the
+  sink could not auto-apply because the target table doesn't satisfy the
+  sink's prerequisite (StarRocks degraded mode). Non-zero values indicate
+  the daemon emitted `WARN: schema change skipped` log entries that the
+  operator should review.
+
+### Changed
+
+- **StarRocks sink: server version 3.2.0 is now a hard requirement.** The
+  daemon validates `current_version()` at setup and refuses to start against
+  older clusters. Older versions don't support `fast_schema_evolution`, which
+  is necessary for non-blocking ALTER application on the runtime path.
+- **StarRocks sink: per-table `fast_schema_evolution=true` is recommended.**
+  Tables without the property continue to operate (degraded mode) but skip
+  schema evolution with a loud `WARN` per affected table at setup and per
+  skipped event at runtime. To enable schema evolution on an existing table,
+  recreate it via CTAS — the property is creation-only in StarRocks.
+- **Snowflake sink: `ALTER TABLE` privilege on the target schema is now
+  required.** Implicitly validated at setup via the existing audit-column
+  ALTER. Runtime ALTER failures halt the pipeline with the Snowflake error
+  surfaced verbatim in `/api/v1/health` `error_detail`.
+- **Snowflake sink: `source_schemas` is now shared between the writer and the
+  normalizer** via `Arc<RwLock<Vec<SourceTableSchema>>>`. After a successful
+  schema-evolution batch, the writer takes a write lock and updates the
+  schema; the normalizer takes a read lock at the start of each drain cycle
+  so the MERGE generator projects post-evolution columns. Replaces the
+  previous frozen snapshot captured at setup time.
+- **`SinkResult` struct gained a `schema_evolution_skipped: u64` field.** The
+  pipeline aggregates per-batch skip counts into the global metric.
+
+### Fixed
+
+- **Silent data loss when a source table gained a new column mid-stream
+  (StarRocks and Snowflake sinks).** Previously, `CdcRecord::SchemaChange`
+  events fell into a no-op `match` arm in both sinks (commits `c131f0d7` for
+  StarRocks, `685edfa9` for Snowflake). New columns flowed through to the
+  data-write phase but were filtered silently by Stream Load
+  (`max_filter_ratio`) or skipped by the MERGE projection
+  (`_DATA:"col"::TYPE`). This was scoped out of the v1.7.0 PR
+  (`internal-docs/pg-sink-schema-evolution-solution.md` §3 Non-goals);
+  this change closes that deuda.
+
 ## [2.1.0] - 2026-04-23
 
 ### Changed

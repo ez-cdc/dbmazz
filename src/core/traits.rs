@@ -42,12 +42,18 @@ pub enum StageFormat {
 }
 
 /// Result returned from sink write operations
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[allow(dead_code)]
 pub struct SinkResult {
     pub records_written: usize,
     pub bytes_written: u64,
     pub last_position: Option<SourcePosition>,
+    /// Number of `CdcRecord::SchemaChange` events that the sink could not
+    /// auto-apply during this batch (e.g. StarRocks degraded mode where
+    /// the target table lacks `fast_schema_evolution=true`). The pipeline
+    /// adds this to the global `schema_evolution_skipped_total` counter
+    /// surfaced in `/api/v1/cdc/metrics`.
+    pub schema_evolution_skipped: u64,
 }
 
 /// Schema of a source table — provided to sinks during setup so they can

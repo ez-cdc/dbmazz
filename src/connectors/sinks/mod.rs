@@ -24,6 +24,8 @@
 //! sink.write_batch(records).await?;
 //! ```
 
+pub(crate) mod schema_evolution;
+
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
 #[cfg(feature = "sink-snowflake")]
@@ -124,8 +126,6 @@ mod tests {
     #[cfg(feature = "sink-snowflake")]
     #[test]
     fn test_create_snowflake_sink() {
-        use serial_test::serial;
-
         std::env::set_var("SINK_SNOWFLAKE_ACCOUNT", "test_account");
         std::env::set_var("SINK_SNOWFLAKE_WAREHOUSE", "COMPUTE_WH");
 

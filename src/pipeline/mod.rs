@@ -133,10 +133,15 @@ impl Pipeline {
         let record_count = records.len();
 
         match self.sink.write_batch(records).await {
-            Ok(_result) => {
+            Ok(result) => {
                 // Update metric for batches sent
                 if let Some(state) = &self.shared_state {
                     state.increment_batches();
+                    // Aggregate any schema-evolution skips from this batch
+                    // into the global counter exposed via /api/v1/cdc/metrics.
+                    for _ in 0..result.schema_evolution_skipped {
+                        state.increment_schema_evolution_skipped();
+                    }
 
                     // Calculate end-to-end replication lag
                     if self.last_commit_timestamp_us > 0 {
