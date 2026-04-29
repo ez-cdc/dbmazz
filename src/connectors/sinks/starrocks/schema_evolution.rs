@@ -496,18 +496,25 @@ fn parse_server_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Check whether a `PROPERTIES` string from `INFORMATION_SCHEMA.TABLES_CONFIG`
-/// contains `"fast_schema_evolution" = "true"`. Tolerates whitespace and
-/// case variations.
+/// Check whether a `PROPERTIES` string contains
+/// `"fast_schema_evolution" = "true"` (or the JSON equivalent).
+///
+/// StarRocks renders `PROPERTIES` in two different formats depending on the
+/// source:
+///
+/// - `SHOW CREATE TABLE` returns the canonical key-value form:
+///   `"fast_schema_evolution" = "true"` (with spaces and `=`).
+/// - `INFORMATION_SCHEMA.TABLES_CONFIG.PROPERTIES` returns a JSON object:
+///   `"fast_schema_evolution":"true"` (no spaces, `:` separator).
+///
+/// We accept both. Whitespace and case are normalised before matching.
 fn properties_contain_fast_schema_evolution(properties: &str) -> bool {
-    // Lowercase the whole string and look for the canonical key=true pattern.
-    // Tolerates `"fast_schema_evolution"="true"` (no spaces) and the
-    // canonical SHOW CREATE TABLE rendering with spaces.
     let lower = properties.to_ascii_lowercase();
-    // Strip whitespace so `"fast_schema_evolution" = "true"` and
-    // `"fast_schema_evolution"="true"` match the same needle.
     let stripped: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+    // SHOW CREATE TABLE form: "fast_schema_evolution" = "true"
+    // INFORMATION_SCHEMA.TABLES_CONFIG (JSON) form: "fast_schema_evolution":"true"
     stripped.contains("\"fast_schema_evolution\"=\"true\"")
+        || stripped.contains("\"fast_schema_evolution\":\"true\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +645,27 @@ mod tests {
         // Embedded among other properties.
         assert!(properties_contain_fast_schema_evolution(
             r#""bucket_size" = "10", "fast_schema_evolution" = "true", "replication_num" = "3""#
+        ));
+    }
+
+    #[test]
+    fn fast_schema_evolution_property_detection_json_format() {
+        // INFORMATION_SCHEMA.TABLES_CONFIG.PROPERTIES returns JSON, not the
+        // SHOW CREATE TABLE rendering — this is the format actually used in
+        // production. Regression test for a real bug found running against
+        // StarRocks 3.3.22 where `INFORMATION_SCHEMA.TABLES_CONFIG` returned
+        // `"fast_schema_evolution":"true"` (JSON, colon) but the matcher
+        // only accepted the `=` form.
+        assert!(properties_contain_fast_schema_evolution(
+            r#"{"compression":"LZ4","fast_schema_evolution":"true","replication_num":"1"}"#
+        ));
+        // Bare key-value JSON without surrounding object.
+        assert!(properties_contain_fast_schema_evolution(
+            r#""fast_schema_evolution":"true""#
+        ));
+        // JSON form set to false → must NOT detect.
+        assert!(!properties_contain_fast_schema_evolution(
+            r#"{"compression":"LZ4","fast_schema_evolution":"false"}"#
         ));
     }
 
