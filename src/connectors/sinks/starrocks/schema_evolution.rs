@@ -290,6 +290,16 @@ impl StarRocksSchemaEvolution {
     /// for each added column, verify each via `INFORMATION_SCHEMA`, and
     /// refresh the target_columns cache once at the end.
     ///
+    /// # Idempotency
+    ///
+    /// StarRocks does **not** support `IF NOT EXISTS` in `ALTER TABLE ADD COLUMN`
+    /// (parser rejects it: `No viable statement for input 'ADD COLUMN IF'.`).
+    /// Idempotency is therefore implemented as a pre-check against
+    /// `INFORMATION_SCHEMA.COLUMNS`: if the column already exists on the
+    /// target, the ALTER is skipped with an info log. This makes
+    /// `apply_diff` safe to retry after a partial failure or to re-run
+    /// across daemon restarts when the in-memory cache is stale.
+    ///
     /// Caller MUST check `is_schema_evolution_enabled(table)` first; this
     /// function unconditionally applies the diff. Tables without the flag
     /// should be filtered out at the call site.
@@ -309,12 +319,38 @@ impl StarRocksSchemaEvolution {
             validate_sql_identifier(&added.name)
                 .map_err(|e| anyhow!("Invalid column name '{}': {}", added.name, e))?;
 
+            // Pre-check idempotency — StarRocks doesn't accept IF NOT EXISTS
+            // on ADD COLUMN, so we ask INFORMATION_SCHEMA whether the column
+            // is already there before issuing the DDL.
+            let column_exists: Option<i32> = conn
+                .exec_first(
+                    "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    (&self.database, table_name, &added.name),
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "starrocks_sink: failed to pre-check column existence for {}.{}.{}",
+                        self.database, table_name, added.name
+                    )
+                })?;
+
+            if column_exists.is_some() {
+                info!(
+                    table = %table_name,
+                    column = %added.name,
+                    "starrocks_sink: ADD COLUMN skipped — column already exists in target"
+                );
+                continue;
+            }
+
             let starrocks_type = self.type_mapper.to_starrocks_type(&added.data_type);
             // Backtick-quoted column name to handle reserved words; database
             // and table identifiers are validated above so direct interpolation
             // is safe (no user-controlled SQL injection vector).
             let sql = format!(
-                "ALTER TABLE `{}`.`{}` ADD COLUMN IF NOT EXISTS `{}` {}",
+                "ALTER TABLE `{}`.`{}` ADD COLUMN `{}` {}",
                 self.database, table_name, added.name, starrocks_type
             );
             conn.query_drop(&sql).await.with_context(|| {
