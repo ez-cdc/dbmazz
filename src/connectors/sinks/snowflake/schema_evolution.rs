@@ -100,11 +100,8 @@ impl SnowflakeSchemaEvolution {
         source_schemas: &[SourceTableSchema],
     ) -> Result<()> {
         for source in source_schemas {
-            // Snowflake convention: identifiers are usually uppercase. The
-            // setup path creates target tables matching the SOURCE name
-            // (which is typically lowercase from PG); INFORMATION_SCHEMA on
-            // Snowflake then reports the unquoted-name normalised UPPERCASE.
-            // Refresh and use uppercase for the cache key.
+            // Snowflake unquoted identifiers normalise to UPPERCASE in
+            // INFORMATION_SCHEMA, so the cache key is uppercase here.
             let target_name = source.name.to_uppercase();
             self.refresh_target_schema_cache(&target_name).await?;
 
@@ -116,7 +113,6 @@ impl SnowflakeSchemaEvolution {
                 .map(|cols| cols.iter().map(|c| c.name.to_uppercase()).collect())
                 .unwrap_or_default();
 
-            // Build a synthetic SchemaDiff with the missing source columns.
             let mut diff = SchemaDiff::default();
             for (i, src_col) in source.columns.iter().enumerate() {
                 if !target_names.contains(&src_col.name.to_uppercase()) {
@@ -177,23 +173,18 @@ impl SnowflakeSchemaEvolution {
             return Ok(());
         }
 
-        // Open transaction. If we fail mid-batch, ROLLBACK keeps the target
-        // in a known state (no partial column adds).
         self.client
             .execute("BEGIN TRANSACTION")
             .await
             .context("snowflake_sink: failed to BEGIN TRANSACTION for schema evolution")?;
 
-        // Best-effort: collect the result of each ALTER inside this scope so
-        // we always issue a COMMIT or ROLLBACK before returning.
+        // Inner async block so we always issue COMMIT or ROLLBACK before returning.
         let result: Result<()> = async {
             for added in &diff.added {
                 validate_sql_identifier(&added.name)
                     .map_err(|e| anyhow!("Invalid column name '{}': {}", added.name, e))?;
 
                 let sf_type = self.type_mapper.to_snowflake_type(&added.data_type);
-                // Snowflake quoted identifiers preserve case. Database/schema
-                // are validated above; table+column are validated here.
                 let sql = format!(
                     r#"ALTER TABLE "{}"."{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
                     self.database.to_uppercase(),
@@ -225,7 +216,6 @@ impl SnowflakeSchemaEvolution {
                     .execute("COMMIT")
                     .await
                     .context("snowflake_sink: COMMIT failed after schema evolution ALTERs")?;
-                // Refresh the in-memory target column cache for this table.
                 self.refresh_target_schema_cache(&table_name.to_uppercase())
                     .await?;
                 Ok(())
@@ -242,9 +232,7 @@ impl SnowflakeSchemaEvolution {
         }
     }
 
-    /// Reload the column list for `table_name` from `INFORMATION_SCHEMA.COLUMNS`.
     pub async fn refresh_target_schema_cache(&self, table_name: &str) -> Result<()> {
-        // INFORMATION_SCHEMA names are uppercase by Snowflake convention.
         let database_upper = self.database.to_uppercase();
         let schema_upper = self.schema.to_uppercase();
         let table_upper = table_name.to_uppercase();

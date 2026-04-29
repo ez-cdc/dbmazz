@@ -133,7 +133,6 @@ pub fn diff_against_cache(
 
     match cache.get(&qn) {
         None => {
-            // Cold-start: table not in cache at all — every new col is Added.
             for (i, col) in new_cols.iter().enumerate() {
                 diff.added.push(AddedColumn {
                     name: col.name.clone(),
@@ -158,7 +157,6 @@ pub fn diff_against_cache(
             for col in new_cols {
                 match cached_by_name.get(col.name.as_str()) {
                     None => {
-                        // Column is new.
                         diff.added.push(AddedColumn {
                             name: col.name.clone(),
                             data_type: col.data_type.clone(),
@@ -169,10 +167,8 @@ pub fn diff_against_cache(
                         next_ordinal += 1;
                     }
                     Some(cached_col) => {
-                        // Column exists — check for type change.
-                        // DataType comparison covers the generic case.
-                        // OID comparison catches PG-specific precision changes
-                        // when both sides have a real (non-zero) OID.
+                        // OID check catches PG NUMERIC precision changes that
+                        // map to the same coarse DataType::Decimal bucket.
                         let dt_changed = cached_col.data_type != col.data_type;
                         let oid_changed = match (cached_col.pg_type_id, col.pg_type_id) {
                             (cached, Some(new)) if cached != 0 => cached != new,
@@ -195,7 +191,6 @@ pub fn diff_against_cache(
                 }
             }
 
-            // Check for dropped columns (present in cache, absent from new).
             for cached_col in &cached_schema.columns {
                 if !new_by_name.contains_key(cached_col.name.as_str()) {
                     diff.dropped.push(cached_col.name.clone());
@@ -236,7 +231,6 @@ pub fn compute_schema_evolution_plan(
         if let CdcRecord::SchemaChange { table, columns, .. } = record {
             let diff = diff_against_cache(&working, table, columns);
 
-            // Log type changes (no DDL — operator intervention required).
             for tc in &diff.type_changed {
                 error!(
                     table = %table.qualified_name(),
@@ -247,7 +241,6 @@ pub fn compute_schema_evolution_plan(
                 );
             }
 
-            // Log drops (no DDL — target keeps dead column).
             for dropped in &diff.dropped {
                 warn!(
                     table = %table.qualified_name(),
@@ -260,7 +253,6 @@ pub fn compute_schema_evolution_plan(
                 let src_schema = table.schema.clone().unwrap_or_else(|| "public".to_string());
                 let qn = table.qualified_name();
 
-                // Ensure the table exists in `working` before pushing columns.
                 let entry = working.entry(qn).or_insert_with(|| SourceTableSchema {
                     schema: src_schema,
                     name: table.name.clone(),
@@ -268,15 +260,13 @@ pub fn compute_schema_evolution_plan(
                     primary_keys: Vec::new(),
                 });
 
-                // Advance working map so subsequent SchemaChange events for
-                // the same table see these columns and don't re-emit them.
+                // Fold added columns into `working` so a second SchemaChange
+                // for the same table in this batch doesn't re-emit them.
                 for added in &diff.added {
                     entry.columns.push(SourceColumn {
                         name: added.name.clone(),
                         data_type: added.data_type.clone(),
                         nullable: added.nullable,
-                        // Carry the OID through if the source provided one.
-                        // Sinks that don't need OIDs ignore this field.
                         pg_type_id: added.pg_type_id.unwrap_or(0),
                     });
                 }

@@ -326,7 +326,6 @@ impl Sink for SnowflakeSink {
         .await
         .context("Snowflake setup failed")?;
 
-        // Build the schema_evolution helper (now that client is connected).
         let schema_evolution = Arc::new(SnowflakeSchemaEvolution::new(
             client.clone(),
             self.config.database.clone(),
@@ -339,8 +338,8 @@ impl Sink for SnowflakeSink {
             .context("Snowflake reconcile_target_schema failed")?;
         self.schema_evolution = Some(schema_evolution);
 
-        // Seed the shared schema state so the diff in write_batch() has a
-        // real baseline (avoiding cold-start re-emission of every column).
+        // Seed both shared maps so write_batch() and the normalizer have
+        // a baseline; avoids cold-start re-emit on the first SchemaChange.
         {
             let mut state = self.schema_state.write().await;
             for src in source_schemas {
@@ -352,8 +351,6 @@ impl Sink for SnowflakeSink {
             *tables = source_schemas.to_vec();
         }
 
-        // Spawn normalizer (Primary mode only). Pass the shared
-        // `table_schemas` so it sees post-evolution schema on every drain.
         if self.mode == SinkMode::Primary {
             let normalizer_config = normalizer::NormalizerConfig {
                 client_config: self.config.clone(),
@@ -382,15 +379,8 @@ impl Sink for SnowflakeSink {
 
         let _client = self.ensure_client().await?;
 
-        // ─── Phase 1: schema evolution pre-pass ──────────────────────────
-        // Walk the batch's `SchemaChange` events, compute per-table diffs,
-        // apply ALTERs inside transactions. The shared
-        // `compute_schema_evolution_plan` already logs DROP/MODIFY/RENAME
-        // as warn-only; only ADD diffs reach `pending_diffs`.
-        //
-        // Halt-loud on ALTER failure: bubbling the error up causes the
-        // pipeline to set CdcState::Stopped via the existing pipeline
-        // error path.
+        // Phase 1 — schema evolution pre-pass. Bubbling an error here
+        // halts the pipeline loud (CdcState::Stopped via flush_batch).
         let snapshot = self.schema_state.read().await.clone();
         let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
 
@@ -413,8 +403,6 @@ impl Sink for SnowflakeSink {
                     })?;
             }
 
-            // Update the shared cache so the next normalizer drain sees
-            // the post-evolution columns when generating MERGE.
             {
                 let mut state = self.schema_state.write().await;
                 *state = working;
@@ -426,14 +414,13 @@ impl Sink for SnowflakeSink {
                 *tables = state_snapshot.into_values().collect();
             }
         } else {
-            // Even with no pending diffs, the working map may have absorbed
-            // a no-op SchemaChange (e.g. column ordering reshuffle). Update
-            // anyway to keep state coherent.
+            // Update even on no-op SchemaChange (e.g. column reorder) to
+            // keep `working` and the cache coherent.
             let mut state = self.schema_state.write().await;
             *state = working;
         }
 
-        // ─── Phase 2: data writes ────────────────────────────────────────
+        // Phase 2 — data writes.
 
         // Track last position
         let last_position = records.iter().rev().find_map(|r| match r {

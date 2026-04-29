@@ -77,10 +77,6 @@ pub struct StarRocksSchemaEvolution {
 }
 
 impl StarRocksSchemaEvolution {
-    /// Creates a new instance with its own MySQL pool. Independent from
-    /// `StarRocksSetup`'s pool — both can coexist; `mysql_async::Pool` is
-    /// `Clone` and internally Arc-counted, but we keep the construction
-    /// site here for self-containment.
     pub fn new(config: &StarRocksSinkConfig) -> Result<Self> {
         let opts = OptsBuilder::default()
             .ip_or_hostname(config.hostname())
@@ -103,18 +99,13 @@ impl StarRocksSchemaEvolution {
     // ---------------------------------------------------------------------
 
     /// Validate that the connected StarRocks server is at least version 3.2.0.
-    /// Fails loud if older — does not arrancar in degraded mode for old
-    /// versions because `fast_schema_evolution` does not exist there at all.
-    ///
-    /// Parses the result of `SELECT current_version()` (StarRocks) which
-    /// returns a string like `"3.2.4"`, `"3.3.0-rc01"`, or `"3.4.1 8b4e8f9"`.
+    /// Fails loud if older — `fast_schema_evolution` does not exist before 3.2.
     pub async fn validate_server_version(&self) -> Result<()> {
         let mut conn = self.get_conn().await?;
 
-        // StarRocks exposes its version via `current_version()`; MySQL-protocol
-        // layer also accepts `SELECT @@version` but that returns a synthetic
-        // value that includes a MySQL compat prefix on some builds. Prefer
-        // `current_version()` for accuracy.
+        // `@@version` on the MySQL-protocol layer returns a synthetic value
+        // with a MySQL compat prefix on some builds; `current_version()`
+        // returns the actual StarRocks version.
         let raw_version: Option<String> = conn
             .query_first("SELECT current_version()")
             .await
@@ -154,21 +145,14 @@ impl StarRocksSchemaEvolution {
         Ok(())
     }
 
-    /// For each configured table, detect whether `fast_schema_evolution` is
-    /// enabled. Tables with the property are added to the
-    /// `schema_evolution_enabled` set; tables without are logged once with
-    /// an actionable WARN.
-    ///
-    /// This is opportunistic — failure to query `INFORMATION_SCHEMA.TABLES_CONFIG`
-    /// for a single table degrades that table to disabled and continues
-    /// (rather than failing setup entirely). The catalog query itself
-    /// failing for a known reason (permissions, missing table) bubbles up.
+    /// Populate `schema_evolution_enabled` from `INFORMATION_SCHEMA.TABLES_CONFIG`.
+    /// Per-table query failures degrade the table to disabled (loud WARN);
+    /// tables present without the property log a WARN with remediation.
     pub async fn detect_fast_schema_evolution_per_table(&self, tables: &[String]) -> Result<()> {
         let mut conn = self.get_conn().await?;
         let mut enabled = self.schema_evolution_enabled.write().await;
 
         for table_qualified in tables {
-            // Strip any schema prefix; StarRocks uses unqualified table names.
             let table_name = table_qualified
                 .split('.')
                 .next_back()
@@ -203,7 +187,6 @@ impl StarRocksSchemaEvolution {
                      PROPERTIES('fast_schema_evolution'='true') (StarRocks 3.2+; \
                      this property is creation-only and cannot be added via ALTER)."
                 );
-                // Not inserted into `enabled` — skip path activates at runtime.
             }
         }
 
@@ -228,14 +211,11 @@ impl StarRocksSchemaEvolution {
 
         for source in source_schemas {
             if !enabled.contains(&source.name) {
-                // Skip tables without the flag — degraded mode covers them.
                 continue;
             }
 
-            // Refresh the target column cache for this table.
             self.refresh_target_schema_cache(&source.name).await?;
 
-            // Build a name set of the current target columns.
             let target_names: HashSet<String> = self
                 .target_columns
                 .read()
@@ -244,7 +224,6 @@ impl StarRocksSchemaEvolution {
                 .map(|cols| cols.iter().map(|c| c.name.to_lowercase()).collect())
                 .unwrap_or_default();
 
-            // Build a synthetic SchemaDiff with the missing source columns.
             let mut diff = SchemaDiff::default();
             for (i, src_col) in source.columns.iter().enumerate() {
                 if !target_names.contains(&src_col.name.to_lowercase()) {
@@ -252,7 +231,7 @@ impl StarRocksSchemaEvolution {
                         .push(crate::connectors::sinks::schema_evolution::AddedColumn {
                             name: src_col.name.clone(),
                             data_type: src_col.data_type.clone(),
-                            nullable: true, // always nullable on reconcile
+                            nullable: true,
                             #[allow(clippy::cast_possible_wrap)]
                             ordinal: i as i32,
                             pg_type_id: Some(src_col.pg_type_id),
@@ -319,9 +298,8 @@ impl StarRocksSchemaEvolution {
             validate_sql_identifier(&added.name)
                 .map_err(|e| anyhow!("Invalid column name '{}': {}", added.name, e))?;
 
-            // Pre-check idempotency — StarRocks doesn't accept IF NOT EXISTS
-            // on ADD COLUMN, so we ask INFORMATION_SCHEMA whether the column
-            // is already there before issuing the DDL.
+            // Idempotency pre-check: StarRocks rejects IF NOT EXISTS on
+            // ADD COLUMN, so we ask INFORMATION_SCHEMA before issuing DDL.
             let column_exists: Option<i32> = conn
                 .exec_first(
                     "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -346,9 +324,6 @@ impl StarRocksSchemaEvolution {
             }
 
             let starrocks_type = self.type_mapper.to_starrocks_type(&added.data_type);
-            // Backtick-quoted column name to handle reserved words; database
-            // and table identifiers are validated above so direct interpolation
-            // is safe (no user-controlled SQL injection vector).
             let sql = format!(
                 "ALTER TABLE `{}`.`{}` ADD COLUMN `{}` {}",
                 self.database, table_name, added.name, starrocks_type
@@ -360,10 +335,6 @@ impl StarRocksSchemaEvolution {
                 )
             })?;
 
-            // Verify the column actually appeared in INFORMATION_SCHEMA.
-            // With fast_schema_evolution=true this is metadata-only and
-            // returns within milliseconds; the verify is a defensive sanity
-            // check rather than a real poll.
             self.verify_alter_completed(&mut conn, table_name, &added.name)
                 .await?;
 
@@ -381,7 +352,6 @@ impl StarRocksSchemaEvolution {
         Ok(())
     }
 
-    /// Returns `true` if the table is in the schema-evolution-enabled set.
     pub async fn is_schema_evolution_enabled(&self, table_name: &str) -> bool {
         self.schema_evolution_enabled
             .read()
@@ -390,8 +360,6 @@ impl StarRocksSchemaEvolution {
     }
 
     /// Reload the column list for `table_name` from `INFORMATION_SCHEMA.COLUMNS`.
-    /// Stores the result in the in-memory cache. Used both at setup and after
-    /// runtime ALTERs.
     pub async fn refresh_target_schema_cache(&self, table_name: &str) -> Result<()> {
         let mut conn = self.get_conn().await?;
 
@@ -436,9 +404,9 @@ impl StarRocksSchemaEvolution {
             .map_err(|e| anyhow!("starrocks_sink: failed to get MySQL connection: {}", e))
     }
 
-    /// Confirm a column appears in `INFORMATION_SCHEMA.COLUMNS` after an ALTER.
-    /// With fast_schema_evolution this is metadata-only and instant; the
-    /// check is a defensive sanity validation rather than a real poll.
+    /// Defensive post-ALTER sanity check. With `fast_schema_evolution=true`
+    /// the column is visible immediately; without it this would never
+    /// succeed (and we wouldn't have reached this path anyway).
     async fn verify_alter_completed(
         &self,
         conn: &mut Conn,
@@ -474,16 +442,11 @@ impl StarRocksSchemaEvolution {
         Ok(())
     }
 
-    /// Query `INFORMATION_SCHEMA.TABLES_CONFIG` for the table's
-    /// `PROPERTIES` string and check whether `"fast_schema_evolution" = "true"`
-    /// appears in it.
     async fn table_has_fast_schema_evolution(
         &self,
         conn: &mut Conn,
         table_name: &str,
     ) -> Result<bool> {
-        // `INFORMATION_SCHEMA.TABLES_CONFIG` is StarRocks-specific (3.2+).
-        // PROPERTIES is a string column; format includes `"key" = "value"` pairs.
         let row: Option<(String,)> = conn
             .exec_first(
                 "SELECT PROPERTIES FROM INFORMATION_SCHEMA.TABLES_CONFIG
@@ -499,8 +462,6 @@ impl StarRocksSchemaEvolution {
             })?;
 
         let Some((properties,)) = row else {
-            // Table not in TABLES_CONFIG — should not happen if setup
-            // verified existence already, but be defensive.
             warn!(
                 table = %table_name,
                 "starrocks_sink: table not present in INFORMATION_SCHEMA.TABLES_CONFIG"
@@ -517,11 +478,8 @@ impl StarRocksSchemaEvolution {
 // ---------------------------------------------------------------------------
 
 /// Parse a StarRocks version string like `"3.2.4"`, `"3.3.0-rc01"`, or
-/// `"3.4.1 8b4e8f9"` into `(major, minor)`. Returns `None` if the format
-/// is not recognised.
+/// `"3.4.1 8b4e8f9"` into `(major, minor)`. Returns `None` if unparseable.
 fn parse_server_version(s: &str) -> Option<(u32, u32)> {
-    // Take everything before the first whitespace (build-hash suffix) and
-    // the first dash (rc/alpha suffix).
     let head = s
         .split(|c: char| c.is_whitespace() || c == '-')
         .next()?
@@ -532,23 +490,11 @@ fn parse_server_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// Check whether a `PROPERTIES` string contains
-/// `"fast_schema_evolution" = "true"` (or the JSON equivalent).
-///
-/// StarRocks renders `PROPERTIES` in two different formats depending on the
-/// source:
-///
-/// - `SHOW CREATE TABLE` returns the canonical key-value form:
-///   `"fast_schema_evolution" = "true"` (with spaces and `=`).
-/// - `INFORMATION_SCHEMA.TABLES_CONFIG.PROPERTIES` returns a JSON object:
-///   `"fast_schema_evolution":"true"` (no spaces, `:` separator).
-///
-/// We accept both. Whitespace and case are normalised before matching.
+/// Accept both the `SHOW CREATE TABLE` form (`"key" = "value"`) and the
+/// `INFORMATION_SCHEMA.TABLES_CONFIG` JSON form (`"key":"value"`).
 fn properties_contain_fast_schema_evolution(properties: &str) -> bool {
     let lower = properties.to_ascii_lowercase();
     let stripped: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
-    // SHOW CREATE TABLE form: "fast_schema_evolution" = "true"
-    // INFORMATION_SCHEMA.TABLES_CONFIG (JSON) form: "fast_schema_evolution":"true"
     stripped.contains("\"fast_schema_evolution\"=\"true\"")
         || stripped.contains("\"fast_schema_evolution\":\"true\"")
 }

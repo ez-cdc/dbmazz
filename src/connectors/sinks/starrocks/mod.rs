@@ -359,11 +359,6 @@ impl Sink for StarRocksSink {
         let tables: Vec<String> = source_schemas.iter().map(|s| s.name.clone()).collect();
         sr_setup.run(&tables).await?;
 
-        // Schema evolution validation:
-        //   1. Server version must be ≥ 3.2.0 (hard requirement, fail loud).
-        //   2. Detect `fast_schema_evolution=true` per table — tables without
-        //      it operate in degraded mode (loud WARN at runtime, ALTERs skipped).
-        //   3. Reconcile target schema against source for tables with the flag.
         self.schema_evolution.validate_server_version().await?;
         self.schema_evolution
             .detect_fast_schema_evolution_per_table(&tables)
@@ -372,9 +367,9 @@ impl Sink for StarRocksSink {
             .reconcile_target_schema(source_schemas)
             .await?;
 
-        // Seed the schema cache with the introspected source state so the
-        // diff in write_batch() has a real baseline (avoiding cold-start
-        // re-emission of every column on the first SchemaChange).
+        // Seed the cache with the introspected source state so the diff
+        // in write_batch() has a baseline and doesn't cold-start re-emit
+        // every column on the first SchemaChange.
         {
             let mut cache = self.schema_cache.write().await;
             for src in source_schemas {
@@ -391,14 +386,9 @@ impl Sink for StarRocksSink {
             return Ok(SinkResult::default());
         }
 
-        // ─── Phase 1: schema evolution pre-pass ──────────────────────────
-        // Walk the batch's `SchemaChange` events, compute per-table diffs,
-        // apply ALTERs on tables with `fast_schema_evolution=true`, and
-        // emit loud WARN logs for tables without the flag (degraded mode).
-        //
-        // Halt-loud on ALTER failure: bubbling the error up causes the
-        // pipeline to set CdcState::Stopped (existing behaviour in
-        // `pipeline::flush_batch`).
+        // Phase 1 — schema evolution pre-pass. Bubbling an error here
+        // halts the pipeline loud via the existing `pipeline::flush_batch`
+        // path (CdcState::Stopped).
         let snapshot = self.schema_cache.read().await.clone();
         let (working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
         let mut schema_evolution_skipped: u64 = 0;
@@ -420,9 +410,6 @@ impl Sink for StarRocksSink {
                         )
                     })?;
             } else {
-                // Degraded mode: table doesn't have fast_schema_evolution=true.
-                // Emit a per-column WARN; the pipeline adds the count to
-                // `schema_evolution_skipped_total` exposed via /metrics.
                 for added in &diff.added {
                     warn!(
                         table = %table_name,
@@ -437,15 +424,14 @@ impl Sink for StarRocksSink {
             }
         }
 
-        // Update the cache so the next batch sees the post-evolution state
-        // even for tables in degraded mode (avoids re-emitting the same
-        // WARN on every batch for the same column).
+        // Update cache even for degraded-mode tables so the same column
+        // doesn't trigger the WARN on every subsequent batch.
         {
             let mut cache = self.schema_cache.write().await;
             *cache = working;
         }
 
-        // ─── Phase 2: data writes ────────────────────────────────────────
+        // Phase 2 — data writes.
 
         // Cache timestamp for entire batch
         let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
