@@ -98,6 +98,19 @@ That boots the demo stack, starts dbmazz, and drops you into the live dashboard 
 
 The CLI runs on Linux and macOS (`amd64` and `arm64`).
 
+**Or run the daemon directly with Docker.** Skip the CLI and pull the official image — one command, your daemon is up:
+
+```bash
+docker run --rm \
+  -e SOURCE_URL='postgresql://user:pass@source-host:5432/mydb' \
+  -e SINK_URL='http://sink-host:8030' \
+  -e SINK_TYPE=starrocks \
+  -e SINK_DATABASE=analytics \
+  ghcr.io/ez-cdc/dbmazz:latest
+```
+
+Full Docker reference (env vars, healthcheck, persisting state, build-from-source): [docs.ez-cdc.com/self-hosted/docker](https://docs.ez-cdc.com/self-hosted/docker).
+
 > Want to point dbmazz at your own databases, run the verification suite, or dig into the full CLI reference? See [docs.ez-cdc.com/self-hosted/cli](https://docs.ez-cdc.com/self-hosted/cli).
 
 ---
