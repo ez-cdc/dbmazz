@@ -4,6 +4,8 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-04-29
+
 ### Added
 
 - **Schema evolution for the StarRocks and Snowflake sinks.** Source-side
