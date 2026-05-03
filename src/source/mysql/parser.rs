@@ -112,7 +112,10 @@ pub fn process_typed_event(
                 .unwrap_or_else(|| (0..col_types.len()).map(|i| format!("@{}", i)).collect());
 
             /// Helper: extract rows from any rows event that has `rows()`.
-            fn collect_after<R>(re: &R, tme: &TableMapEvent) -> Result<Vec<Vec<BinlogValue<'static>>>>
+            fn collect_after<R>(
+                re: &R,
+                tme: &TableMapEvent,
+            ) -> Result<Vec<Vec<BinlogValue<'static>>>>
             where
                 R: RowsEventLike,
             {
@@ -126,7 +129,13 @@ pub fn process_typed_event(
                 Ok(rows)
             }
 
-            fn collect_before_after<R>(re: &R, tme: &TableMapEvent) -> Result<(Vec<Vec<BinlogValue<'static>>>, Vec<Vec<BinlogValue<'static>>>)>
+            fn collect_before_after<R>(
+                re: &R,
+                tme: &TableMapEvent,
+            ) -> Result<(
+                Vec<Vec<BinlogValue<'static>>>,
+                Vec<Vec<BinlogValue<'static>>>,
+            )>
             where
                 R: RowsEventLike,
             {
@@ -144,7 +153,10 @@ pub fn process_typed_event(
                 Ok((before, after))
             }
 
-            fn collect_before<R>(re: &R, tme: &TableMapEvent) -> Result<Vec<Vec<BinlogValue<'static>>>>
+            fn collect_before<R>(
+                re: &R,
+                tme: &TableMapEvent,
+            ) -> Result<Vec<Vec<BinlogValue<'static>>>>
             where
                 R: RowsEventLike,
             {
@@ -161,27 +173,77 @@ pub fn process_typed_event(
             match rows_data {
                 RowsEventData::WriteRowsEvent(ref re) => {
                     let rows = collect_after(re, tme)?;
-                    Ok(vec![BinlogEvent::Insert { table_id, schema_name: schema, table_name: table, rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Insert {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 RowsEventData::WriteRowsEventV1(ref re) => {
                     let rows = collect_after(re, tme)?;
-                    Ok(vec![BinlogEvent::Insert { table_id, schema_name: schema, table_name: table, rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Insert {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 RowsEventData::UpdateRowsEvent(ref re) => {
                     let (before_rows, after_rows) = collect_before_after(re, tme)?;
-                    Ok(vec![BinlogEvent::Update { table_id, schema_name: schema, table_name: table, before_rows, after_rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Update {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        before_rows,
+                        after_rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 RowsEventData::UpdateRowsEventV1(ref re) => {
                     let (before_rows, after_rows) = collect_before_after(re, tme)?;
-                    Ok(vec![BinlogEvent::Update { table_id, schema_name: schema, table_name: table, before_rows, after_rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Update {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        before_rows,
+                        after_rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 RowsEventData::DeleteRowsEvent(ref re) => {
                     let rows = collect_before(re, tme)?;
-                    Ok(vec![BinlogEvent::Delete { table_id, schema_name: schema, table_name: table, rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Delete {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 RowsEventData::DeleteRowsEventV1(ref re) => {
                     let rows = collect_before(re, tme)?;
-                    Ok(vec![BinlogEvent::Delete { table_id, schema_name: schema, table_name: table, rows, col_names, col_types, position: SourcePosition::GtidSet(format!("{:X}", log_pos)) }])
+                    Ok(vec![BinlogEvent::Delete {
+                        table_id,
+                        schema_name: schema,
+                        table_name: table,
+                        rows,
+                        col_names,
+                        col_types,
+                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                    }])
                 }
                 _ => Ok(vec![]),
             }
@@ -205,9 +267,9 @@ pub fn process_typed_event(
 
         EventData::HeartbeatEvent => Ok(vec![BinlogEvent::Heartbeat]),
 
-        EventData::RotateEvent(_)
-        | EventData::FormatDescriptionEvent(_)
-        | EventData::StopEvent => Ok(vec![]),
+        EventData::RotateEvent(_) | EventData::FormatDescriptionEvent(_) | EventData::StopEvent => {
+            Ok(vec![])
+        }
 
         _ => Ok(vec![]),
     }
@@ -269,7 +331,22 @@ fn format_gtid(event: &GtidEvent) -> String {
     format!(
         "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-\
          {:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}:{}",
-        sid[0], sid[1], sid[2], sid[3], sid[4], sid[5], sid[6], sid[7], sid[8], sid[9],
-        sid[10], sid[11], sid[12], sid[13], sid[14], sid[15], gno
+        sid[0],
+        sid[1],
+        sid[2],
+        sid[3],
+        sid[4],
+        sid[5],
+        sid[6],
+        sid[7],
+        sid[8],
+        sid[9],
+        sid[10],
+        sid[11],
+        sid[12],
+        sid[13],
+        sid[14],
+        sid[15],
+        gno
     )
 }

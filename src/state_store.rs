@@ -16,17 +16,9 @@ use tracing::info;
 
 /// Backend for LSN / checkpoint persistence.
 ///
-/// Detects the database scheme from the URL and uses the appropriate
-/// backend:
-///
-/// - `postgres://` / `postgresql://` → PostgreSQL (tokio_postgres) — stores
-///   LSN as a `BIGINT`. This is the original behavior.
-///
-/// - `mysql://` → MySQL (mysql_async) — stores the numeric position as
-///   a `TEXT` column for forward compatibility with GTID-based
-///   checkpointing. The MySQL pipeline does not currently call
-///   `save_checkpoint` (GTID tracking lives in the replication stream),
-///   but the table is created for future use.
+/// Detects the database scheme from the URL:
+/// - `postgres://` → PostgreSQL with `lsn BIGINT`
+/// - `mysql://` → MySQL with `position TEXT` (for future GTID support)
 #[derive(Clone)]
 enum StoreBackend {
     Postgres {
@@ -44,11 +36,7 @@ pub struct StateStore {
 }
 
 impl StateStore {
-    /// Create a new state store backed by the database at `database_url`.
-    ///
-    /// The URL scheme selects the backend:
-    /// - `postgres://` or `postgresql://` → PostgreSQL (original path)
-    /// - `mysql://` → MySQL (requires `mysql-source` feature)
+    /// Create a new state store. URL scheme selects the backend (`postgres://` or `mysql://`).
     pub async fn new(database_url: &str) -> Result<Self> {
         if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
             Self::new_postgres(database_url).await
@@ -108,7 +96,7 @@ impl StateStore {
         })
     }
 
-    /// MySQL backend.
+    /// MySQL backend — creates a `dbmazz_checkpoints` table with a `position TEXT` column.
     #[cfg(feature = "mysql-source")]
     async fn new_mysql(database_url: &str) -> Result<Self> {
         let opts = build_mysql_opts(database_url)
@@ -119,10 +107,6 @@ impl StateStore {
             .context("StateStore (MySQL): failed to connect")?;
         info!("StateStore (MySQL): connected");
 
-        // Create checkpoints table if it doesn't exist.
-        // The `position` column stores the checkpoint position as TEXT —
-        // for PostgreSQL compat this holds a decimal u64 string; for
-        // future MySQL GTID support it can hold a GTID set string.
         conn.query_drop(
             "CREATE TABLE IF NOT EXISTS dbmazz_checkpoints (
                 slot_name VARCHAR(255) PRIMARY KEY,
@@ -143,11 +127,6 @@ impl StateStore {
     }
 
     /// Persist a checkpoint position for the given slot.
-    ///
-    /// - PostgreSQL: stores LSN as `BIGINT` (existing behavior).
-    /// - MySQL: stores the number as a decimal string in `position` TEXT
-    ///   column (for forward compatibility — currently unused by the
-    ///   MySQL pipeline, which uses GTID-based tracking).
     pub async fn save_checkpoint(&self, slot: &str, lsn: u64) -> Result<()> {
         match &self.backend {
             StoreBackend::Postgres { client } => {
@@ -179,13 +158,7 @@ impl StateStore {
         Ok(())
     }
 
-    /// Load the last checkpoint position for the given slot.
-    ///
-    /// - PostgreSQL: returns LSN as `u64`, or `None` if no checkpoint exists.
-    /// - MySQL: returns the stored value parsed as `u64`, or `None`.
-    ///   Currently the MySQL pipeline does not use this — GTID tracking
-    ///   lives in the replication stream — but the table is populated for
-    ///   forward compatibility.
+    /// Load the last checkpoint position for the given slot, or `None` if none exists.
     pub async fn load_checkpoint(&self, slot: &str) -> Result<Option<u64>> {
         match &self.backend {
             StoreBackend::Postgres { client } => {
@@ -211,20 +184,11 @@ impl StateStore {
                     .context("StateStore (MySQL): failed to load checkpoint")?;
 
                 match row {
-                    Some((pos,)) => {
-                        // Try to parse the stored string as u64.
-                        // If parsing fails, return None (no valid checkpoint).
-                        match pos.parse::<u64>() {
-                            Ok(lsn) => Ok(Some(lsn)),
-                            Err(_) => {
-                                // The position might be a GTID string or
-                                // otherwise not a valid u64. Return None
-                                // since the LSN-based interface can't
-                                // represent it.
-                                Ok(None)
-                            }
-                        }
-                    }
+                    Some((pos,)) => match pos.parse::<u64>() {
+                        Ok(lsn) => Ok(Some(lsn)),
+                        // Position might be a GTID string — LSN interface can't represent it.
+                        Err(_) => Ok(None),
+                    },
                     None => Ok(None),
                 }
             }
@@ -232,13 +196,7 @@ impl StateStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// MySQL connection helper
-// ---------------------------------------------------------------------------
-
-/// Build `mysql_async::Opts` from a MySQL URL.
-///
-/// Expected format: `mysql://user:password@host:port/database`
+/// Build `mysql_async::Opts` from a `mysql://` URL.
 #[cfg(feature = "mysql-source")]
 fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
     let parsed = url::Url::parse(url).context("StateStore (MySQL): failed to parse URL")?;

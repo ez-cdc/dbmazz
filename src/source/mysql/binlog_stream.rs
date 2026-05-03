@@ -48,14 +48,12 @@ impl MysqlBinlogStream {
 
     /// Get raw column type codes for a table_id from the internal TME cache.
     pub fn get_column_types(&self, table_id: u64) -> Option<Vec<u8>> {
-        self.inner
-            .get_tme(table_id)
-            .map(|tme| {
-                (0..tme.columns_count() as usize)
-                    .filter_map(|i| tme.get_raw_column_type(i).ok().flatten())
-                    .map(|ct| ct as u8)
-                    .collect()
-            })
+        self.inner.get_tme(table_id).map(|tme| {
+            (0..tme.columns_count() as usize)
+                .filter_map(|i| tme.get_raw_column_type(i).ok().flatten())
+                .map(|ct| ct as u8)
+                .collect()
+        })
     }
 }
 

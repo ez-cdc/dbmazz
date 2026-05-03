@@ -114,12 +114,10 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
 fn map_binlog_value(bv: &BinlogValue<'static>) -> Value {
     match bv {
         BinlogValue::Value(val) => map_mysql_value(val),
-        BinlogValue::Jsonb(val) => {
-            match serde_json::Value::try_from(val.clone()) {
-                Ok(json) => Value::Json(json.to_string()),
-                Err(_) => Value::Json("{}".to_string()),
-            }
-        }
+        BinlogValue::Jsonb(val) => match serde_json::Value::try_from(val.clone()) {
+            Ok(json) => Value::Json(json.to_string()),
+            Err(_) => Value::Json("{}".to_string()),
+        },
         BinlogValue::JsonDiff(_) => Value::Json("{}".to_string()),
     }
 }
@@ -132,15 +130,14 @@ fn map_mysql_value(val: &MysqlValue) -> Value {
         MysqlValue::UInt(u) => Value::Int64(*u as i64),
         MysqlValue::Float(f) => Value::Float64(*f as f64),
         MysqlValue::Double(d) => Value::Float64(*d),
-        MysqlValue::Bytes(b) => {
-            match String::from_utf8(b.clone()) {
-                Ok(s) => Value::String(s),
-                Err(_) => Value::Bytes(b.clone()),
-            }
-        }
-        MysqlValue::Date(y, m, d, hh, mm, ss, _us) => {
-            Value::String(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss))
-        }
+        MysqlValue::Bytes(b) => match String::from_utf8(b.clone()) {
+            Ok(s) => Value::String(s),
+            Err(_) => Value::Bytes(b.clone()),
+        },
+        MysqlValue::Date(y, m, d, hh, mm, ss, _us) => Value::String(format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            y, m, d, hh, mm, ss
+        )),
         // MySQL TIMESTAMP is stored as Int(i64) in binlog (epoch seconds)
         // MySQL TIME is stored as Bytes or Int
         MysqlValue::Time(is_neg, days, h, m, s, _us) => {

@@ -68,10 +68,7 @@ pub async fn write_batch_to_raw(
             };
             let sql = format!(
                 r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
-                target_schema,
-                table.name,
-                added.name,
-                col_type
+                target_schema, table.name, added.name, col_type
             );
             tx.batch_execute(&sql).await.with_context(|| {
                 format!(

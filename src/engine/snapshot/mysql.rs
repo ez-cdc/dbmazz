@@ -3,29 +3,10 @@
 
 //! MySQL snapshot using the Flink CDC Offset Signal Algorithm.
 //!
-//! # Algorithm
-//!
 //! For each chunk `[start_pk, end_pk)` of a MySQL table:
-//!
-//! 1. **LOW**: capture GTID via connection
-//! 2. `SELECT * FROM table WHERE pk >= start AND pk < end` (buffer rows in memory)
-//! 3. **HIGH**: capture GTID via connection (same connection for consistency)
-//! 4. Scan binlog events with GTID in `(LOW, HIGH]`, filter by this chunk's PK range
-//!    (requires binlog stream from T3 — placeholder in this skeleton)
-//! 5. UPSERT binlog events into buffer (binlog values overwrite snapshot values — T3)
-//! 6. Emit buffer as `CdcRecord::Insert` to the sink
-//! 7. Mark chunk COMPLETE in `dbmazz_snapshot_state`
-//!
-//! # Current State
-//!
-//! This is a working skeleton that:
-//! - Connects to MySQL and introspects schemas
-//! - Chunks tables by integer PK ranges
-//! - Captures LOW/HIGH GTID pairs around each SELECT
-//! - Emits snapshot rows as `CdcRecord::Insert` via the sink
-//!
-//! Full Offset Signal with binlog upsert (steps 4–5) requires integration
-//! with the binlog stream from T3.
+//! LOW GTID → SELECT → HIGH GTID → emit rows → mark chunk COMPLETE.
+//! Full Offset Signal with binlog upsert (steps 4–5 of the algorithm)
+//! requires binlog stream integration from T3.
 //!
 //! All code behind `#[cfg(feature = "mysql-source")]`.
 
@@ -45,10 +26,6 @@ use crate::core::record::DataType;
 use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::traits::{Sink, SourceTableSchema};
 use crate::source::mysql::schema::introspect_mysql_schemas;
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Run the full MySQL snapshot for all configured tables.
 ///
@@ -75,7 +52,6 @@ pub async fn run_mysql_snapshot(
     // 1. Connect to MySQL
     let pool = build_mysql_pool(&config.source.url, config.source.mysql())
         .context("MySQL snapshot: failed to create connection pool")?;
-    // Verify connection
     {
         let mut conn = pool
             .get_conn()
@@ -89,7 +65,7 @@ pub async fn run_mysql_snapshot(
         info!("MySQL snapshot: connected to MySQL {}", version_str);
     }
 
-    // 2. Ensure chunk state table exists in MySQL
+    // 2. Ensure chunk state table exists
     ensure_mysql_state_table(&pool)
         .await
         .context("MySQL snapshot: failed to create state table")?;
@@ -111,7 +87,6 @@ pub async fn run_mysql_snapshot(
     let sink_pool = Arc::new(Mutex::new(sink_pool));
 
     // 5. Pre-compute table metadata
-    //    Must happen before workers start since it requires the connection.
     let database_name =
         extract_database_name(&config.source.url).unwrap_or_else(|| "dbmazz".to_string());
     let mut table_meta: HashMap<String, TableMeta> = HashMap::new();
@@ -120,7 +95,14 @@ pub async fn run_mysql_snapshot(
         let pk_col = find_mysql_integer_pk(schema);
         let col_names: Vec<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
         let col_types: Vec<DataType> = schema.columns.iter().map(|c| c.data_type.clone()).collect();
-        table_meta.insert(qualified.clone(), TableMeta { pk_col, col_names, col_types });
+        table_meta.insert(
+            qualified.clone(),
+            TableMeta {
+                pk_col,
+                col_names,
+                col_types,
+            },
+        );
     }
     let table_meta = Arc::new(table_meta);
 
@@ -128,27 +110,21 @@ pub async fn run_mysql_snapshot(
     shared_state.clear_table_progress().await;
 
     // 7. Chunk all tables and stream to workers
-    let slot_name = database_name; // use database name as state-table key
+    let slot_name = database_name;
     let _tables = config.source.tables.clone();
     let chunk_size = config.snapshot_chunk_size;
 
-    // Build fully-qualified table list for chunking map
     let qualified_tables: Vec<String> = schemas
         .iter()
         .map(|s| format!("{}.{}", s.schema, s.name))
         .collect();
 
     let semaphore = Arc::new(Semaphore::new(n_workers));
-
-    // Channel: producer sends (qualified_table_name, MysqlChunk) → workers consume
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(String, MysqlChunk)>(n_workers * 2);
 
-    // Clone values for the producer closure so that `slot_name` and `table_meta`
-    // remain available for the consumer loop below.
     let producer_slot_name = slot_name.clone();
     let producer_table_meta = Arc::clone(&table_meta);
 
-    // Producer: chunk all tables and send over channel
     let producer_pool = pool.clone();
     let producer_shared = Arc::clone(&shared_state);
     let producer_tables = qualified_tables.clone();
@@ -209,7 +185,7 @@ pub async fn run_mysql_snapshot(
                     .unwrap_or_else(|e| warn!("MySQL snapshot: upsert_chunk failed: {}", e));
             }
 
-            // Stream pending chunks to workers
+            // Send pending chunks to workers
             for chunk in chunks {
                 if complete_ids.contains(&chunk.partition_id) {
                     continue;
@@ -222,7 +198,6 @@ pub async fn run_mysql_snapshot(
         }
     });
 
-    // Consumer: spawn worker tasks as chunks arrive
     let mut join_set = JoinSet::new();
     while let Some((qualified, chunk)) = rx.recv().await {
         let pool = pool.clone();
@@ -253,13 +228,11 @@ pub async fn run_mysql_snapshot(
                 anyhow::anyhow!("MySQL snapshot: no metadata for table {}", qualified)
             })?;
 
-            // Acquire sink from pool
             let mut sink = match sink_pool.lock().await.pop() {
                 Some(s) => s,
                 None => return Err(anyhow::anyhow!("MySQL snapshot: sink pool exhausted")),
             };
 
-            // Get a dedicated MySQL connection for this chunk
             let mut conn = pool
                 .get_conn()
                 .await
@@ -276,19 +249,15 @@ pub async fn run_mysql_snapshot(
             )
             .await;
 
-            // Return sink to pool
             sink_pool.lock().await.push(sink);
-
             result
         });
     }
 
-    // Wait for producer
     if let Err(e) = producer.await {
         error!("MySQL snapshot: producer task panicked: {}", e);
     }
 
-    // Wait for all workers
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(())) => {}
@@ -350,9 +319,7 @@ pub async fn run_mysql_snapshot(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Data structures
-// ---------------------------------------------------------------------------
 
 /// A single PK-range chunk for a MySQL table.
 #[derive(Debug, Clone)]
@@ -364,17 +331,12 @@ struct MysqlChunk {
 
 /// Pre-computed metadata for a snapshot table.
 struct TableMeta {
-    /// Name of the integer primary key column.
     pk_col: String,
-    /// Names of all columns in ordinal order.
     col_names: Vec<String>,
-    /// Data types of all columns in ordinal order.
     col_types: Vec<DataType>,
 }
 
-// ---------------------------------------------------------------------------
 // Chunking
-// ---------------------------------------------------------------------------
 
 /// Find the first integer primary key column from a `SourceTableSchema`.
 ///
@@ -390,19 +352,14 @@ fn find_mysql_integer_pk(schema: &SourceTableSchema) -> String {
     String::new()
 }
 
-/// Check whether a `DataType` is an integer type suitable for PK-range chunking.
+/// Returns `true` if the DataType is an integer suitable for PK-range chunking.
 fn is_integer_data_type(dt: &DataType) -> bool {
     matches!(dt, DataType::Int16 | DataType::Int32 | DataType::Int64)
 }
 
-/// Divide a MySQL table into PK-range chunks.
+/// Divide a MySQL table into PK-range chunks using `MIN(pk)` / `MAX(pk)`.
 ///
-/// Queries `MIN(pk)` and `MAX(pk)` to determine the value range, then splits
-/// it into approximately `chunk_size`-sized range windows.
-///
-/// Requires a live connection to MySQL. Returns an empty vec if:
-/// - The table is empty (MIN/MAX are NULL)
-/// - The PK range is degenerate
+/// Returns an empty vec if the table is empty or the PK range is degenerate.
 async fn chunk_mysql_table(
     pool: &mysql_async::Pool,
     qualified_table: &str,
@@ -434,7 +391,6 @@ async fn chunk_mysql_table(
         .context("MySQL snapshot: failed to query MIN/MAX PK")?
         .ok_or_else(|| anyhow::anyhow!("MySQL snapshot: MIN/MAX query returned no rows"))?;
 
-    // Use as_ref to safely check for NULL (row.get panics on NULL for non-Option types)
     let min_pk: Option<i64> = match row.as_ref(0) {
         Some(&mysql_async::Value::Int(i)) => Some(i),
         Some(&mysql_async::Value::UInt(u)) => Some(u as i64),
@@ -521,13 +477,7 @@ fn split_mysql_table_name(name: &str) -> (String, String) {
 // Chunk processing (Offset Signal Algorithm)
 // ---------------------------------------------------------------------------
 
-/// Process a single MySQL snapshot chunk using the Offset Signal Algorithm.
-///
-/// 1. Capture LOW GTID
-/// 2. SELECT all rows in the PK range
-/// 3. Capture HIGH GTID
-/// 4. Convert rows to `CdcRecord::Insert` and emit via sink
-/// 5. Mark chunk COMPLETE in the state table
+/// Process a single MySQL snapshot chunk: LOW GTID → SELECT → HIGH GTID → emit → mark complete.
 async fn process_mysql_chunk(
     conn: &mut mysql_async::Conn,
     sink: &mut dyn Sink,
@@ -550,9 +500,7 @@ async fn process_mysql_chunk(
     );
     let quoted_pk = quote_mysql_ident(&meta.pk_col);
 
-    // -----------------------------------------------------------------------
     // Step 1: LOW GTID — capture before SELECT
-    // -----------------------------------------------------------------------
     let low_gtid: Option<String> = conn
         .query_first("SELECT @@global.gtid_executed")
         .await
@@ -560,9 +508,7 @@ async fn process_mysql_chunk(
     let low_gtid = low_gtid.unwrap_or_default();
     let low_truncated = truncate_gtid(&low_gtid);
 
-    // -----------------------------------------------------------------------
-    // Step 2: SELECT rows for this chunk (native column types, no CAST)
-    // -----------------------------------------------------------------------
+    // Step 2: SELECT rows for this chunk
     let cols_sql: String = meta
         .col_names
         .iter()
@@ -589,9 +535,7 @@ async fn process_mysql_chunk(
 
     let row_count = rows.len() as i64;
 
-    // -----------------------------------------------------------------------
     // Step 3: HIGH GTID — capture after SELECT
-    // -----------------------------------------------------------------------
     let high_gtid: Option<String> = conn
         .query_first("SELECT @@global.gtid_executed")
         .await
@@ -604,22 +548,10 @@ async fn process_mysql_chunk(
         qualified_table, chunk.partition_id, row_count, low_truncated, high_truncated,
     );
 
-    // -----------------------------------------------------------------------
-    // Step 4: (Placeholder) Binlog upsert would go here.
-    //   In T3, events between (LOW, HIGH] would be replayed from the binlog
-    //   stream, filtered by this chunk's PK range, and UPSERTED into the
-    //   buffer. Without T3, we emit the raw SELECT data.
-    // -----------------------------------------------------------------------
-    // For future T3 integration:
-    // - Open a second binlog connection
-    // - Request binlog events from LOW to HIGH
-    // - Filter events by PK range [start_pk, end_pk)
-    // - Overwrite buffer entries with binlog values
-    // - Then emit the reconciled buffer
+    // Step 4: (Placeholder) Binlog upsert would replay events between (LOW, HIGH]
+    //         filtered by this chunk's PK range, then the reconciled buffer is emitted.
 
-    // -----------------------------------------------------------------------
-    // Step 5: Emit buffer as CdcRecord::Insert
-    // -----------------------------------------------------------------------
+    // Step 5: Convert rows to CdcRecord::Insert and emit via sink
     if !rows.is_empty() {
         let table_ref = TableRef::new(Some(schema), table);
         let position = SourcePosition::GtidSet(high_gtid.clone());
@@ -659,9 +591,7 @@ async fn process_mysql_chunk(
         );
     }
 
-    // -----------------------------------------------------------------------
     // Step 6: Mark chunk COMPLETE in state table
-    // -----------------------------------------------------------------------
     mark_mysql_chunk_complete(
         conn,
         slot_name,
@@ -673,9 +603,7 @@ async fn process_mysql_chunk(
     .await
     .context("MySQL snapshot: failed to mark chunk complete")?;
 
-    // -----------------------------------------------------------------------
     // Update progress counters
-    // -----------------------------------------------------------------------
     let (total, done) = mysql_chunk_counts_for_table(conn, slot_name, qualified_table)
         .await
         .unwrap_or((0, 0));
@@ -695,8 +623,7 @@ async fn process_mysql_chunk(
     Ok(())
 }
 
-/// Read a column value from a MySQL Row using the correct Rust type for the DataType.
-/// Uses `as_ref` to safely handle NULL values without panicking.
+/// Read a column value from a MySQL Row. Uses `as_ref` to safely handle NULLs.
 fn read_mysql_value(row: &mysql_async::Row, idx: usize, dt: &DataType) -> Value {
     let raw = match row.as_ref(idx) {
         Some(val) => val,
@@ -725,9 +652,10 @@ fn read_mysql_value(row: &mysql_async::Row, idx: usize, dt: &DataType) -> Value 
                 }
             }
         }
-        mysql_async::Value::Date(y, m, d, hh, mm, ss, _) => {
-            Value::String(format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, hh, mm, ss))
-        }
+        mysql_async::Value::Date(y, m, d, hh, mm, ss, _) => Value::String(format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            y, m, d, hh, mm, ss
+        )),
         mysql_async::Value::Time(is_neg, days, h, m, s, _) => {
             if *is_neg {
                 Value::String(format!("-{} {:02}:{:02}:{:02}", days, h, m, s))
@@ -747,9 +675,7 @@ fn truncate_gtid(gtid: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
-// MySQL state table management
-// ---------------------------------------------------------------------------
+// State table management
 
 /// Create the `dbmazz_snapshot_state` table in MySQL if it doesn't exist.
 async fn ensure_mysql_state_table(pool: &mysql_async::Pool) -> Result<()> {
@@ -951,11 +877,9 @@ async fn mysql_rows_synced_for_table(
     Ok(row.map(|r| r.0).unwrap_or(0))
 }
 
-// ---------------------------------------------------------------------------
 // Connection helpers
-// ---------------------------------------------------------------------------
 
-/// Build a `mysql_async::Pool` from the source URL and MySQL config.
+/// Build a `mysql_async::Pool` from the source URL.
 fn build_mysql_pool(
     url: &str,
     _mysql_cfg: &crate::config::MysqlSourceConfig,
@@ -964,9 +888,7 @@ fn build_mysql_pool(
     Ok(mysql_async::Pool::new(opts))
 }
 
-/// Build `mysql_async::Opts` from a MySQL URL.
-///
-/// Expected format: `mysql://user:password@host:port/database`
+/// Build `mysql_async::Opts` from a `mysql://` URL.
 fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
     let parsed = url::Url::parse(url).context("MySQL snapshot: failed to parse MySQL URL")?;
 
@@ -1060,7 +982,7 @@ mod tests {
         }
     }
 
-    // ── is_integer_data_type ──────────────────────────────────────────
+    // is_integer_data_type tests
 
     #[test]
     fn test_is_integer_data_type_returns_true_for_integers() {
@@ -1082,7 +1004,7 @@ mod tests {
         assert!(!is_integer_data_type(&DataType::Json));
     }
 
-    // ── find_mysql_integer_pk ─────────────────────────────────────────
+    // find_mysql_integer_pk tests
 
     #[test]
     fn test_find_mysql_integer_pk_bigint() {
@@ -1140,7 +1062,7 @@ mod tests {
         assert_eq!(pk, "");
     }
 
-    // ── split_mysql_table_name ───────────────────────────────────────
+    // split_mysql_table_name tests
 
     #[test]
     fn test_split_mysql_table_name_qualified() {
@@ -1163,7 +1085,7 @@ mod tests {
         assert_eq!(table, "b.c"); // splitn(2, '.') delimited
     }
 
-    // ── quote_mysql_ident ─────────────────────────────────────────────
+    // quote_mysql_ident tests
 
     #[test]
     fn test_quote_mysql_ident_simple() {
@@ -1181,12 +1103,11 @@ mod tests {
         assert_eq!(quote_mysql_ident("table`name"), "`table``name`");
     }
 
-    // ── build_mysql_opts ──────────────────────────────────────────────
+    // build_mysql_opts tests
 
     #[test]
     fn test_build_mysql_opts_full_url() {
         let opts = build_mysql_opts("mysql://user:pass@host:3307/mydb").unwrap();
-        // Verify it produces valid Opts (we can't inspect fields, but no error means it parsed)
         let _ = opts;
     }
 
@@ -1212,7 +1133,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── extract_database_name ─────────────────────────────────────────
+    // extract_database_name tests
 
     #[test]
     fn test_extract_database_name_normal() {
@@ -1240,7 +1161,7 @@ mod tests {
         assert_eq!(extract_database_name(""), None);
     }
 
-    // ── truncate_gtid ─────────────────────────────────────────────────
+    // truncate_gtid tests
 
     #[test]
     fn test_truncate_gtid_short() {
@@ -1251,11 +1172,11 @@ mod tests {
     fn test_truncate_gtid_long() {
         let long = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:1-100";
         let truncated = truncate_gtid(long);
-        assert!(truncated.len() <= 33); // 30 chars + "..."
+        assert!(truncated.len() <= 33);
         assert!(truncated.ends_with("..."));
     }
 
-    // ── chunk logic ───────────────────────────────────────────────────
+    // Chunk logic tests
 
     #[test]
     fn test_extract_column_names() {
@@ -1278,7 +1199,7 @@ mod tests {
         assert_eq!(chunk.partition_id, 0);
     }
 
-    // ── MysqlChunk construction ──────────────────────────────────────
+    // MysqlChunk construction tests
 
     #[test]
     fn test_mysql_chunk_construction() {
@@ -1299,11 +1220,10 @@ mod tests {
         assert!(c2.start_pk < c2.end_pk);
     }
 
-    // ── is_integer_data_type exhaustive ──────────────────────────────
+    // is_integer_data_type exhaustive tests
 
     #[test]
     fn test_is_integer_data_type_all_variants() {
-        // All DataType variants
         assert!(is_integer_data_type(&DataType::Int16));
         assert!(is_integer_data_type(&DataType::Int32));
         assert!(is_integer_data_type(&DataType::Int64));

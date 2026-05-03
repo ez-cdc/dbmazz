@@ -18,28 +18,21 @@ use crate::pipeline::PipelineEvent;
 use crate::source::mysql::converter::convert_to_cdc_records;
 use crate::source::mysql::parser::{process_typed_event, BinlogEvent};
 
-/// MySQL replication loop using typed binlog events.
-///
-/// Reads from a `mysql_async::BinlogStream` and pushes `PipelineEvent`s
-/// through the pipeline sender. Runs until shutdown, stream end, or error.
+/// MySQL replication loop — reads binlog events and pushes to pipeline.
 pub struct MysqlReplicationLoop {
     binlog_stream: mysql_async::BinlogStream,
 }
 
 impl MysqlReplicationLoop {
-    /// Create a new MySQL replication loop from a `BinlogStream`.
+    /// Create a new MySQL replication loop.
     pub fn new(binlog_stream: mysql_async::BinlogStream) -> Self {
         Self { binlog_stream }
     }
 
-    /// Check whether a `BinlogEvent` targets a user-tracked table.
+    /// Returns `true` if the event targets a tracked table.
     ///
-    /// Unfiltered event types (`Begin`, `Commit`, `Heartbeat`, `TableMap`)
-    /// always pass and are forwarded unconditionally.
-    fn is_tracked_table_event(
-        event: &BinlogEvent,
-        tracked: &HashSet<(String, String)>,
-    ) -> bool {
+    /// Unfiltered types (`Begin`, `Commit`, `Heartbeat`, `TableMap`) always pass.
+    fn is_tracked_table_event(event: &BinlogEvent, tracked: &HashSet<(String, String)>) -> bool {
         match event {
             BinlogEvent::Insert {
                 schema_name,
@@ -57,7 +50,6 @@ impl MysqlReplicationLoop {
                 ..
             } => tracked.contains(&(schema_name.clone(), table_name.clone())),
             BinlogEvent::Ddl { schema_name, .. } => {
-                // Allow DDL events for tracked schemas
                 let has_any = tracked.iter().any(|(s, _)| s == schema_name);
                 if !has_any {
                     debug!(
@@ -67,7 +59,6 @@ impl MysqlReplicationLoop {
                 }
                 has_any
             }
-            // Begin, Commit, Heartbeat, TableMap — always pass
             _ => true,
         }
     }
@@ -90,10 +81,8 @@ impl ReplicationLoop for MysqlReplicationLoop {
         let mut snapshot_trigger_rx = shared_state.subscribe_snapshot_trigger();
         let mut iteration = 0u64;
 
-        // TME cache: map table_id → TableMapEvent (populated from typed events)
+        // Table map event cache and column name map from schema introspection
         let mut tme_cache: HashMap<u64, TableMapEvent<'static>> = HashMap::new();
-
-        // Column name map from schema introspection (for reliable names)
         let mut col_names_map: HashMap<(String, String), Vec<String>> = HashMap::new();
         let mut tracked_tables: HashSet<(String, String)> = HashSet::new();
         for s in source_schemas.iter() {
@@ -141,7 +130,7 @@ impl ReplicationLoop for MysqlReplicationLoop {
 
                 Ok(()) = snapshot_trigger_rx.changed() => {
                     if *snapshot_trigger_rx.borrow() && !shared_state.is_snapshot_active() {
-                        info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");
+                        info!("On-demand snapshot triggered");
                         let _ = shared_state.snapshot_trigger.send(false);
                         let snap_config = config.clone();
                         let snap_state = shared_state.clone();

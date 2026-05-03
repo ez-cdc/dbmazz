@@ -1,9 +1,9 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
+pub mod replication;
 mod setup;
 pub mod snapshot;
-pub mod replication;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -197,7 +197,9 @@ impl CdcEngine {
                     #[cfg(feature = "mysql-source")]
                     self.spawn_mysql_snapshot_worker(self.config.initial_snapshot_only);
                     #[cfg(not(feature = "mysql-source"))]
-                    tracing::warn!("MySQL snapshot requested but mysql-source feature is not enabled");
+                    tracing::warn!(
+                        "MySQL snapshot requested but mysql-source feature is not enabled"
+                    );
                 }
             }
         }
@@ -437,7 +439,6 @@ impl CdcEngine {
 
         (tx, feedback_rx)
     }
-
 }
 
 /// Flow control for replication loops.
@@ -446,4 +447,3 @@ pub enum ControlFlow {
     Continue,
     Break,
 }
-

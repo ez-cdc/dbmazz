@@ -126,27 +126,17 @@ impl MysqlConnectionConfig {
 
 /// MySQL source for Change Data Capture.
 ///
-/// Manages two connections to the MySQL server:
-/// - `query_conn`: used for metadata queries (schemas, GTID state, etc.)
-/// - `binlog_conn`: dedicated connection for reading the binary log
-///
-/// Connections are opened during `setup()` and closed in `cleanup()`.
-/// The binlog streaming itself is planned for T3 — this stub provides
-/// the validation, setup, and schema introspection plumbing.
+/// Manages two MySQL connections: `query_conn` for metadata queries and
+/// `binlog_conn` for binary log reading.
 pub struct MysqlSource {
     config: MysqlConnectionConfig,
     server_id: u32,
     use_gtid: bool,
-    /// Connection for metadata queries (schemas, grants, GTID state).
-    /// Wrapped in `Mutex` because `mysql_async::Conn` is `Send` but not `Sync`,
-    /// and the `Source` trait requires `Send + Sync`.
+    /// Connection for metadata queries, wrapped in `Mutex` because `mysql_async::Conn` is not `Sync`.
     query_conn: Option<Mutex<mysql_async::Conn>>,
-    /// Dedicated connection for binlog streaming (used in T3).
+    /// Dedicated connection for binlog streaming.
     binlog_conn: Option<Mutex<mysql_async::Conn>>,
     /// Cached table schemas keyed by fully-qualified table name (`db.table`).
-    /// We use a plain HashMap instead of the pipeline's `SchemaCache` because
-    /// that cache is tightly coupled to PostgreSQL pgoutput types
-    /// (`crate::source::parser::Column`).
     schema_cache: Arc<Mutex<HashMap<String, SourceTableSchema>>>,
     /// The last known GTID set, used for checkpointing.
     current_gtid: Option<String>,
@@ -203,14 +193,8 @@ impl Source for MysqlSource {
 
     /// Setup: connect to MySQL, verify prerequisites, and introspect schemas.
     ///
-    /// Performs the following checks:
-    /// 1. Server version >= 5.7
-    /// 2. GTID mode ON (if `gtid_enabled` is set)
-    /// 3. `binlog_format = ROW`
-    /// 4. `binlog_row_image = FULL`
-    /// 5. `REPLICATION SLAVE` privilege
-    /// 6. Detect Amazon Aurora
-    ///
+    /// Checks: server version >= 5.7, GTID mode, binlog_format=ROW,
+    /// binlog_row_image=FULL, REPLICATION SLAVE privilege, and detects Aurora.
     /// Opens two connections: one for queries and one for binlog streaming.
     async fn setup(&mut self, tables: &[String]) -> Result<()> {
         // 1. Open query connection
@@ -227,7 +211,6 @@ impl Source for MysqlSource {
             .unwrap_or("unknown");
         info!("MySQL server version: {}", version_str);
 
-        // Check major version from the beginning of the version string
         let major_ok: bool = version_str
             .split('.')
             .next()
@@ -289,7 +272,7 @@ impl Source for MysqlSource {
         info!("  binlog_row_image: FULL ✓");
 
         // 6. Check REPLICATION SLAVE privilege
-        // Try mysql.user first (more precise), fall back to SHOW GRANTS for cloud providers
+        // Try mysql.user first; fall back to SHOW GRANTS for RDS/Aurora/Cloud SQL
         let has_replication = match conn
             .exec_first::<(String,), _, _>(
                 "SELECT Repl_slave_priv FROM mysql.user WHERE User = ?",
@@ -299,7 +282,6 @@ impl Source for MysqlSource {
         {
             Ok(Some(row)) => row.0.to_uppercase() == "Y",
             _ => {
-                // Fallback to SHOW GRANTS for RDS/Aurora/Cloud SQL where mysql.user is restricted
                 let grant_rows: Vec<(String,)> = conn
                     .query("SHOW GRANTS")
                     .await
@@ -318,7 +300,7 @@ impl Source for MysqlSource {
         );
         info!("  REPLICATION SLAVE privilege: ✓");
 
-        // 7. Check if Aurora (best-effort — query may fail on non-Aurora)
+        // 7. Detect Amazon Aurora (best-effort)
         let is_aurora: bool = conn
             .query_first::<(String,), &str>("SELECT @@aurora_version")
             .await
@@ -327,13 +309,12 @@ impl Source for MysqlSource {
             .is_some();
         if is_aurora {
             info!("  Detected Amazon Aurora MySQL");
-            // Aurora-specific optimisations can be added here
         }
 
         // 8. Open a separate binlog connection
         let binlog_conn = self.open_connection().await?;
 
-        // 9. Introspect table schemas if tables are specified
+        // 9. Introspect table schemas
         if !tables.is_empty() {
             let schemas =
                 schema::introspect_mysql_schemas_inner(&mut conn, tables, &self.config.database)
@@ -355,8 +336,7 @@ impl Source for MysqlSource {
         Ok(())
     }
 
-    /// Start MySQL binlog replication using mysql_async's get_binlog_stream.
-    /// Consumes the dedicated binlog connection and returns a MysqlBinlogStream.
+    /// Start MySQL binlog replication. Consumes the binlog connection and returns a MysqlBinlogStream.
     async fn start_replication(
         &mut self,
         position: Option<SourcePosition>,
@@ -372,14 +352,8 @@ impl Source for MysqlSource {
         let server_id = self.config.server_id;
         let stream = MysqlBinlogStream::new(binlog_conn, server_id).await?;
         let current_gtid = match &position {
-            Some(SourcePosition::GtidSet(gtid)) => {
-                // Set GTID for resume position
-                Some(gtid.clone())
-            }
-            _ => {
-                // Start from current position
-                self.current_gtid.clone()
-            }
+            Some(SourcePosition::GtidSet(gtid)) => Some(gtid.clone()),
+            _ => self.current_gtid.clone(),
         };
         if let Some(ref gtid) = current_gtid {
             info!("Resuming MySQL binlog from GTID: {}", gtid);
@@ -397,11 +371,8 @@ impl Source for MysqlSource {
 
     /// Cleanup: drop connections and release resources.
     async fn cleanup(&mut self) -> Result<()> {
-        // Drop query connection by replacing with None
         self.query_conn = None;
-        // Drop binlog connection
         self.binlog_conn = None;
-        // Clear schema cache
         self.schema_cache.lock().await.clear();
         self.current_gtid = None;
         info!("MySQL cleanup complete");
@@ -420,11 +391,8 @@ impl Source for MysqlSource {
 }
 
 impl MysqlSource {
-    /// Start a typed binlog stream (does NOT go through ReplicationStream).
-    /// Takes ownership of the binlog connection.
-    pub async fn start_replication_typed(
-        &mut self,
-    ) -> Result<mysql_async::BinlogStream> {
+    /// Start a typed binlog stream (bypasses ReplicationStream trait).
+    pub async fn start_replication_typed(&mut self) -> Result<mysql_async::BinlogStream> {
         use crate::source::mysql::binlog_stream::MysqlBinlogStream;
         let conn: mysql_async::Conn = self
             .binlog_conn

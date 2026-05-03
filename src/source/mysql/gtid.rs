@@ -1,49 +1,24 @@
 // Copyright 2025
 // Licensed under the Elastic License v2.0
 
-//! MySQL GTID (Global Transaction Identifier) set parsing and comparison utilities.
+//! MySQL GTID set parsing and comparison.
 //!
-//! Provides the [`GtidSet`] type for parsing MySQL GTID set strings (e.g.
-//! `UUID1:N1[-M1],UUID2:N2[-M2]`) and performing set membership checks
-//! required by the Offset Signal Algorithm (T6).
-//!
-//! # GTID Format
-//!
-//! A MySQL GTID set has the form:
-//! ```text
-//! UUID1:transaction_id1[-transaction_idN],UUID2:transaction_id1[-transaction_idN]
-//! ```
-//!
-//! Each UUID identifies a server, and the transaction IDs (or intervals)
-//! represent committed transactions on that server.
-//!
-//! # Examples
-//!
-//! ```ignore
-//! use crate::source::mysql::gtid::GtidSet;
-//!
-//! let set = GtidSet::parse("3E11FA47-71CA-11E7-81E2-2115B5C6C7F5:1-49").unwrap();
-//! assert!(set.contains("3E11FA47-71CA-11E7-81E2-2115B5C6C7F5", 42));
-//! assert!(!set.contains("3E11FA47-71CA-11E7-81E2-2115B5C6C7F5", 50));
-//! ```
+//! Provides [`GtidSet`] for parsing GTID set strings
+//! (`UUID1:N1[-M1],UUID2:N2[-M2]`) and set membership checks
+//! used by the Offset Signal Algorithm (T6).
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-/// A single GTID consisting of a source UUID and transaction number.
-///
-/// Example: `3E11FA47-71CA-11E7-81E2-2115B5C6C7F5:127`
+/// A single GTID with a source UUID and transaction number.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Gtid {
     pub uuid: String,
     pub transaction_id: u64,
 }
 
-/// A contiguous range of GTIDs belonging to the same source UUID.
-///
-/// The interval is inclusive on both ends: `[start, end]`.
-/// A single transaction is represented as `start == end`.
+/// A contiguous range of GTIDs for the same source UUID, inclusive on both ends.
 #[derive(Debug, Clone)]
 pub struct GtidInterval {
     pub uuid: String,
@@ -51,48 +26,21 @@ pub struct GtidInterval {
     pub end: u64,
 }
 
-/// A parsed MySQL GTID set.
+/// A parsed MySQL GTID set — map from UUID to inclusive `(start, end)` intervals.
 ///
-/// Internally stores a map from UUID to a list of `(start, end)` inclusive ranges.
-/// Ranges are stored in parsed order and may overlap (MySQL does not guarantee
-/// canonical ordering in all server outputs).
-///
-/// # Empty Set
-///
-/// An empty string or whitespace-only string parses to an empty set containing
-/// no intervals. All membership checks on an empty set return `false`.
+/// Parsed order is preserved; intervals may overlap.
+/// An empty or whitespace-only string parses to an empty set.
 #[derive(Debug, Clone)]
 pub struct GtidSet {
     pub intervals: HashMap<String, Vec<(u64, u64)>>,
 }
 
 impl GtidSet {
-    /// Parse a GTID set string into structured data.
-    ///
-    /// # Format
-    ///
-    /// The input string must follow MySQL GTID set syntax:
-    /// ```text
-    /// UUID1:N1[-M1][:N2[-M2]],UUID2:N1[-M2]
-    /// ```
-    ///
-    /// Multiple intervals for the same UUID are separated by `:` after the UUID.
-    /// Multiple UUIDs are separated by `,`.
+    /// Parse a GTID set string (`UUID1:N1[-M1],UUID2:N2[-M2]`).
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The format is invalid (missing colon, malformed numbers)
-    /// - Transaction IDs or interval bounds are not valid [`u64`] values
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use dbmazz::source::mysql::gtid::GtidSet;
-    /// let set = GtidSet::parse("uuid:1-10,uuid2:20-30").unwrap();
-    /// assert!(set.contains("uuid", 5));
-    /// assert!(!set.contains("uuid2", 35));
-    /// ```
+    /// Returns an error if the format is invalid or transaction IDs are not valid [`u64`] values.
     pub fn parse(s: &str) -> Result<Self> {
         let mut intervals: HashMap<String, Vec<(u64, u64)>> = HashMap::new();
 
@@ -142,20 +90,7 @@ impl GtidSet {
         Ok(Self { intervals })
     }
 
-    /// Check if a single GTID (`UUID:N`) is contained in this set.
-    ///
-    /// Returns `true` if the given `uuid` has an interval that covers
-    /// `transaction_id` (inclusive on both ends).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use dbmazz::source::mysql::gtid::GtidSet;
-    /// let set = GtidSet::parse("uuid:1-100").unwrap();
-    /// assert!(set.contains("uuid", 50));
-    /// assert!(!set.contains("uuid", 101));
-    /// assert!(!set.contains("other", 50));
-    /// ```
+    /// Check if a single GTID (`UUID:N`) is in this set.
     pub fn contains(&self, uuid: &str, transaction_id: u64) -> bool {
         if let Some(ranges) = self.intervals.get(uuid) {
             for &(start, end) in ranges {
@@ -167,23 +102,11 @@ impl GtidSet {
         false
     }
 
-    /// Check if a GTID string (`UUID:N`) is contained in this set.
-    ///
-    /// This is a convenience wrapper around [`contains`](Self::contains) that
-    /// parses the string first.
+    /// Convenience wrapper around [`contains`](Self::contains) that parses a `UUID:N` string.
     ///
     /// # Errors
     ///
     /// Returns an error if the GTID string is malformed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use dbmazz::source::mysql::gtid::GtidSet;
-    /// let set = GtidSet::parse("uuid:1-100").unwrap();
-    /// assert!(set.contains_gtid_str("uuid:50").unwrap());
-    /// assert!(!set.contains_gtid_str("uuid:101").unwrap());
-    /// ```
     pub fn contains_gtid_str(&self, gtid_str: &str) -> Result<bool> {
         let colon_pos = gtid_str
             .find(':')
@@ -195,51 +118,14 @@ impl GtidSet {
         Ok(self.contains(uuid, txn))
     }
 
-    /// Check if a GTID is in the range `(low_set, high_set]`.
+    /// Returns `true` if the GTID is in `(low_set, high_set]` — not in `low_set` but in `high_set`.
     ///
-    /// Returns `true` if the GTID is **not** in `low_set` **and** is in `high_set`.
-    /// This is the core predicate used by the Offset Signal Algorithm (T6)
-    /// to determine if a transaction falls within a delta window between
-    /// two GTID sets.
-    ///
-    /// # Arguments
-    ///
-    /// * `gtid_str` - A single GTID string in `UUID:N` format.
-    /// * `low_set` - The lower bound GTID set string.
-    /// * `high_set` - The upper bound GTID set string.
+    /// Core predicate of the Offset Signal Algorithm (T6) for determining
+    /// whether a transaction falls within a delta window between two GTID sets.
     ///
     /// # Errors
     ///
-    /// Returns an error if any of the input strings are malformed.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use dbmazz::source::mysql::gtid::GtidSet;
-    /// // 127 is NOT in low_set but IS in high_set → true
-    /// let result = GtidSet::gtid_in_range(
-    ///     "uuid:127",
-    ///     "uuid:1-100",
-    ///     "uuid:1-153",
-    /// ).unwrap();
-    /// assert!(result);
-    ///
-    /// // 50 IS in low_set → false
-    /// let result = GtidSet::gtid_in_range(
-    ///     "uuid:50",
-    ///     "uuid:1-100",
-    ///     "uuid:1-153",
-    /// ).unwrap();
-    /// assert!(!result);
-    ///
-    /// // 200 is NOT in high_set → false
-    /// let result = GtidSet::gtid_in_range(
-    ///     "uuid:200",
-    ///     "uuid:1-100",
-    ///     "uuid:1-153",
-    /// ).unwrap();
-    /// assert!(!result);
-    /// ```
+    /// Returns an error if any input strings are malformed.
     pub fn gtid_in_range(gtid_str: &str, low_set: &str, high_set: &str) -> Result<bool> {
         let colon_pos = gtid_str.find(':').context("Invalid GTID format")?;
         let uuid = &gtid_str[..colon_pos];
@@ -253,20 +139,7 @@ impl GtidSet {
         Ok(!low.contains(uuid, txn) && high.contains(uuid, txn))
     }
 
-    /// Format the GTID set back into its canonical string representation.
-    ///
-    /// UUIDs are sorted lexicographically for deterministic output.
-    /// Multiple intervals for the same UUID are output in their stored order.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use dbmazz::source::mysql::gtid::GtidSet;
-    /// let set = GtidSet::parse("uuid2:1-5,uuid1:10-20").unwrap();
-    /// let output = set.to_string();
-    /// assert!(output.contains("uuid1:10-20"));
-    /// assert!(output.contains("uuid2:1-5"));
-    /// ```
+    /// Format the GTID set into its canonical string representation (UUIDs are sorted lexicographically).
     pub fn format(&self) -> String {
         let mut parts = Vec::new();
         let mut uuids: Vec<&String> = self.intervals.keys().collect();
@@ -383,7 +256,6 @@ mod tests {
             "3E11FA47-71CA-11E7-81E2-2115B5C6C7F5:1-49,5A11FB48-82DB-23F8-92F3-3226C6D7D8G6:50-100";
         let set = GtidSet::parse(input).unwrap();
         let output = set.to_string();
-        // Should contain both UUIDs with their intervals
         assert!(output.contains("3E11FA47-71CA-11E7-81E2-2115B5C6C7F5"));
         assert!(output.contains("5A11FB48-82DB-23F8-92F3-3226C6D7D8G6"));
         assert!(output.contains("1-49"));
@@ -395,7 +267,6 @@ mod tests {
         let input = "uuid:1:5:10";
         let set = GtidSet::parse(input).unwrap();
         let output = set.to_string();
-        // Each single transaction is rendered individually
         assert!(output.contains("1"));
         assert!(output.contains("5"));
         assert!(output.contains("10"));
