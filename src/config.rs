@@ -13,14 +13,21 @@ use tracing::info;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceType {
     Postgres,
-    // Future: Mysql, Oracle, etc.
+    Mysql,
+    // Future: Oracle, etc.
 }
 
 impl SourceType {
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "postgres" | "postgresql" => Ok(SourceType::Postgres),
-            other => anyhow::bail!("Unsupported source type: '{}'. Supported: postgres", other),
+            "mysql" => Ok(SourceType::Mysql),
+            other => {
+                anyhow::bail!(
+                    "Unsupported source type: '{}'. Supported: postgres, mysql",
+                    other
+                )
+            }
         }
     }
 }
@@ -29,6 +36,7 @@ impl std::fmt::Display for SourceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SourceType::Postgres => write!(f, "postgres"),
+            SourceType::Mysql => write!(f, "mysql"),
         }
     }
 }
@@ -40,6 +48,13 @@ pub struct PostgresSourceConfig {
     pub publication_name: String,
 }
 
+/// MySQL-specific source configuration
+#[derive(Debug, Clone)]
+pub struct MysqlSourceConfig {
+    pub server_id: u32,
+    pub gtid_enabled: bool,
+}
+
 /// Generic source configuration
 #[derive(Clone)]
 pub struct SourceConfig {
@@ -47,15 +62,25 @@ pub struct SourceConfig {
     pub url: String,
     pub tables: Vec<String>,
     pub postgres: Option<PostgresSourceConfig>,
+    pub mysql: Option<MysqlSourceConfig>,
 }
 
 impl SourceConfig {
     /// Returns the PostgreSQL-specific source config.
-    /// Panics if source_type is not Postgres (currently the only option).
+    /// Panics if source_type is not Postgres.
     pub fn postgres(&self) -> &PostgresSourceConfig {
         self.postgres
             .as_ref()
             .expect("PostgresSourceConfig must be set for Postgres source")
+    }
+
+    /// Returns the MySQL-specific source config.
+    /// Panics if source_type is not Mysql.
+    #[allow(dead_code)]
+    pub fn mysql(&self) -> &MysqlSourceConfig {
+        self.mysql
+            .as_ref()
+            .expect("MysqlSourceConfig must be set for Mysql source")
     }
 }
 
@@ -91,6 +116,7 @@ impl std::fmt::Debug for SourceConfig {
             .field("url", &redacted_url)
             .field("tables", &self.tables)
             .field("postgres", &self.postgres)
+            .field("mysql", &self.mysql)
             .finish()
     }
 }
@@ -232,6 +258,21 @@ fn optional_env(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
+/// Parse MYSQL_SERVER_ID env var, defaulting to a pseudo-random value in [5400, 6400).
+fn parse_mysql_server_id() -> u32 {
+    if let Ok(val) = env::var("MYSQL_SERVER_ID") {
+        if let Ok(id) = val.parse::<u32>() {
+            return id;
+        }
+    }
+    // Pseudo-random default based on sub-second timing
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    5400 + (nanos % 1000)
+}
+
 // =============================================================================
 // Config Implementation
 // =============================================================================
@@ -256,7 +297,7 @@ impl Config {
             .filter(|s| !s.is_empty())
             .collect();
 
-        // Source-specific config (Postgres)
+        // Source-specific config
         let slot_name = optional_env("SOURCE_SLOT_NAME", "dbmazz_slot");
         let publication_name = optional_env("SOURCE_PUBLICATION_NAME", "dbmazz_pub");
 
@@ -265,6 +306,16 @@ impl Config {
                 slot_name: slot_name.clone(),
                 publication_name: publication_name.clone(),
             }),
+            SourceType::Mysql => None,
+        };
+
+        // MySQL-specific config
+        let mysql_config = match source_type {
+            SourceType::Postgres => None,
+            SourceType::Mysql => Some(MysqlSourceConfig {
+                server_id: parse_mysql_server_id(),
+                gtid_enabled: optional_env("MYSQL_GTID_ENABLED", "true") == "true",
+            }),
         };
 
         let source = SourceConfig {
@@ -272,6 +323,7 @@ impl Config {
             url: source_url.clone(),
             tables: tables.clone(),
             postgres: postgres_config,
+            mysql: mysql_config,
         };
 
         // Sink configuration
@@ -379,6 +431,16 @@ impl Config {
                     info!("Source: Postgres (slot: {})", pg.slot_name);
                 } else {
                     info!("Source: Postgres");
+                }
+            }
+            SourceType::Mysql => {
+                if let Some(mysql) = &self.source.mysql {
+                    info!(
+                        "Source: MySQL (server_id: {}, gtid_enabled: {})",
+                        mysql.server_id, mysql.gtid_enabled
+                    );
+                } else {
+                    info!("Source: MySQL");
                 }
             }
         }
@@ -526,7 +588,8 @@ mod tests {
             SourceType::from_str("POSTGRES").unwrap(),
             SourceType::Postgres
         );
-        assert!(SourceType::from_str("mysql").is_err());
+        assert!(SourceType::from_str("mysql").is_ok());
+        assert_eq!(SourceType::from_str("MYSQL").unwrap(), SourceType::Mysql);
     }
 
     #[test]
@@ -658,6 +721,35 @@ mod tests {
             config.sink.specific,
             SinkSpecificConfig::Postgres(_)
         ));
+
+        clear_env_vars();
+    }
+
+    #[test]
+    #[serial]
+    fn test_mysql_config() {
+        clear_env_vars();
+
+        env::set_var("SOURCE_URL", "mysql://localhost/testdb");
+        env::set_var("SOURCE_TYPE", "mysql");
+        env::set_var("MYSQL_SERVER_ID", "6000");
+        env::set_var("MYSQL_GTID_ENABLED", "false");
+        env::set_var("SINK_URL", "starrocks.local");
+        env::set_var("SINK_TYPE", "starrocks");
+        env::set_var("SINK_PORT", "9030");
+        env::set_var("SINK_DATABASE", "testdb");
+        env::set_var("SINK_USER", "admin");
+        env::set_var("SINK_PASSWORD", "secret");
+
+        let config = Config::from_env().unwrap();
+
+        assert_eq!(config.source.source_type, SourceType::Mysql);
+        assert_eq!(config.source.url, "mysql://localhost/testdb");
+        assert!(config.source.postgres.is_none());
+
+        let mysql = config.source.mysql();
+        assert_eq!(mysql.server_id, 6000);
+        assert!(!mysql.gtid_enabled);
 
         clear_env_vars();
     }

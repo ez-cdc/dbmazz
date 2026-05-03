@@ -11,13 +11,15 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use crate::config::Config;
+use crate::config::{Config, SourceType};
 use crate::connectors::sinks::create_sink;
 use crate::control::state::SharedState;
 use crate::control::{self, CdcConfig, Stage};
 use crate::core::{SinkMode, Source, SourcePosition};
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::pipeline::{Pipeline, PipelineEvent};
+#[cfg(feature = "mysql-source")]
+use crate::source::mysql::MysqlSource;
 use crate::source::postgres::{introspect_schemas, PostgresSource};
 use crate::state_store::StateStore;
 use setup::SetupManager;
@@ -30,7 +32,7 @@ pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
     state_store: StateStore,
-    /// SchemaCache for converting pgoutput CdcMessage -> generic CdcRecord.
+    /// SchemaCache for converting pgoutput CdcMessage → generic CdcRecord.
     /// Owned by the engine, passed mutably to the WAL handler.
     #[allow(dead_code)]
     schema_cache: SchemaCache,
@@ -40,11 +42,17 @@ pub struct CdcEngine {
 
 impl CdcEngine {
     pub async fn new(config: Config) -> Result<Self> {
-        let slot_name = config.source.postgres().slot_name.clone();
+        let (slot_name, tables_for_cdc) = match config.source.source_type {
+            SourceType::Postgres => (
+                config.source.postgres().slot_name.clone(),
+                config.source.tables.clone(),
+            ),
+            SourceType::Mysql => ("mysql_source".to_string(), config.source.tables.clone()),
+        };
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
-            tables: config.source.tables.clone(),
+            tables: tables_for_cdc,
             slot_name,
         };
         let shared_state = SharedState::new(cdc_config);
@@ -105,8 +113,11 @@ impl CdcEngine {
             .await;
         source.setup(&self.config.source.tables).await?;
 
-        // Stage: SETUP - Replication Stream start position
-        let start_position = Some(SourcePosition::Lsn(start_lsn));
+        // Stage: SETUP - Replication Stream start position (PG only, MySQL uses GTID)
+        let start_position = match self.config.source.source_type {
+            SourceType::Postgres => Some(SourcePosition::Lsn(start_lsn)),
+            SourceType::Mysql => None,
+        };
 
         // Stage: SETUP - Sink Connection
         self.shared_state
@@ -124,8 +135,25 @@ impl CdcEngine {
         self.shared_state
             .set_stage(Stage::Setup, "Setting up sink")
             .await;
-        let source_schemas =
-            introspect_schemas(&self.config.source.url, &self.config.source.tables).await?;
+        let source_schemas = match self.config.source.source_type {
+            SourceType::Postgres => {
+                introspect_schemas(&self.config.source.url, &self.config.source.tables).await?
+            }
+            SourceType::Mysql => {
+                #[cfg(feature = "mysql-source")]
+                {
+                    crate::source::mysql::schema::introspect_mysql_schemas(
+                        &self.config.source.url,
+                        &self.config.source.tables,
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "mysql-source"))]
+                {
+                    anyhow::bail!("MySQL source requires the mysql-source feature")
+                }
+            }
+        };
         if let Err(e) = sink.setup(&source_schemas).await {
             self.halt_on_setup_error(&format!("Sink setup failed: {}", e))
                 .await;
@@ -158,8 +186,20 @@ impl CdcEngine {
         info!("Connected! Streaming CDC events...");
 
         // Spawn snapshot worker concurrently if enabled (DO_SNAPSHOT=true)
+        // The WAL consumer continues running in parallel; deduplication is handled
+        // via should_emit() in wal_handler using the finished_chunks BTreeMap.
         if self.config.do_snapshot {
-            self.spawn_snapshot_worker(self.config.initial_snapshot_only);
+            match self.config.source.source_type {
+                SourceType::Postgres => {
+                    self.spawn_snapshot_worker(self.config.initial_snapshot_only);
+                }
+                SourceType::Mysql => {
+                    #[cfg(feature = "mysql-source")]
+                    self.spawn_mysql_snapshot_worker(self.config.initial_snapshot_only);
+                    #[cfg(not(feature = "mysql-source"))]
+                    tracing::warn!("MySQL snapshot requested but mysql-source feature is not enabled");
+                }
+            }
         }
 
         // Execute main loop via ReplicationLoop trait (source-agnostic)
@@ -173,8 +213,21 @@ impl CdcEngine {
             sink_factory: self.sink_factory.clone(),
         };
 
-        let loop_impl = source.create_loop(start_position).await?;
-        loop_impl.run(ctx).await
+        match self.config.source.source_type {
+            SourceType::Postgres => {
+                let loop_impl = source.create_loop(start_position).await?;
+                loop_impl.run(ctx).await
+            }
+            #[cfg(feature = "mysql-source")]
+            SourceType::Mysql => {
+                let loop_impl = source.create_loop(start_position).await?;
+                loop_impl.run(ctx).await
+            }
+            #[cfg(not(feature = "mysql-source"))]
+            SourceType::Mysql => {
+                anyhow::bail!("MySQL source requires the mysql-source feature")
+            }
+        }
     }
 
     async fn halt_on_setup_error(&self, msg: &str) -> ! {
@@ -190,7 +243,8 @@ impl CdcEngine {
         }
     }
 
-    /// Spawn a snapshot worker task.
+    /// Spawn a snapshot worker task. Used for both initial (DO_SNAPSHOT=true)
+    /// and on-demand (trigger API) snapshots.
     fn spawn_snapshot_worker(&self, shutdown_on_complete: bool) {
         let snap_config = Arc::new(self.config.clone());
         let snap_state = self.shared_state.clone();
@@ -216,28 +270,79 @@ impl CdcEngine {
         info!("Snapshot worker spawned");
     }
 
+    /// Spawn a MySQL snapshot worker task.
+    /// Used when `DO_SNAPSHOT=true` and `SOURCE_TYPE=mysql`.
+    #[cfg(feature = "mysql-source")]
+    fn spawn_mysql_snapshot_worker(&self, shutdown_on_complete: bool) {
+        let snap_config = Arc::new(self.config.clone());
+        let snap_state = self.shared_state.clone();
+        let snap_sink_factory = Arc::clone(&self.sink_factory);
+
+        tokio::spawn(async move {
+            match snapshot::mysql::run_mysql_snapshot(
+                snap_config,
+                snap_state.clone(),
+                snap_sink_factory,
+            )
+            .await
+            {
+                Ok(()) => {
+                    snap_state.set_snapshot_active(false);
+                    info!("MySQL snapshot completed successfully");
+                    if shutdown_on_complete {
+                        info!("Initial snapshot only mode: triggering graceful shutdown");
+                        let _ = snap_state.shutdown_tx.send(true);
+                    }
+                }
+                Err(e) => {
+                    snap_state.set_snapshot_active(false);
+                    snap_state.set_snapshot_error(Some(format!("{}", e))).await;
+                    error!("MySQL snapshot worker error: {}", e);
+                }
+            }
+        });
+        info!("MySQL snapshot worker spawned");
+    }
+
     /// Execute source setup (replication slot, publication).
     async fn run_setup(&self) -> Result<(), setup::SetupError> {
-        let setup_manager = SetupManager::new(self.config.clone());
-        setup_manager.run().await
+        match self.config.source.source_type {
+            SourceType::Postgres => {
+                let setup_manager = SetupManager::new(self.config.clone());
+                setup_manager.run().await
+            }
+            SourceType::Mysql => {
+                Ok(()) // MySQL setup is done in Source::setup()
+            }
+        }
     }
 
     /// Load checkpoint from StateStore
     async fn load_checkpoint(&self) -> Result<u64> {
-        let slot_name = &self.config.source.postgres().slot_name;
-        let last_lsn = self.state_store.load_checkpoint(slot_name).await?;
-        let start_lsn = last_lsn.unwrap_or(0);
+        match self.config.source.source_type {
+            SourceType::Postgres => {
+                let slot_name = &self.config.source.postgres().slot_name;
+                let last_lsn = self.state_store.load_checkpoint(slot_name).await?;
+                let start_lsn = last_lsn.unwrap_or(0);
 
-        if start_lsn > 0 {
-            info!("Checkpoint: Resuming from LSN 0x{:X}", start_lsn);
-        } else {
-            info!("Checkpoint: Starting from beginning (no previous checkpoint)");
+                if start_lsn > 0 {
+                    info!("Checkpoint: Resuming from LSN 0x{:X}", start_lsn);
+                } else {
+                    info!("Checkpoint: Starting from beginning (no previous checkpoint)");
+                }
+
+                self.shared_state.update_lsn(start_lsn);
+                self.shared_state.confirm_lsn(start_lsn);
+
+                Ok(start_lsn)
+            }
+            SourceType::Mysql => {
+                // MySQL checkpointing is GTID-based, not LSN-based.
+                // GTID state is tracked within the replication stream itself.
+                info!("Checkpoint: MySQL GTID-based, no LSN checkpoint to load");
+                Ok(0)
+            }
         }
-
-        self.shared_state.update_lsn(start_lsn);
-        self.shared_state.confirm_lsn(start_lsn);
-
-        Ok(start_lsn)
     }
 
     fn start_control_server(&self) {
@@ -260,14 +365,30 @@ impl CdcEngine {
 
     /// Initialize source (returns trait object for source-agnostic dispatch)
     async fn init_source(&self) -> Result<Box<dyn Source>> {
-        let pg = self.config.source.postgres();
-        let source = PostgresSource::new(
-            &self.config.source.url,
-            pg.slot_name.clone(),
-            pg.publication_name.clone(),
-        )
-        .await?;
-        Ok(Box::new(source))
+        match self.config.source.source_type {
+            SourceType::Postgres => {
+                let pg = self.config.source.postgres();
+                let source = PostgresSource::new(
+                    &self.config.source.url,
+                    pg.slot_name.clone(),
+                    pg.publication_name.clone(),
+                )
+                .await?;
+                Ok(Box::new(source))
+            }
+            #[cfg(feature = "mysql-source")]
+            SourceType::Mysql => {
+                let mysql_cfg = self.config.source.mysql();
+                let source = MysqlSource::new(&self.config.source.url, mysql_cfg).await?;
+                Ok(Box::new(source))
+            }
+            #[cfg(not(feature = "mysql-source"))]
+            SourceType::Mysql => {
+                anyhow::bail!(
+                    "MySQL source support is not enabled. Build with --features mysql-source"
+                )
+            }
+        }
     }
 
     /// Initialize pipeline with sink (core::Sink, no adapter)
@@ -325,3 +446,4 @@ pub enum ControlFlow {
     Continue,
     Break,
 }
+

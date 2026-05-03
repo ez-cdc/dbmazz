@@ -933,6 +933,7 @@ dependencies = [
  "libc",
  "memchr",
  "mysql_async",
+ "mysql_common",
  "openssl-sys",
  "parquet",
  "pem",

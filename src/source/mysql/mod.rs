@@ -1,0 +1,591 @@
+// Copyright 2025
+// Licensed under the Elastic License v2.0
+
+#![allow(dead_code)]
+
+//! MySQL change data capture source.
+//!
+//! Provides the `MysqlSource` struct implementing the `Source` trait for MySQL.
+//! Reads the MySQL binary log (binlog) using GTID-based replication.
+//!
+//! All code in this module is behind `#[cfg(feature = "mysql-source")]`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use async_trait::async_trait;
+use mysql_async::prelude::Queryable;
+use tokio::sync::Mutex;
+use tracing::info;
+
+use crate::config::{MysqlSourceConfig, SourceType};
+use crate::core::traits::SourceTableSchema;
+use crate::core::{ReplicationStream, Source, SourcePosition};
+
+pub mod binlog_stream;
+pub mod converter;
+pub mod gtid;
+pub mod parser;
+pub mod schema;
+pub mod setup;
+
+/// Parsed MySQL connection details derived from a URL.
+///
+/// Created from a `mysql://user:password@host:port/db` URL.
+/// This struct is private to the mysql source module.
+///
+/// Note: manual Debug impl redacts the password to prevent credential leaks.
+#[derive(Clone)]
+struct MysqlConnectionConfig {
+    host: String,
+    port: u16,
+    database: String,
+    user: String,
+    password: String,
+    server_id: u32,
+}
+
+impl std::fmt::Debug for MysqlConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MysqlConnectionConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &"[REDACTED]")
+            .field("server_id", &self.server_id)
+            .finish()
+    }
+}
+
+impl MysqlConnectionConfig {
+    /// Parse a MySQL URL into connection configuration.
+    ///
+    /// # Format
+    /// `mysql://user:password@host:port/database`
+    ///
+    /// # Errors
+    /// Returns an error if the URL cannot be parsed or is missing required fields.
+    fn from_url(url: &str, server_id: u32) -> Result<Self> {
+        let parsed = url::Url::parse(url)
+            .context("Failed to parse MySQL URL. Expected: mysql://user:pass@host:port/db")?;
+
+        let scheme = parsed.scheme();
+        anyhow::ensure!(
+            scheme == "mysql",
+            "Unsupported URL scheme '{}' for MySQL source. Expected 'mysql://'",
+            scheme
+        );
+
+        let host = parsed
+            .host_str()
+            .context("Missing host in MySQL URL")?
+            .to_string();
+        let port = parsed.port().unwrap_or(3306);
+        let database = parsed.path().trim_start_matches('/').to_string();
+
+        // url crate percent-decodes the username automatically
+        let user = if !parsed.username().is_empty() {
+            parsed.username().to_string()
+        } else {
+            "root".to_string()
+        };
+
+        // Password must be extracted raw (url crate already percent-decodes)
+        let password = parsed.password().unwrap_or("").to_string();
+
+        anyhow::ensure!(
+            !database.is_empty(),
+            "Missing database name in MySQL URL. Expected: mysql://user:pass@host:port/db"
+        );
+
+        Ok(Self {
+            host,
+            port,
+            database,
+            user,
+            password,
+            server_id,
+        })
+    }
+
+    /// Build `mysql_async::Opts` for creating connections, with TLS enabled.
+    fn to_opts(&self) -> mysql_async::Opts {
+        let ssl_opts = mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true);
+        let builder = mysql_async::OptsBuilder::default()
+            .ip_or_hostname(self.host.clone())
+            .tcp_port(self.port)
+            .db_name(Some(self.database.clone()))
+            .user(Some(self.user.clone()))
+            .pass(Some(self.password.clone()))
+            .ssl_opts(ssl_opts);
+        mysql_async::Opts::from(builder)
+    }
+}
+
+/// MySQL source for Change Data Capture.
+///
+/// Manages two connections to the MySQL server:
+/// - `query_conn`: used for metadata queries (schemas, GTID state, etc.)
+/// - `binlog_conn`: dedicated connection for reading the binary log
+///
+/// Connections are opened during `setup()` and closed in `cleanup()`.
+/// The binlog streaming itself is planned for T3 — this stub provides
+/// the validation, setup, and schema introspection plumbing.
+pub struct MysqlSource {
+    config: MysqlConnectionConfig,
+    server_id: u32,
+    use_gtid: bool,
+    /// Connection for metadata queries (schemas, grants, GTID state).
+    /// Wrapped in `Mutex` because `mysql_async::Conn` is `Send` but not `Sync`,
+    /// and the `Source` trait requires `Send + Sync`.
+    query_conn: Option<Mutex<mysql_async::Conn>>,
+    /// Dedicated connection for binlog streaming (used in T3).
+    binlog_conn: Option<Mutex<mysql_async::Conn>>,
+    /// Cached table schemas keyed by fully-qualified table name (`db.table`).
+    /// We use a plain HashMap instead of the pipeline's `SchemaCache` because
+    /// that cache is tightly coupled to PostgreSQL pgoutput types
+    /// (`crate::source::parser::Column`).
+    schema_cache: Arc<Mutex<HashMap<String, SourceTableSchema>>>,
+    /// The last known GTID set, used for checkpointing.
+    current_gtid: Option<String>,
+}
+
+impl MysqlSource {
+    /// Creates a new `MysqlSource` struct without connecting.
+    ///
+    /// Connections are opened lazily in [`Source::setup()`].
+    pub async fn new(url: &str, config: &MysqlSourceConfig) -> Result<Self> {
+        let conn_config = MysqlConnectionConfig::from_url(url, config.server_id)?;
+        info!(
+            "MySQL source configured (server_id: {}, gtid: {})",
+            config.server_id, config.gtid_enabled
+        );
+        Ok(Self {
+            config: conn_config,
+            server_id: config.server_id,
+            use_gtid: config.gtid_enabled,
+            query_conn: None,
+            binlog_conn: None,
+            schema_cache: Arc::new(Mutex::new(HashMap::new())),
+            current_gtid: None,
+        })
+    }
+
+    /// Helper: open a connection using the stored config.
+    async fn open_connection(&self) -> Result<mysql_async::Conn> {
+        let pool = mysql_async::Pool::new(self.config.to_opts());
+        pool.get_conn()
+            .await
+            .context("Failed to connect to MySQL server")
+    }
+}
+
+#[async_trait]
+impl Source for MysqlSource {
+    fn name(&self) -> &'static str {
+        "mysql"
+    }
+
+    fn source_type(&self) -> SourceType {
+        SourceType::Mysql
+    }
+
+    /// Validate MySQL source prerequisites.
+    ///
+    /// Validation requires a live connection, so actual checks are deferred
+    /// to [`setup()`](Source::setup). This returns `Ok(())` unconditionally.
+    async fn validate(&self) -> Result<()> {
+        // Validation happens in setup() since we need a connection.
+        Ok(())
+    }
+
+    /// Setup: connect to MySQL, verify prerequisites, and introspect schemas.
+    ///
+    /// Performs the following checks:
+    /// 1. Server version >= 5.7
+    /// 2. GTID mode ON (if `gtid_enabled` is set)
+    /// 3. `binlog_format = ROW`
+    /// 4. `binlog_row_image = FULL`
+    /// 5. `REPLICATION SLAVE` privilege
+    /// 6. Detect Amazon Aurora
+    ///
+    /// Opens two connections: one for queries and one for binlog streaming.
+    async fn setup(&mut self, tables: &[String]) -> Result<()> {
+        // 1. Open query connection
+        let mut conn = self.open_connection().await?;
+
+        // 2. Verify server version >= 5.7
+        let version_row: Vec<(String,)> = conn
+            .query("SELECT VERSION()")
+            .await
+            .context("Failed to get MySQL version")?;
+        let version_str = version_row
+            .first()
+            .map(|r| r.0.as_str())
+            .unwrap_or("unknown");
+        info!("MySQL server version: {}", version_str);
+
+        // Check major version from the beginning of the version string
+        let major_ok: bool = version_str
+            .split('.')
+            .next()
+            .and_then(|s: &str| s.parse::<u32>().ok())
+            .map(|major: u32| major >= 5)
+            .unwrap_or(false);
+        anyhow::ensure!(
+            major_ok,
+            "MySQL server version must be >= 5.7 for CDC. Got: {}",
+            version_str
+        );
+        info!("  Server version check passed ✓");
+
+        // 3. Verify GTID mode (if enabled)
+        if self.use_gtid {
+            let gtid_row: Vec<(String,)> = conn
+                .query("SELECT @@global.gtid_mode")
+                .await
+                .context("Failed to check GTID mode")?;
+            let gtid_mode = gtid_row.first().map(|r| r.0.as_str()).unwrap_or("OFF");
+            anyhow::ensure!(
+                gtid_mode.eq_ignore_ascii_case("ON"),
+                "GTID mode must be ON for MySQL CDC. Current: {}. \
+                 Set gtid_mode=ON and enforce_gtid_consistency=ON",
+                gtid_mode
+            );
+            info!("  GTID mode: ON ✓");
+        } else {
+            info!("  GTID mode: not checked (disabled)");
+        }
+
+        // 4. Verify binlog_format = ROW
+        let format_row: Vec<(String,)> = conn
+            .query("SELECT @@global.binlog_format")
+            .await
+            .context("Failed to check binlog_format")?;
+        let binlog_format = format_row
+            .first()
+            .map(|r| r.0.as_str())
+            .unwrap_or("unknown");
+        anyhow::ensure!(
+            binlog_format.eq_ignore_ascii_case("ROW"),
+            "binlog_format must be ROW for MySQL CDC. Current: {}",
+            binlog_format
+        );
+        info!("  binlog_format: ROW ✓");
+
+        // 5. Verify binlog_row_image = FULL
+        let image_row: Vec<(String,)> = conn
+            .query("SELECT @@global.binlog_row_image")
+            .await
+            .context("Failed to check binlog_row_image")?;
+        let row_image = image_row.first().map(|r| r.0.as_str()).unwrap_or("unknown");
+        anyhow::ensure!(
+            row_image.eq_ignore_ascii_case("FULL"),
+            "binlog_row_image must be FULL for MySQL CDC. Current: {}",
+            row_image
+        );
+        info!("  binlog_row_image: FULL ✓");
+
+        // 6. Check REPLICATION SLAVE privilege
+        // Try mysql.user first (more precise), fall back to SHOW GRANTS for cloud providers
+        let has_replication = match conn
+            .exec_first::<(String,), _, _>(
+                "SELECT Repl_slave_priv FROM mysql.user WHERE User = ?",
+                (self.config.user.as_str(),),
+            )
+            .await
+        {
+            Ok(Some(row)) => row.0.to_uppercase() == "Y",
+            _ => {
+                // Fallback to SHOW GRANTS for RDS/Aurora/Cloud SQL where mysql.user is restricted
+                let grant_rows: Vec<(String,)> = conn
+                    .query("SHOW GRANTS")
+                    .await
+                    .context("Failed to check MySQL privileges")?;
+                grant_rows.iter().any(|row| {
+                    let upper = row.0.to_uppercase();
+                    upper.contains("REPLICATION SLAVE") || upper.contains("ALL PRIVILEGES")
+                })
+            }
+        };
+        anyhow::ensure!(
+            has_replication,
+            "MySQL user missing REPLICATION SLAVE privilege. \
+             Required for binlog reading. \
+             Run: GRANT REPLICATION SLAVE ON *.* TO '<user>'@'<host>';"
+        );
+        info!("  REPLICATION SLAVE privilege: ✓");
+
+        // 7. Check if Aurora (best-effort — query may fail on non-Aurora)
+        let is_aurora: bool = conn
+            .query_first::<(String,), &str>("SELECT @@aurora_version")
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if is_aurora {
+            info!("  Detected Amazon Aurora MySQL");
+            // Aurora-specific optimisations can be added here
+        }
+
+        // 8. Open a separate binlog connection
+        let binlog_conn = self.open_connection().await?;
+
+        // 9. Introspect table schemas if tables are specified
+        if !tables.is_empty() {
+            let schemas =
+                schema::introspect_mysql_schemas_inner(&mut conn, tables, &self.config.database)
+                    .await
+                    .context("Failed to introspect MySQL table schemas")?;
+
+            let mut cache = self.schema_cache.lock().await;
+            for s in schemas {
+                let key = format!("{}.{}", s.schema, s.name);
+                cache.insert(key, s);
+            }
+            info!("  Cached schemas for {} table(s)", tables.len());
+        }
+
+        self.query_conn = Some(Mutex::new(conn));
+        self.binlog_conn = Some(Mutex::new(binlog_conn));
+
+        info!("MySQL setup complete ✓");
+        Ok(())
+    }
+
+    /// Start MySQL binlog replication using mysql_async's get_binlog_stream.
+    /// Consumes the dedicated binlog connection and returns a MysqlBinlogStream.
+    async fn start_replication(
+        &mut self,
+        position: Option<SourcePosition>,
+    ) -> Result<Box<dyn ReplicationStream>> {
+        use crate::source::mysql::binlog_stream::MysqlBinlogStream;
+
+        let binlog_conn: mysql_async::Conn = self
+            .binlog_conn
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("binlog connection not available"))?
+            .into_inner();
+
+        let server_id = self.config.server_id;
+        let stream = MysqlBinlogStream::new(binlog_conn, server_id).await?;
+        let current_gtid = match &position {
+            Some(SourcePosition::GtidSet(gtid)) => {
+                // Set GTID for resume position
+                Some(gtid.clone())
+            }
+            _ => {
+                // Start from current position
+                self.current_gtid.clone()
+            }
+        };
+        if let Some(ref gtid) = current_gtid {
+            info!("Resuming MySQL binlog from GTID: {}", gtid);
+        } else {
+            info!("Starting MySQL binlog from current position");
+        }
+
+        Ok(Box::new(stream))
+    }
+
+    /// Return the current checkpoint position (GTID set).
+    fn checkpoint_position(&self) -> Option<SourcePosition> {
+        self.current_gtid.clone().map(SourcePosition::GtidSet)
+    }
+
+    /// Cleanup: drop connections and release resources.
+    async fn cleanup(&mut self) -> Result<()> {
+        // Drop query connection by replacing with None
+        self.query_conn = None;
+        // Drop binlog connection
+        self.binlog_conn = None;
+        // Clear schema cache
+        self.schema_cache.lock().await.clear();
+        self.current_gtid = None;
+        info!("MySQL cleanup complete");
+        Ok(())
+    }
+
+    async fn create_loop(
+        &mut self,
+        _position: Option<SourcePosition>,
+    ) -> Result<Box<dyn crate::engine::replication::ReplicationLoop>> {
+        let typed_stream = self.start_replication_typed().await?;
+        Ok(Box::new(
+            crate::engine::replication::MysqlReplicationLoop::new(typed_stream),
+        ))
+    }
+}
+
+impl MysqlSource {
+    /// Start a typed binlog stream (does NOT go through ReplicationStream).
+    /// Takes ownership of the binlog connection.
+    pub async fn start_replication_typed(
+        &mut self,
+    ) -> Result<mysql_async::BinlogStream> {
+        use crate::source::mysql::binlog_stream::MysqlBinlogStream;
+        let conn: mysql_async::Conn = self
+            .binlog_conn
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("binlog connection not available"))?
+            .into_inner();
+        let stream = MysqlBinlogStream::new(conn, self.config.server_id).await?;
+        Ok(stream.into_inner())
+    }
+}
+
+// Manual Debug impl to avoid leaking credentials
+impl std::fmt::Debug for MysqlSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MysqlSource")
+            .field("host", &self.config.host)
+            .field("port", &self.config.port)
+            .field("database", &self.config.database)
+            .field("user", &self.config.user)
+            .field("server_id", &self.server_id)
+            .field("use_gtid", &self.use_gtid)
+            .field("has_query_conn", &self.query_conn.is_some())
+            .field("has_binlog_conn", &self.binlog_conn.is_some())
+            .field("current_gtid", &self.current_gtid)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mysql_connection_config_parsing() {
+        let cfg =
+            MysqlConnectionConfig::from_url("mysql://user:pass@localhost:3306/mydb", 5400).unwrap();
+        assert_eq!(cfg.host, "localhost");
+        assert_eq!(cfg.port, 3306);
+        assert_eq!(cfg.database, "mydb");
+        assert_eq!(cfg.user, "user");
+        assert_eq!(cfg.password, "pass");
+
+        let cfg = MysqlConnectionConfig::from_url("mysql://host.com/db", 5401).unwrap();
+        assert_eq!(cfg.host, "host.com");
+        assert_eq!(cfg.port, 3306);
+        assert_eq!(cfg.database, "db");
+        assert_eq!(cfg.user, "root");
+        assert_eq!(cfg.password, "");
+
+        let result = MysqlConnectionConfig::from_url("mysql://user:pass@localhost", 5402);
+        assert!(result.is_err()); // no database path
+
+        let result = MysqlConnectionConfig::from_url("postgres://localhost/db", 5403);
+        assert!(result.is_err()); // wrong scheme
+
+        let cfg =
+            MysqlConnectionConfig::from_url("mysql://user%40host:p%40ss@localhost/mydb", 5404)
+                .unwrap();
+        assert_eq!(cfg.host, "localhost");
+        assert_eq!(cfg.user, "user%40host");
+        assert_eq!(cfg.password, "p%40ss");
+    }
+
+    #[tokio::test]
+    async fn test_mysql_source_new() {
+        let mysql_config = MysqlSourceConfig {
+            server_id: 6000,
+            gtid_enabled: true,
+        };
+        let source = MysqlSource::new("mysql://root@localhost/testdb", &mysql_config).await;
+        assert!(source.is_ok());
+        let source = source.unwrap();
+        assert_eq!(source.server_id, 6000);
+        assert!(source.use_gtid);
+        assert!(source.query_conn.is_none());
+        assert!(source.binlog_conn.is_none());
+    }
+
+    #[test]
+    fn test_source_trait_methods() {
+        let mysql_config = MysqlSourceConfig {
+            server_id: 6000,
+            gtid_enabled: true,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let source = rt
+            .block_on(MysqlSource::new(
+                "mysql://root@localhost/testdb",
+                &mysql_config,
+            ))
+            .unwrap();
+
+        assert_eq!(source.name(), "mysql");
+        assert_eq!(source.source_type(), SourceType::Mysql);
+        assert!(source.checkpoint_position().is_none());
+    }
+
+    #[test]
+    fn test_debug_no_credentials() {
+        let mysql_config = MysqlSourceConfig {
+            server_id: 6000,
+            gtid_enabled: true,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let source = rt
+            .block_on(MysqlSource::new(
+                "mysql://user:secret@host:3306/db",
+                &mysql_config,
+            ))
+            .unwrap();
+
+        let debug_str = format!("{:?}", source);
+        // Password should never appear in debug output
+        assert!(!debug_str.contains("secret"));
+        // Sanity checks
+        assert!(debug_str.contains("host"));
+        assert!(debug_str.contains("user"));
+        assert!(debug_str.contains("database"));
+        assert!(debug_str.contains("server_id"));
+    }
+
+    #[test]
+    fn test_mysql_source_type_display() {
+        assert_eq!(SourceType::Mysql.to_string(), "mysql");
+    }
+
+    #[test]
+    fn test_typo_mapping_exhaustive() {
+        // Verify all expected MySQL type names map without panic
+        let cases = [
+            ("tinyint", "Int16"),
+            ("smallint", "Int16"),
+            ("mediumint", "Int32"),
+            ("int", "Int32"),
+            ("bigint", "Int64"),
+            ("float", "Float32"),
+            ("double", "Float64"),
+            ("decimal", "Decimal"),
+            ("date", "Date"),
+            ("time", "Time"),
+            ("datetime", "Timestamp"),
+            ("timestamp", "Timestamp"),
+            ("char", "String"),
+            ("varchar", "String"),
+            ("text", "Text"),
+            ("blob", "Bytes"),
+            ("json", "Json"),
+            ("bool", "Boolean"),
+            ("boolean", "Boolean"),
+            ("unknown_type", "String"),
+        ];
+        for (mysql_type, expected_variant) in &cases {
+            let dt = crate::source::mysql::schema::mysql_type_to_data_type(mysql_type);
+            let actual = format!("{:?}", dt);
+            assert!(
+                actual.starts_with(expected_variant),
+                "mysql_type={} -> {:?} (expected starts with {})",
+                mysql_type,
+                dt,
+                expected_variant
+            );
+        }
+    }
+}

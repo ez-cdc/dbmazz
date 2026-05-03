@@ -300,6 +300,10 @@ async fn normalize_batch_range(
             to_batch_id,
         );
 
+        info!(
+            "Normalizer: MERGE SQL for table '{}' in range ({}..{}]:\n{}",
+            dst_table, from_batch_id, to_batch_id, merge_sql
+        );
         merge_statements.push(merge_sql);
     }
 

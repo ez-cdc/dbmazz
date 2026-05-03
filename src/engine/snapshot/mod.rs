@@ -13,6 +13,10 @@ pub mod chunker;
 pub mod state_store;
 pub mod utils;
 pub mod worker;
+
+#[cfg(feature = "mysql-source")]
+pub mod mysql;
+
 pub use worker::run_snapshot;
 
 /// Quote a SQL identifier to prevent SQL injection.

@@ -10,6 +10,8 @@ rust-version = "1.91.1"
 [features]
 default = ["sink-starrocks", "sink-postgres", "sink-snowflake"]
 sink-starrocks = ["dep:curl", "dep:mysql_async", "dep:openssl-sys"]
+# --- Optional: MySQL source ---
+mysql-source = ["dep:mysql_async", "dep:mysql_common", "mysql_async?/binlog"]
 sink-postgres = []
 sink-snowflake = [
     "dep:reqwest", "dep:arrow", "dep:parquet",
@@ -70,8 +72,12 @@ aws-sigv4 = { version = "1.2", optional = true }
 aws-credential-types = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 
+# --- Optional: MySQL source ---
+mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }
+
 [dev-dependencies]
 serial_test = "3.0"
+mysql_async = "0.34"
 
 [profile.release]
 debug = 1             # Line tables only (flamegraphs work, smaller binary)

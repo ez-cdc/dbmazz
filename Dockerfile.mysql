@@ -1,0 +1,58 @@
+# syntax=docker/dockerfile:1.6
+#
+# Multi-stage build for dbmazz with mysql-source + sink-postgres features.
+#
+# This is an ALTERNATE Dockerfile for local dev / CI when you don't want
+# to pre-compile the binary. The production release workflow still uses
+# the main Dockerfile with pre-compiled musl-static binaries.
+#
+# Usage:
+#   docker build -t dbmazz-mysql:dev -f Dockerfile.mysql .
+#
+# For multi-arch builds (slower — QEMU emulates the Rust compiler):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t dbmazz-mysql:dev -f Dockerfile.mysql .
+#
+# Security: runs as non-root user (uid 65532), HEALTHCHECK configured.
+# Binary: dynamically linked against glibc (debian:bookworm-slim).
+#          DEV NOTE: this differs from the production image (musl-static).
+#          Always validate against a musl-static build before release.
+
+FROM rust:bookworm AS builder
+WORKDIR /app
+
+# ---- Layer 0: system dependencies for compilation ----
+# openssl-sys (transitive via mysql_async) needs headers during build.
+RUN apt-get update && apt-get install -y libssl-dev && rm -rf /var/lib/apt/lists/*
+
+# ---- Layer 1: fetch dependencies (cached unless Cargo.toml/lock changes) ----
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && touch src/lib.rs
+# NOTE: cargo fetch does NOT support --features, so we fetch default deps here.
+#       Optional deps (mysql_async, mysql_common) will auto-fetch during build.
+RUN cargo fetch --locked
+
+# ---- Layer 2: real source + real build ----
+COPY src/ src/
+RUN cargo build --release --features mysql-source,sink-postgres --locked
+
+# ====================================================================
+# Runtime stage
+# ====================================================================
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libssl3 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --uid 65532 dbmazz
+
+COPY --from=builder /app/target/release/dbmazz /usr/local/bin/dbmazz
+
+USER dbmazz
+
+EXPOSE 50051
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+  CMD curl -sf http://127.0.0.1:50051/api/v1/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/dbmazz"]

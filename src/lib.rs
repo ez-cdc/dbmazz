@@ -20,7 +20,7 @@
 //! | [`engine`] | CDC orchestration (setup, run, snapshot) |
 //! | [`pipeline`] | Batching + dispatch to sink |
 //! | [`replication`] | WAL handling (pgoutput parsing, LSN tracking) |
-//! | [`source`] | Source connectors (PostgreSQL) |
+//! | [`source`] | Source connectors (PostgreSQL, MySQL) |
 //! | [`state_store`] | LSN checkpoint persistence |
 //! | [`utils`] | Shared utilities |
 

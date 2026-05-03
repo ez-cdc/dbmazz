@@ -10,7 +10,7 @@ use tokio_postgres::Client;
 use tracing::info;
 
 use super::schema_tracking;
-use super::types::pg_oid_to_target_type;
+use super::types;
 use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name in the target database
@@ -177,7 +177,7 @@ async fn create_target_table(
     let mut col_defs: Vec<String> = Vec::new();
 
     for col in &source.columns {
-        let pg_type = pg_oid_to_target_type(col.pg_type_id);
+        let pg_type = types::column_type(col);
         let nullable = if col.nullable { "" } else { " NOT NULL" };
         col_defs.push(format!("    \"{}\" {}{}", col.name, pg_type, nullable));
     }

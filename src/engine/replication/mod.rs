@@ -17,6 +17,11 @@ use crate::engine::ControlFlow;
 use crate::pipeline::PipelineEvent;
 use crate::state_store::StateStore;
 
+#[cfg(feature = "mysql-source")]
+mod mysql;
+#[cfg(feature = "mysql-source")]
+pub use mysql::MysqlReplicationLoop;
+
 /// Factory that creates fresh Sink instances (used by snapshot workers).
 type SinkFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn Sink>> + Send + Sync>;
 

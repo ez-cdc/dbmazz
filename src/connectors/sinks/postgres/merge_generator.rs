@@ -8,7 +8,7 @@
 //! - Handles INSERT (NOT MATCHED), DELETE (MATCHED), UPDATE (MATCHED)
 //! - Generates one WHEN MATCHED clause per unique TOAST column combination
 
-use super::types::pg_oid_to_target_type;
+use super::types;
 use crate::core::traits::SourceTableSchema;
 
 /// Generate a complete MERGE SQL statement for a batch range.
@@ -34,14 +34,18 @@ pub fn generate_merge_range(
     to_batch_id: i64,
 ) -> String {
     let dst_table = format!("\"{}\".\"{}\"", target_schema, source_schema.name);
-    let dst_qualified = format!("{}.{}", target_schema, source_schema.name);
+    // _dst_table in raw table is table.qualified_name() from CdcRecord:
+    // PG: schema="public", name="users"  → "public.users"
+    // MySQL: schema="dbmazz", name="users" → "dbmazz.users"
+    // Use source_schema.schema to match what's stored in _dst_table.
+    let dst_qualified = format!("{}.{}", source_schema.schema, source_schema.name);
 
     // Build column extraction expressions: (_data->>'col')::type AS "col"
     let col_extracts: Vec<String> = source_schema
         .columns
         .iter()
         .map(|col| {
-            let pg_type = pg_oid_to_target_type(col.pg_type_id);
+            let pg_type = types::column_type(col);
             format!(
                 "(_data->>'{name}')::{pg_type} AS \"{name}\"",
                 name = col.name
@@ -59,7 +63,7 @@ pub fn generate_merge_range(
                 .iter()
                 .find(|c| &c.name == pk)
                 .expect("PK column must exist in schema");
-            let pg_type = pg_oid_to_target_type(col.pg_type_id);
+            let pg_type = types::column_type(col);
             format!("(_data->>'{pk}')::{pg_type}", pk = pk)
         })
         .collect();
