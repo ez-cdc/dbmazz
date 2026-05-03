@@ -98,3 +98,9 @@ impl SchemaCache {
         self.cache.get(&id).map(|s| s.name.clone())
     }
 }
+
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}

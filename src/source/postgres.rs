@@ -1,10 +1,14 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio_postgres::{Client, Config, CopyBothDuplex, NoTls};
 use tracing::{error, info, warn};
 
+use crate::config::SourceType;
 use crate::core::traits::{SourceColumn, SourceTableSchema};
+use crate::core::{ReplicationStream, Source, SourcePosition};
+use crate::replication::pg_stream::PgReplicationStream;
 use crate::source::converter::pg_type_to_data_type;
 use crate::utils::validate_sql_identifier;
 
@@ -339,5 +343,61 @@ impl PostgresSource {
             .replace("?replication=database", "")
             .replace("&replication=database", "")
             .replace("replication=database&", "")
+    }
+}
+
+#[async_trait]
+impl Source for PostgresSource {
+    fn name(&self) -> &'static str {
+        "postgres"
+    }
+
+    fn source_type(&self) -> SourceType {
+        SourceType::Postgres
+    }
+
+    async fn validate(&self) -> Result<()> {
+        // Validation is handled in PostgresSource::new()
+        Ok(())
+    }
+
+    async fn setup(&mut self, _tables: &[String]) -> Result<()> {
+        // No special setup needed for PG (already done in new())
+        Ok(())
+    }
+
+    async fn start_replication(
+        &mut self,
+        position: Option<SourcePosition>,
+    ) -> Result<Box<dyn ReplicationStream>> {
+        let start_lsn = match position {
+            Some(SourcePosition::Lsn(lsn)) => lsn,
+            _ => 0,
+        };
+        let stream = self.start_replication_from(start_lsn).await?;
+        Ok(Box::new(PgReplicationStream::new(stream)))
+    }
+
+    fn checkpoint_position(&self) -> Option<SourcePosition> {
+        // PG tracks this via the feedback loop
+        None
+    }
+
+    async fn cleanup(&mut self) -> Result<()> {
+        // Cleanup is done in engine's run_main_loop
+        Ok(())
+    }
+
+    async fn create_loop(
+        &mut self,
+        position: Option<SourcePosition>,
+    ) -> Result<Box<dyn crate::engine::replication::ReplicationLoop>> {
+        let stream = self.start_replication(position).await?;
+        Ok(Box::new(
+            crate::engine::replication::PgReplicationLoop::new(
+                stream,
+                crate::pipeline::schema_cache::SchemaCache::new(),
+            ),
+        ))
     }
 }

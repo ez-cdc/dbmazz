@@ -13,7 +13,6 @@ pub mod chunker;
 pub mod state_store;
 pub mod utils;
 pub mod worker;
-
 pub use worker::run_snapshot;
 
 /// Quote a SQL identifier to prevent SQL injection.

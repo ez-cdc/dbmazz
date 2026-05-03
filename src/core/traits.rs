@@ -1,3 +1,4 @@
+use crate::config::SourceType;
 use crate::core::position::SourcePosition;
 use crate::core::record::{CdcRecord, DataType};
 use anyhow::Result;
@@ -78,23 +79,55 @@ pub struct SourceColumn {
     pub pg_type_id: u32,
 }
 
+/// Generic replication stream — replaces PG-specific CopyBothDuplex<Bytes>
+#[async_trait]
+#[allow(dead_code)]
+pub trait ReplicationStream: Send + Unpin + 'static {
+    /// Read the next raw event from the replication stream.
+    /// Returns None on clean end-of-stream.
+    async fn next_event(&mut self) -> Option<Result<Vec<u8>>>;
+
+    /// Send a feedback/keepalive message back to the source.
+    /// Default implementation is a no-op (MySQL doesn't need this).
+    async fn send_feedback(&mut self, _data: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 #[allow(dead_code)]
 pub trait Source: Send + Sync {
     /// Returns the name of the source implementation
     fn name(&self) -> &'static str;
 
-    /// Validates the source configuration and connection
+    /// Returns the source type for dispatch
+    fn source_type(&self) -> SourceType;
+
+    /// Validate prerequisites (connectivity, GTID, binlog format)
     async fn validate(&self) -> Result<()>;
 
-    /// Starts the source and begins processing CDC events
-    async fn start(&mut self) -> Result<()>;
+    /// Setup source-side resources (slots for PG, GTID verification for MySQL)
+    async fn setup(&mut self, tables: &[String]) -> Result<()>;
 
-    /// Stops the source gracefully
-    async fn stop(&mut self) -> Result<()>;
+    /// Start replication stream from given position
+    async fn start_replication(
+        &mut self,
+        position: Option<SourcePosition>,
+    ) -> Result<Box<dyn ReplicationStream>>;
 
-    /// Returns the current source position for checkpointing
-    fn current_position(&self) -> Option<SourcePosition>;
+    /// Get current replication position for checkpointing
+    fn checkpoint_position(&self) -> Option<SourcePosition>;
+
+    /// Cleanup source-side resources
+    async fn cleanup(&mut self) -> Result<()>;
+
+    /// Create the appropriate replication loop for this source type.
+    /// This replaces the need for downcasting. Each implementation
+    /// creates the loop variant it needs (PgReplicationLoop or MysqlReplicationLoop).
+    async fn create_loop(
+        &mut self,
+        position: Option<SourcePosition>,
+    ) -> Result<Box<dyn crate::engine::replication::ReplicationLoop>>;
 }
 
 #[async_trait]

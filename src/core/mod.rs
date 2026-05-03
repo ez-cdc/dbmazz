@@ -5,4 +5,7 @@ pub mod traits;
 
 pub use position::SourcePosition;
 pub use record::{CdcRecord, ColumnValue, DataType, Value};
-pub use traits::{LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult};
+pub use traits::{
+    LoadingModel, ReplicationStream, Sink, SinkCapabilities, SinkMode, SinkResult, Source,
+    SourceTableSchema,
+};

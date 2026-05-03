@@ -3,25 +3,22 @@
 
 mod setup;
 pub mod snapshot;
+pub mod replication;
 
 use anyhow::Result;
-use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 use crate::config::Config;
 use crate::connectors::sinks::create_sink;
 use crate::control::state::SharedState;
-use crate::control::{self, CdcConfig, CdcState, Stage};
-use crate::core::SinkMode;
+use crate::control::{self, CdcConfig, Stage};
+use crate::core::{SinkMode, Source, SourcePosition};
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::pipeline::{Pipeline, PipelineEvent};
-use crate::replication::{
-    handle_keepalive, handle_xlog_data, parse_replication_message, WalMessage,
-};
-use crate::source::postgres::{build_standby_status_update, introspect_schemas, PostgresSource};
+use crate::source::postgres::{introspect_schemas, PostgresSource};
 use crate::state_store::StateStore;
 use setup::SetupManager;
 
@@ -33,8 +30,9 @@ pub struct CdcEngine {
     config: Config,
     shared_state: Arc<SharedState>,
     state_store: StateStore,
-    /// SchemaCache for converting pgoutput CdcMessage → generic CdcRecord.
+    /// SchemaCache for converting pgoutput CdcMessage -> generic CdcRecord.
     /// Owned by the engine, passed mutably to the WAL handler.
+    #[allow(dead_code)]
     schema_cache: SchemaCache,
     /// Factory for creating sink instances (snapshot workers need their own).
     sink_factory: SinkFactory,
@@ -42,11 +40,12 @@ pub struct CdcEngine {
 
 impl CdcEngine {
     pub async fn new(config: Config) -> Result<Self> {
+        let slot_name = config.source.postgres().slot_name.clone();
         let cdc_config = CdcConfig {
             flush_size: config.flush_size,
             flush_interval_ms: config.flush_interval_ms,
             tables: config.source.tables.clone(),
-            slot_name: config.source.postgres().slot_name.clone(),
+            slot_name,
         };
         let shared_state = SharedState::new(cdc_config);
 
@@ -73,7 +72,7 @@ impl CdcEngine {
     }
 
     /// Execute CDC engine
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         self.shared_state
             .set_stage(Stage::Setup, "Initializing")
             .await;
@@ -96,16 +95,18 @@ impl CdcEngine {
 
         // Stage: SETUP - Source Connection
         self.shared_state
-            .set_stage(Stage::Setup, "Connecting to PostgreSQL")
+            .set_stage(Stage::Setup, "Connecting to source")
             .await;
-        let source = self.init_source().await?;
+        let mut source = self.init_source().await?;
 
-        // Stage: SETUP - Replication Stream
+        // Stage: SETUP - Source Setup (connections, schema introspection)
         self.shared_state
-            .set_stage(Stage::Setup, "Starting replication stream")
+            .set_stage(Stage::Setup, "Setting up source")
             .await;
-        let replication_stream = source.start_replication_from(start_lsn).await?;
-        tokio::pin!(replication_stream);
+        source.setup(&self.config.source.tables).await?;
+
+        // Stage: SETUP - Replication Stream start position
+        let start_position = Some(SourcePosition::Lsn(start_lsn));
 
         // Stage: SETUP - Sink Connection
         self.shared_state
@@ -157,15 +158,23 @@ impl CdcEngine {
         info!("Connected! Streaming CDC events...");
 
         // Spawn snapshot worker concurrently if enabled (DO_SNAPSHOT=true)
-        // The WAL consumer continues running in parallel; deduplication is handled
-        // via should_emit() in wal_handler using the finished_chunks BTreeMap.
         if self.config.do_snapshot {
             self.spawn_snapshot_worker(self.config.initial_snapshot_only);
         }
 
-        // Execute main loop
-        self.run_main_loop(replication_stream, tx, feedback_rx)
-            .await
+        // Execute main loop via ReplicationLoop trait (source-agnostic)
+        let ctx = crate::engine::replication::LoopContext {
+            shared_state: self.shared_state.clone(),
+            config: Arc::new(self.config.clone()),
+            state_store: Arc::new(self.state_store.clone()),
+            pipeline_tx: tx,
+            feedback_rx,
+            source_schemas: Arc::from(source_schemas.as_slice()),
+            sink_factory: self.sink_factory.clone(),
+        };
+
+        let loop_impl = source.create_loop(start_position).await?;
+        loop_impl.run(ctx).await
     }
 
     async fn halt_on_setup_error(&self, msg: &str) -> ! {
@@ -181,8 +190,7 @@ impl CdcEngine {
         }
     }
 
-    /// Spawn a snapshot worker task. Used for both initial (DO_SNAPSHOT=true)
-    /// and on-demand (trigger API) snapshots.
+    /// Spawn a snapshot worker task.
     fn spawn_snapshot_worker(&self, shutdown_on_complete: bool) {
         let snap_config = Arc::new(self.config.clone());
         let snap_state = self.shared_state.clone();
@@ -250,8 +258,8 @@ impl CdcEngine {
         });
     }
 
-    /// Initialize PostgreSQL source
-    async fn init_source(&self) -> Result<PostgresSource> {
+    /// Initialize source (returns trait object for source-agnostic dispatch)
+    async fn init_source(&self) -> Result<Box<dyn Source>> {
         let pg = self.config.source.postgres();
         let source = PostgresSource::new(
             &self.config.source.url,
@@ -259,8 +267,7 @@ impl CdcEngine {
             pg.publication_name.clone(),
         )
         .await?;
-
-        Ok(source)
+        Ok(Box::new(source))
     }
 
     /// Initialize pipeline with sink (core::Sink, no adapter)
@@ -310,227 +317,11 @@ impl CdcEngine {
         (tx, feedback_rx)
     }
 
-    /// Main replication loop
-    async fn run_main_loop<S>(
-        &mut self,
-        mut replication_stream: S,
-        tx: mpsc::Sender<PipelineEvent>,
-        mut feedback_rx: mpsc::Receiver<u64>,
-    ) -> Result<()>
-    where
-        S: StreamExt<Item = Result<bytes::Bytes, tokio_postgres::Error>>
-            + SinkExt<bytes::Bytes>
-            + Unpin,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
-        let mut shutdown_rx = self.shared_state.shutdown_tx.subscribe();
-        // Subscribe to on-demand snapshot trigger
-        let mut snapshot_trigger_rx = self.shared_state.subscribe_snapshot_trigger();
-        let mut iteration = 0u64;
-
-        loop {
-            iteration = iteration.wrapping_add(1);
-
-            // 1. Check state changes every 256 iterations to reduce overhead
-            // With ~287 events/s, this checks state ~1x/second instead of 287x/second
-            if iteration & 0xFF == 0 {
-                if let Some(flow) = self.check_state_control_sync(&tx) {
-                    match flow {
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue => {
-                            // Sleep when paused
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // 2. Main select loop
-            tokio::select! {
-                // Shutdown signal
-                _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        info!("Shutdown signal received");
-                        break;
-                    }
-                }
-
-                // On-demand snapshot trigger
-                Ok(()) = snapshot_trigger_rx.changed() => {
-                    if *snapshot_trigger_rx.borrow() && !self.shared_state.is_snapshot_active() {
-                        info!("On-demand snapshot triggered (CDC_RUNNING → SNAPSHOT)");
-                        // Reset trigger so it doesn't fire again
-                        let _ = self.shared_state.snapshot_trigger.send(false);
-                        self.spawn_snapshot_worker(false);
-                    }
-                }
-
-                // Replication messages
-                data_res = replication_stream.next() => {
-                    match data_res {
-                        Some(Ok(mut data)) => {
-                            if let Some(msg) = parse_replication_message(&mut data) {
-                                let _ = self.handle_replication_message(
-                                    msg,
-                                    &tx,
-                                    &mut replication_stream,
-                                ).await?;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            error!("Replication stream error: {}", e);
-                            break;
-                        }
-                        None => {
-                            warn!("Replication stream ended");
-                            break;
-                        }
-                    }
-                }
-
-                // Checkpoint feedback
-                Some(confirmed_lsn) = feedback_rx.recv() => {
-                    self.handle_checkpoint_feedback(
-                        confirmed_lsn,
-                        &mut replication_stream,
-                    ).await?;
-                }
-            }
-        }
-
-        // Cleanup PostgreSQL resources (drop replication slot) - unless skip_slot_cleanup is set
-        if self.shared_state.should_skip_slot_cleanup() {
-            info!("[SKIP] Skipping slot cleanup (upgrade/restart mode)");
-        } else if let Err(e) = setup::cleanup_postgres_resources(
-            &self.config.source.url,
-            &self.config.source.postgres().slot_name,
-        )
-        .await
-        {
-            warn!("Cleanup warning: {}", e);
-            // Non-fatal - continue shutdown
-        }
-
-        info!("CDC shutdown complete");
-        Ok(())
-    }
-
-    /// Check CDC state (Pause/Stop/Draining) - Synchronous
-    fn check_state_control_sync(&self, tx: &mpsc::Sender<PipelineEvent>) -> Option<ControlFlow> {
-        let current_state = self.shared_state.state();
-
-        match current_state {
-            CdcState::Stopped => {
-                info!("CDC stopped. Exiting immediately.");
-                Some(ControlFlow::Break)
-            }
-            CdcState::Draining => {
-                // Check if channel is empty
-                if tx.capacity() == self.config.flush_size * 2 {
-                    info!("CDC drained. Exiting gracefully.");
-                    self.shared_state.set_state(CdcState::Stopped);
-                    Some(ControlFlow::Break)
-                } else {
-                    None // Continue draining
-                }
-            }
-            CdcState::Paused => {
-                // Return signal to sleep
-                Some(ControlFlow::Continue)
-            }
-            CdcState::Running => None, // Normal operation
-        }
-    }
-
-    /// Handle replication messages
-    async fn handle_replication_message<S>(
-        &mut self,
-        msg: WalMessage,
-        tx: &mpsc::Sender<PipelineEvent>,
-        replication_stream: &mut S,
-    ) -> Result<u64>
-    where
-        S: SinkExt<bytes::Bytes> + Unpin,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
-        match msg {
-            WalMessage::XLogData { lsn, data } => {
-                handle_xlog_data(
-                    data,
-                    lsn,
-                    tx,
-                    &self.shared_state,
-                    &mut self.schema_cache,
-                    self.config.flush_size,
-                )
-                .await?;
-                Ok(lsn)
-            }
-            WalMessage::KeepAlive {
-                lsn,
-                reply_requested,
-            } => {
-                handle_keepalive(lsn, reply_requested, replication_stream).await?;
-                Ok(lsn)
-            }
-            WalMessage::Unknown(tag) => {
-                warn!("Unknown replication message tag: {}", tag);
-                Ok(0)
-            }
-        }
-    }
-
-    /// Handle checkpoint confirmation
-    async fn handle_checkpoint_feedback<S>(
-        &self,
-        confirmed_lsn: u64,
-        replication_stream: &mut S,
-    ) -> Result<()>
-    where
-        S: SinkExt<bytes::Bytes> + Unpin,
-        S::Error: std::error::Error + Send + Sync + 'static,
-    {
-        // CRITICAL: We MUST save checkpoint before confirming to PostgreSQL.
-        // If we confirm to PostgreSQL but fail to save locally, we could:
-        // 1. PostgreSQL discards WAL (thinking we persisted it)
-        // 2. On crash, we restart from old checkpoint
-        // 3. WAL data is gone → permanent data loss
-
-        // 1. Save checkpoint to persistent storage
-        let slot_name = &self.config.source.postgres().slot_name;
-        if let Err(e) = self
-            .state_store
-            .save_checkpoint(slot_name, confirmed_lsn)
-            .await
-        {
-            error!(
-                "Failed to save checkpoint at LSN 0x{:X}: {}",
-                confirmed_lsn, e
-            );
-            error!("NOT confirming to PostgreSQL to prevent data loss");
-            // Return error to halt replication loop
-            return Err(e);
-        }
-
-        // 2. Update SharedState (after successful persistence)
-        self.shared_state.confirm_lsn(confirmed_lsn);
-
-        // 3. Confirm to PostgreSQL (only after checkpoint is safely persisted)
-        let status = build_standby_status_update(confirmed_lsn);
-        if let Err(e) = replication_stream.send(status).await {
-            error!("Failed to send status update to PostgreSQL: {}", e);
-            error!("Checkpoint saved but not confirmed - may cause duplicate events on restart");
-            return Err(anyhow::Error::new(e));
-        }
-
-        debug!("Checkpoint confirmed: LSN 0x{:X}", confirmed_lsn);
-        Ok(())
-    }
 }
 
-/// Flow control for the loop
-enum ControlFlow {
+/// Flow control for replication loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFlow {
     Continue,
     Break,
 }
