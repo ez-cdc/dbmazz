@@ -34,6 +34,13 @@ pub struct LoopContext {
     pub feedback_rx: mpsc::Receiver<u64>,
     pub source_schemas: Arc<[SourceTableSchema]>,
     pub sink_factory: SinkFactory,
+    /// MySQL-only: registry of in-flight snapshot chunks for the read-only
+    /// DBLog reconciliation. The consumer marks evicted PKs and signals
+    /// chunk drain when its `current_gtid_set` covers the chunk's HIGH
+    /// watermark. Always present (default-constructed for non-MySQL
+    /// pipelines, where it stays empty).
+    #[cfg(feature = "mysql-source")]
+    pub active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
 }
 
 /// Each source type implements its own replication event loop.

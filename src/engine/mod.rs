@@ -38,6 +38,11 @@ pub struct CdcEngine {
     schema_cache: SchemaCache,
     /// Factory for creating sink instances (snapshot workers need their own).
     sink_factory: SinkFactory,
+    /// Registry of in-flight MySQL snapshot chunks. Shared with the
+    /// `MysqlReplicationLoop` so the binlog consumer can record evictions
+    /// and signal drain. Always present; empty for non-MySQL pipelines.
+    #[cfg(feature = "mysql-source")]
+    active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
 }
 
 impl CdcEngine {
@@ -69,6 +74,8 @@ impl CdcEngine {
             state_store,
             schema_cache: SchemaCache::new(),
             sink_factory,
+            #[cfg(feature = "mysql-source")]
+            active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks::new(),
         })
     }
 
@@ -239,6 +246,8 @@ impl CdcEngine {
             feedback_rx,
             source_schemas: Arc::from(source_schemas.as_slice()),
             sink_factory: self.sink_factory.clone(),
+            #[cfg(feature = "mysql-source")]
+            active_chunks: self.active_chunks.clone(),
         };
 
         match self.config.source.source_type {
@@ -305,12 +314,14 @@ impl CdcEngine {
         let snap_config = Arc::new(self.config.clone());
         let snap_state = self.shared_state.clone();
         let snap_sink_factory = Arc::clone(&self.sink_factory);
+        let snap_active_chunks = self.active_chunks.clone();
 
         tokio::spawn(async move {
             match snapshot::mysql::run_mysql_snapshot(
                 snap_config,
                 snap_state.clone(),
                 snap_sink_factory,
+                snap_active_chunks,
             )
             .await
             {

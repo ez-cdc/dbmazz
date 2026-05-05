@@ -37,6 +37,7 @@ pub async fn run_mysql_snapshot(
     config: Arc<Config>,
     shared_state: Arc<SharedState>,
     sink_factory: Arc<dyn Fn() -> Result<Box<dyn Sink>> + Send + Sync>,
+    active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
 ) -> Result<()> {
     info!(
         "MySQL snapshot worker starting (chunk_size={}, workers={})",
@@ -206,6 +207,7 @@ pub async fn run_mysql_snapshot(
         let slot_name = slot_name.clone();
         let shared_state = Arc::clone(&shared_state);
         let table_meta = Arc::clone(&table_meta);
+        let active_chunks = active_chunks.clone();
 
         join_set.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -246,6 +248,7 @@ pub async fn run_mysql_snapshot(
                 &chunk,
                 &shared_state,
                 meta,
+                &active_chunks,
             )
             .await;
 
@@ -477,7 +480,20 @@ fn split_mysql_table_name(name: &str) -> (String, String) {
 // Chunk processing (Offset Signal Algorithm)
 // ---------------------------------------------------------------------------
 
-/// Process a single MySQL snapshot chunk: LOW GTID → SELECT → HIGH GTID → emit → mark complete.
+/// Process a single MySQL snapshot chunk:
+/// LOW GTID → register chunk → SELECT → HIGH GTID → set high watermark
+/// → await drain → filter evicted PKs → emit → mark complete.
+///
+/// The reconciliation step (after `await_drain`) implements the read-only
+/// DBLog Incremental Snapshot algorithm: every binlog event whose GTID
+/// falls in `(LOW, HIGH]` and whose PK is in this chunk's range has
+/// already been emitted by the CDC stream consumer, so we drop the
+/// matching snapshot row to avoid emitting stale data on top of the
+/// fresher binlog event.
+// Eight related parameters are passed in once each from a single call site;
+// grouping them into a struct just to satisfy the lint would add boilerplate
+// without making the function easier to read.
+#[allow(clippy::too_many_arguments)]
 async fn process_mysql_chunk(
     conn: &mut mysql_async::Conn,
     sink: &mut dyn Sink,
@@ -486,7 +502,10 @@ async fn process_mysql_chunk(
     chunk: &MysqlChunk,
     shared_state: &Arc<SharedState>,
     meta: &TableMeta,
+    active_chunks: &crate::engine::snapshot::active_chunks::ActiveChunks,
 ) -> Result<()> {
+    use crate::source::mysql::gtid::GtidSet;
+
     debug!(
         "MySQL snapshot: processing chunk {}/{}: pk=[{}, {})",
         qualified_table, chunk.partition_id, chunk.start_pk, chunk.end_pk
@@ -507,6 +526,26 @@ async fn process_mysql_chunk(
         .context("MySQL snapshot: failed to capture LOW GTID")?;
     let low_gtid = low_gtid.unwrap_or_default();
     let low_truncated = truncate_gtid(&low_gtid);
+    let low_set = GtidSet::parse(&low_gtid).unwrap_or_default();
+
+    // Step 1b: register the chunk in the active-chunk registry. The binlog
+    // consumer reads this registry and records evictions for events that
+    // fall in our window. Range is [start_pk, end_pk) in the chunker; the
+    // registry uses an inclusive [start, end] range, so the upper bound is
+    // end_pk - 1 to preserve semantics.
+    let pk_range = (
+        crate::core::Value::Int64(chunk.start_pk),
+        crate::core::Value::Int64(chunk.end_pk - 1),
+    );
+    let (chunk_handle, drain_notify) = active_chunks
+        .register(
+            (schema.clone(), table.clone()),
+            meta.pk_col.clone(),
+            pk_range,
+            low_set,
+        )
+        .await;
+    let chunk_id = chunk_handle.id();
 
     // Step 2: SELECT rows for this chunk
     let cols_sql: String = meta
@@ -542,21 +581,69 @@ async fn process_mysql_chunk(
         .context("MySQL snapshot: failed to capture HIGH GTID")?;
     let high_gtid = high_gtid.unwrap_or_default();
     let high_truncated = truncate_gtid(&high_gtid);
+    let high_set = GtidSet::parse(&high_gtid).unwrap_or_default();
+    active_chunks.set_high_watermark(chunk_id, high_set).await;
 
     info!(
         "MySQL snapshot: chunk {}/{}: {} rows, GTID range: {} → {}",
         qualified_table, chunk.partition_id, row_count, low_truncated, high_truncated,
     );
 
-    // Step 4: (Placeholder) Binlog upsert would replay events between (LOW, HIGH]
-    //         filtered by this chunk's PK range, then the reconciled buffer is emitted.
+    // Step 4: wait until the binlog consumer has drained past HIGH, then
+    // collect the evicted PK set. After this point the eviction set is
+    // final — no more binlog event in the chunk's window can arrive.
+    active_chunks.await_drain(chunk_id, drain_notify).await;
+    let evicted_pks = active_chunks.evicted_pks(chunk_id).await;
+    if !evicted_pks.is_empty() {
+        info!(
+            "MySQL snapshot: chunk {}/{}: reconciliation evicted {} row(s) overridden by concurrent CDC",
+            qualified_table, chunk.partition_id, evicted_pks.len()
+        );
+    }
+    // The handle drops at end of function and deregisters the chunk —
+    // explicit deregister here keeps the hot path tidy.
+    active_chunks.deregister(chunk_id).await;
+    std::mem::forget(chunk_handle); // we already deregistered manually
 
-    // Step 5: Convert rows to CdcRecord::Insert and emit via sink
-    if !rows.is_empty() {
+    // Step 5: Convert rows to CdcRecord::Insert (filtering out evicted
+    // PKs) and emit via sink. The `position` carried with each row is a
+    // MysqlBinlog triple anchored at HIGH so checkpoint loaders see a
+    // valid resume point even if the daemon dies right after this batch.
+    let pk_idx = meta
+        .col_names
+        .iter()
+        .position(|c| c == &meta.pk_col)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "MySQL snapshot: pk column {} not found in select projection",
+                meta.pk_col
+            )
+        })?;
+
+    let kept_rows: Vec<&mysql_async::Row> = rows
+        .iter()
+        .filter(|row| {
+            let pk_dt = meta
+                .col_types
+                .get(pk_idx)
+                .cloned()
+                .unwrap_or(DataType::Int64);
+            let pk_value = read_mysql_value(row, pk_idx, &pk_dt);
+            !evicted_pks.contains(&crate::engine::snapshot::active_chunks::pk_key(&pk_value))
+        })
+        .collect();
+
+    let kept_count = kept_rows.len() as i64;
+
+    if !kept_rows.is_empty() {
         let table_ref = TableRef::new(Some(schema), table);
-        let position = SourcePosition::GtidSet(high_gtid.clone());
+        let position = SourcePosition::MysqlBinlog {
+            file: String::new(),
+            position: 0,
+            gtid_executed: high_gtid.clone(),
+        };
 
-        let records: Vec<CdcRecord> = rows
+        let records: Vec<CdcRecord> = kept_rows
             .iter()
             .map(|row| {
                 let columns: Vec<ColumnValue> = meta
@@ -586,8 +673,11 @@ async fn process_mysql_chunk(
         })?;
 
         debug!(
-            "MySQL snapshot: wrote chunk {}/{}: {} rows via sink",
-            qualified_table, chunk.partition_id, row_count
+            "MySQL snapshot: wrote chunk {}/{}: {} rows via sink ({} evicted)",
+            qualified_table,
+            chunk.partition_id,
+            kept_count,
+            row_count - kept_count
         );
     }
 

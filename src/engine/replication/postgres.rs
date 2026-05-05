@@ -150,6 +150,8 @@ impl ReplicationLoop for PgReplicationLoop {
             mut feedback_rx,
             source_schemas: _,
             sink_factory,
+            // active_chunks is MySQL-only; Postgres ignores it.
+            ..
         } = ctx;
 
         let mut shutdown_rx = shared_state.shutdown_tx.subscribe();

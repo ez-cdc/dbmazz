@@ -166,6 +166,46 @@ impl GtidSet {
         self.intervals.values().all(|v| v.is_empty())
     }
 
+    /// Returns `true` iff every `(uuid, txn)` covered by `other` is also
+    /// covered by `self`. Used by the DBLog incremental snapshot
+    /// reconciliation (T4) to detect when the binlog stream consumer has
+    /// drained past a chunk's HIGH watermark.
+    ///
+    /// Complexity: O(I·log I) per UUID where I is the interval count for
+    /// that UUID, independent of the transaction-id ranges. We never
+    /// iterate individual GTID numbers — that would blow up for sources
+    /// that have executed millions of transactions.
+    pub fn is_superset_of(&self, other: &GtidSet) -> bool {
+        for (uuid, other_ranges) in &other.intervals {
+            let self_ranges = match self.intervals.get(uuid) {
+                Some(r) if !r.is_empty() => r,
+                _ => return false,
+            };
+
+            // Sort and coalesce self's intervals for this UUID once.
+            let mut sorted = self_ranges.clone();
+            sorted.sort_by_key(|&(s, _)| s);
+            let mut merged: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+            for r in sorted {
+                if let Some(last) = merged.last_mut() {
+                    if r.0 <= last.1.saturating_add(1) {
+                        last.1 = last.1.max(r.1);
+                        continue;
+                    }
+                }
+                merged.push(r);
+            }
+
+            for &(o_start, o_end) in other_ranges {
+                let covered = merged.iter().any(|&(s, e)| s <= o_start && o_end <= e);
+                if !covered {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Format the GTID set into its canonical string representation (UUIDs are sorted lexicographically).
     pub fn format(&self) -> String {
         let mut parts = Vec::new();
@@ -396,6 +436,62 @@ mod tests {
         set.add_gtid("uuid-b".to_string(), 1);
         assert!(set.contains("uuid-a", 3));
         assert!(set.contains("uuid-b", 1));
+    }
+
+    #[test]
+    fn test_superset_empty_empty() {
+        let a = GtidSet::parse("").unwrap();
+        let b = GtidSet::parse("").unwrap();
+        assert!(a.is_superset_of(&b));
+    }
+
+    #[test]
+    fn test_superset_self() {
+        let a = GtidSet::parse("uuid-a:1-100,uuid-b:1-50").unwrap();
+        assert!(a.is_superset_of(&a.clone()));
+    }
+
+    #[test]
+    fn test_superset_proper() {
+        let big = GtidSet::parse("uuid-a:1-100").unwrap();
+        let small = GtidSet::parse("uuid-a:50-90").unwrap();
+        assert!(big.is_superset_of(&small));
+        assert!(!small.is_superset_of(&big));
+    }
+
+    #[test]
+    fn test_superset_different_uuids() {
+        let a = GtidSet::parse("uuid-a:1-100").unwrap();
+        let b = GtidSet::parse("uuid-b:1-100").unwrap();
+        assert!(!a.is_superset_of(&b));
+        assert!(!b.is_superset_of(&a));
+    }
+
+    #[test]
+    fn test_superset_overlapping_but_not_superset() {
+        // a covers 1-50, b covers 25-100 — neither is superset of the other.
+        let a = GtidSet::parse("uuid:1-50").unwrap();
+        let b = GtidSet::parse("uuid:25-100").unwrap();
+        assert!(!a.is_superset_of(&b));
+        assert!(!b.is_superset_of(&a));
+    }
+
+    #[test]
+    fn test_superset_split_intervals_get_coalesced() {
+        // self has [1-50, 51-100] (split intervals, contiguous);
+        // is_superset_of must coalesce them and recognise [1-100] coverage.
+        let self_set = GtidSet::parse("uuid:1-50:51-100").unwrap();
+        let other = GtidSet::parse("uuid:1-100").unwrap();
+        assert!(self_set.is_superset_of(&other));
+    }
+
+    #[test]
+    fn test_superset_huge_range_does_not_iterate_txns() {
+        // If is_superset_of iterated each txn, this would take seconds.
+        // The interval-aware impl is constant-time in this metric.
+        let big = GtidSet::parse("uuid:1-100000000").unwrap();
+        let small = GtidSet::parse("uuid:50000000-60000000").unwrap();
+        assert!(big.is_superset_of(&small));
     }
 
     #[test]

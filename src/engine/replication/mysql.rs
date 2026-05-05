@@ -31,6 +31,72 @@ impl MysqlReplicationLoop {
         Self { binlog_stream }
     }
 
+    /// For a CDC record (Insert/Update/Delete), check whether it mutates a
+    /// row that falls inside any active snapshot chunk's PK range AND
+    /// whose event GTID lies in the chunk's `(LOW, HIGH]` window. If so,
+    /// register the eviction — the snapshot worker will drop the
+    /// corresponding row from the chunk buffer before emitting.
+    ///
+    /// No-op for non-mutation records (Begin/Commit/Heartbeat/SchemaChange).
+    async fn record_chunk_eviction_if_applicable(
+        active_chunks: &crate::engine::snapshot::active_chunks::ActiveChunks,
+        record: &crate::core::CdcRecord,
+        parser_state: &crate::source::mysql::parser::ParserState,
+    ) {
+        use crate::core::CdcRecord;
+        use crate::engine::snapshot::active_chunks::pk_in_range;
+
+        let (table_ref, columns) = match record {
+            CdcRecord::Insert { table, columns, .. } | CdcRecord::Delete { table, columns, .. } => {
+                (table, columns)
+            }
+            CdcRecord::Update {
+                table, new_columns, ..
+            } => (table, new_columns),
+            _ => return,
+        };
+        let schema = match &table_ref.schema {
+            Some(s) => s.clone(),
+            None => return,
+        };
+        let table = table_ref.name.clone();
+
+        let snapshots = active_chunks.chunks_for_table(&schema, &table).await;
+        if snapshots.is_empty() {
+            return;
+        }
+
+        // The "in window" check has two regimes:
+        //   - high_set is None  → SELECT still in flight; every event
+        //     since LOW is a candidate (it can't be after HIGH yet).
+        //   - high_set is Some  → strict (LOW, HIGH] check. parser_state
+        //     ⊇ LOW means we've passed LOW; not (parser_state ⊇ HIGH)
+        //     means we haven't drained yet. Both must hold for the
+        //     event to be inside the chunk's window.
+        for snap in &snapshots {
+            // Find the PK value by column name on this record. If the
+            // record doesn't carry the PK column (shouldn't happen for
+            // ROW format with REPLICA IDENTITY FULL but defensive), skip.
+            let pk_value = match columns.iter().find(|c| c.name == snap.pk_column) {
+                Some(c) => c.value.clone(),
+                None => continue,
+            };
+            if !pk_in_range(&pk_value, &snap.pk_range) {
+                continue;
+            }
+            let in_window = match &snap.high_set {
+                None => parser_state.current_gtid_set.is_superset_of(&snap.low_set),
+                Some(high) => {
+                    parser_state.current_gtid_set.is_superset_of(&snap.low_set)
+                        && !parser_state.current_gtid_set.is_superset_of(high)
+                }
+            };
+            if in_window {
+                active_chunks.record_eviction(snap.id, &pk_value).await;
+            }
+        }
+    }
+
     /// Returns `true` if the event targets a tracked table.
     ///
     /// Unfiltered types (`Begin`, `Commit`, `Heartbeat`, `TableMap`) always pass.
@@ -77,6 +143,7 @@ impl ReplicationLoop for MysqlReplicationLoop {
             mut feedback_rx,
             source_schemas,
             sink_factory,
+            active_chunks,
             ..
         } = ctx;
 
@@ -179,11 +246,13 @@ impl ReplicationLoop for MysqlReplicationLoop {
                         let snap_config = config.clone();
                         let snap_state = shared_state.clone();
                         let snap_factory = sink_factory.clone();
+                        let snap_active_chunks = active_chunks.clone();
                         tokio::spawn(async move {
                             match crate::engine::snapshot::mysql::run_mysql_snapshot(
                                 snap_config,
                                 snap_state.clone(),
                                 snap_factory,
+                                snap_active_chunks,
                             )
                             .await
                             {
@@ -217,6 +286,18 @@ impl ReplicationLoop for MysqlReplicationLoop {
                                 }
                                 let records = convert_to_cdc_records(event)?;
                                 for record in records {
+                                    // DBLog reconciliation: if this record mutates a row
+                                    // that falls inside an active snapshot chunk's PK
+                                    // range AND the event GTID falls in (LOW, HIGH], mark
+                                    // the snapshot row as evicted so the worker drops it
+                                    // before emitting.
+                                    Self::record_chunk_eviction_if_applicable(
+                                        &active_chunks,
+                                        &record,
+                                        &parser_state,
+                                    )
+                                    .await;
+
                                     let synthetic_lsn = next_synthetic_lsn;
                                     next_synthetic_lsn = next_synthetic_lsn.wrapping_add(1);
                                     if let Some(pos) = record.position().cloned() {
@@ -231,6 +312,11 @@ impl ReplicationLoop for MysqlReplicationLoop {
                                     })?;
                                 }
                             }
+                            // After a batch of events, wake any snapshot worker whose
+                            // chunk window has now been fully covered by this consumer.
+                            active_chunks
+                                .try_drain(&parser_state.current_gtid_set)
+                                .await;
                         }
                         Some(Err(e)) => {
                             error!("MySQL binlog stream error: {}", e);
