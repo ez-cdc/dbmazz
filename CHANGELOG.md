@@ -4,6 +4,8 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-04
+
 ### Added
 
 - **MySQL source (BETA).** New CDC source connector that streams from MySQL
