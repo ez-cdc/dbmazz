@@ -830,10 +830,12 @@ async fn mysql_chunk_counts_for_table(
     slot_name: &str,
     table_name: &str,
 ) -> Result<(i64, i64)> {
+    // MySQL ≤ 8.4 does not support `FILTER (WHERE ...)` (introduced in
+    // 9.7 innovation, no LTS yet). Use the universal CASE WHEN form.
     let row: Option<(i64, i64)> = conn
         .exec_first(
             "SELECT COALESCE(SUM(CASE WHEN status = 'COMPLETE' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(rows_synced) FILTER (WHERE status = 'COMPLETE'), 0)
+                    COALESCE(SUM(CASE WHEN status = 'COMPLETE' THEN rows_synced ELSE 0 END), 0)
              FROM dbmazz_snapshot_state
              WHERE slot_name = ? AND table_name = ?",
             (slot_name, table_name),
@@ -951,6 +953,35 @@ fn quote_mysql_ident(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::core::traits::SourceColumn;
+
+    /// Guards against re-introducing the Postgres-only filtered-aggregate
+    /// clause in SQL that targets MySQL. MySQL ≤ 8.4 rejects that syntax.
+    /// The pattern is built from runtime concatenation so this test's body
+    /// does not itself contain the literal it forbids.
+    #[test]
+    fn no_postgres_filtered_aggregate_in_mysql_snapshot_sql() {
+        let src = include_str!("mysql.rs");
+        let forbidden = format!("{}{}{}", "FILTER", " (", "WHERE");
+        // Skip lines that intentionally describe the pattern (this test's
+        // own assert text and the comment in mysql_chunk_counts_for_table).
+        let offending: Vec<usize> = src
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains(&forbidden))
+            .filter(|(_, line)| {
+                !line.contains("MySQL ≤ 8.4")
+                    && !line.contains("does not support")
+                    && !line.trim_start().starts_with("//")
+            })
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "MySQL snapshot SQL must not use the Postgres-only filtered \
+             aggregate clause; offending lines: {:?}",
+            offending
+        );
+    }
 
     fn make_test_schema(name: &str, pk_name: &str, pk_type: DataType) -> SourceTableSchema {
         SourceTableSchema {
