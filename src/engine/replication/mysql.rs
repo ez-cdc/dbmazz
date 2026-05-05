@@ -3,7 +3,7 @@
 
 //! MySQL replication loop — reads binlog events and pushes to pipeline.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -12,11 +12,13 @@ use futures_util::StreamExt;
 use mysql_common::binlog::events::TableMapEvent;
 use tracing::{debug, error, info, warn};
 
+use crate::core::SourcePosition;
 use crate::engine::replication::{LoopContext, LoopHelper, ReplicationLoop};
 use crate::engine::ControlFlow;
 use crate::pipeline::PipelineEvent;
 use crate::source::mysql::converter::convert_to_cdc_records;
-use crate::source::mysql::parser::{process_typed_event, BinlogEvent};
+use crate::source::mysql::gtid::GtidSet;
+use crate::source::mysql::parser::{process_typed_event, BinlogEvent, ParserState};
 
 /// MySQL replication loop — reads binlog events and pushes to pipeline.
 pub struct MysqlReplicationLoop {
@@ -70,6 +72,7 @@ impl ReplicationLoop for MysqlReplicationLoop {
         let LoopContext {
             shared_state,
             config,
+            state_store,
             pipeline_tx,
             mut feedback_rx,
             source_schemas,
@@ -95,6 +98,47 @@ impl ReplicationLoop for MysqlReplicationLoop {
             tracked_tables.len(),
             tracked_tables
         );
+
+        // Parser state — tracks the binlog file we're currently in and the
+        // accumulated GTID-executed set. The set seeds from any prior
+        // checkpoint persisted in StateStore so resumed streams continue
+        // adding to a real cumulative set, not start from zero.
+        let initial_gtid_set = match state_store
+            .load_mysql_checkpoint(&format!("mysql_{}", config.source.mysql().server_id))
+            .await
+        {
+            Ok(Some((file, _pos, gtid_str))) => {
+                info!(
+                    "MySQL CDC resume: starting from checkpoint file={}, gtid_executed={}",
+                    file, gtid_str
+                );
+                let initial_set = GtidSet::parse(&gtid_str).unwrap_or_default();
+                let mut parser_state = ParserState::new(file, initial_set);
+                parser_state.current_txn_gtid = None;
+                parser_state
+            }
+            Ok(None) => {
+                info!("MySQL CDC: no prior checkpoint, tracking from stream start");
+                ParserState::default()
+            }
+            Err(e) => {
+                warn!(
+                    "MySQL CDC: failed to load checkpoint ({}); tracking from stream start",
+                    e
+                );
+                ParserState::default()
+            }
+        };
+        let mut parser_state = initial_gtid_set;
+
+        // Synthetic LSN counter — required because the generic pipeline
+        // feedback channel speaks in `u64`, but MySQL positions are triples.
+        // Each PipelineEvent gets a monotonically-increasing synthetic LSN,
+        // and we keep a (synthetic_lsn -> SourcePosition) map so we can
+        // resolve back to the real triple when the sink confirms.
+        let mut next_synthetic_lsn: u64 = 1;
+        let mut pending_positions: BTreeMap<u64, SourcePosition> = BTreeMap::new();
+        let slot_name = format!("mysql_{}", config.source.mysql().server_id);
 
         let mut binlog_stream = self.binlog_stream;
         let tx = pipeline_tx;
@@ -162,7 +206,10 @@ impl ReplicationLoop for MysqlReplicationLoop {
                     match event_res {
                         Some(Ok(event)) => {
                             let binlog_events = process_typed_event(
-                                &event, &mut tme_cache, &col_names_map
+                                &event,
+                                &mut tme_cache,
+                                &col_names_map,
+                                &mut parser_state,
                             )?;
                             for event in &binlog_events {
                                 if !Self::is_tracked_table_event(event, &tracked_tables) {
@@ -170,8 +217,13 @@ impl ReplicationLoop for MysqlReplicationLoop {
                                 }
                                 let records = convert_to_cdc_records(event)?;
                                 for record in records {
+                                    let synthetic_lsn = next_synthetic_lsn;
+                                    next_synthetic_lsn = next_synthetic_lsn.wrapping_add(1);
+                                    if let Some(pos) = record.position().cloned() {
+                                        pending_positions.insert(synthetic_lsn, pos);
+                                    }
                                     let pipeline_event = PipelineEvent {
-                                        lsn: 0,
+                                        lsn: synthetic_lsn,
                                         record,
                                     };
                                     tx.send(pipeline_event).await.map_err(|_| {
@@ -191,8 +243,39 @@ impl ReplicationLoop for MysqlReplicationLoop {
                     }
                 }
 
-                // MySQL ignores checkpoint feedback (GTID is self-contained)
-                Some(_) = feedback_rx.recv() => {}
+                // MySQL has no client → server position ack (binlogs are time-purged,
+                // not consumer-purged), but we DO use the pipeline feedback to drive
+                // the client-side checkpoint that restart correctness depends on.
+                // Resolve the confirmed synthetic LSN back to the (file, pos, gtid)
+                // triple from pending_positions and persist it.
+                Some(confirmed_lsn) = feedback_rx.recv() => {
+                    if let Some((_, position)) = pending_positions
+                        .range(..=confirmed_lsn)
+                        .next_back()
+                        .map(|(k, v)| (*k, v.clone()))
+                    {
+                        if let SourcePosition::MysqlBinlog {
+                            ref file,
+                            position: pos,
+                            ref gtid_executed,
+                        } = position
+                        {
+                            if let Err(e) = state_store
+                                .save_mysql_checkpoint(&slot_name, file, pos, gtid_executed)
+                                .await
+                            {
+                                warn!("MySQL checkpoint save failed: {}", e);
+                            } else {
+                                debug!(
+                                    "MySQL checkpoint saved: file={}, pos={}, gtid_executed={}",
+                                    file, pos, gtid_executed
+                                );
+                            }
+                        }
+                        // Drop confirmed entries.
+                        pending_positions = pending_positions.split_off(&(confirmed_lsn + 1));
+                    }
+                }
             }
         }
 

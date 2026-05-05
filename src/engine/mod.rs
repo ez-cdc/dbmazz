@@ -113,9 +113,35 @@ impl CdcEngine {
             .await;
         source.setup(&self.config.source.tables).await?;
 
-        // Stage: SETUP - Replication Stream start position (PG only, MySQL uses GTID)
+        // Stage: SETUP - Replication Stream start position
+        // - Postgres: LSN loaded above as `start_lsn`.
+        // - MySQL:    triple (file, position, gtid_executed) loaded from the
+        //             state store. `None` when no checkpoint exists, which
+        //             means the binlog stream starts from the earliest available.
         let start_position = match self.config.source.source_type {
             SourceType::Postgres => Some(SourcePosition::Lsn(start_lsn)),
+            #[cfg(feature = "mysql-source")]
+            SourceType::Mysql => {
+                let slot = format!("mysql_{}", self.config.source.mysql().server_id);
+                match self.state_store.load_mysql_checkpoint(&slot).await? {
+                    Some((file, position, gtid_executed)) => {
+                        info!(
+                            "Checkpoint: Resuming MySQL binlog from file={}, pos={}, gtid_executed={}",
+                            file, position, gtid_executed
+                        );
+                        Some(SourcePosition::MysqlBinlog {
+                            file,
+                            position,
+                            gtid_executed,
+                        })
+                    }
+                    None => {
+                        info!("Checkpoint: MySQL has no prior checkpoint (starting from earliest binlog)");
+                        None
+                    }
+                }
+            }
+            #[cfg(not(feature = "mysql-source"))]
             SourceType::Mysql => None,
         };
 
@@ -339,9 +365,10 @@ impl CdcEngine {
                 Ok(start_lsn)
             }
             SourceType::Mysql => {
-                // MySQL checkpointing is GTID-based, not LSN-based.
-                // GTID state is tracked within the replication stream itself.
-                info!("Checkpoint: MySQL GTID-based, no LSN checkpoint to load");
+                // MySQL doesn't use the LSN interface — its checkpoint is the
+                // (binlog_file, position, gtid_executed) triple, loaded separately
+                // in `run()` via state_store.load_mysql_checkpoint(). This branch
+                // returns 0 because the LSN slot is unused for MySQL.
                 Ok(0)
             }
         }

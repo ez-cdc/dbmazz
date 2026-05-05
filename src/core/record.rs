@@ -40,6 +40,22 @@ pub enum CdcRecord {
     },
 }
 
+impl CdcRecord {
+    /// Returns the source position carried by this record, if any.
+    /// `Begin` has none (it carries only an XID); every other variant does.
+    pub fn position(&self) -> Option<&SourcePosition> {
+        match self {
+            CdcRecord::Insert { position, .. }
+            | CdcRecord::Update { position, .. }
+            | CdcRecord::Delete { position, .. }
+            | CdcRecord::SchemaChange { position, .. }
+            | CdcRecord::Commit { position, .. }
+            | CdcRecord::Heartbeat { position } => Some(position),
+            CdcRecord::Begin { .. } => None,
+        }
+    }
+}
+
 /// Reference to a database table
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TableRef {

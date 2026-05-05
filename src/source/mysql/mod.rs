@@ -127,7 +127,9 @@ impl MysqlConnectionConfig {
 /// MySQL source for Change Data Capture.
 ///
 /// Manages two MySQL connections: `query_conn` for metadata queries and
-/// `binlog_conn` for binary log reading.
+/// `binlog_conn` for binary log reading. The live `(file, position,
+/// gtid_executed)` checkpoint is owned by the replication loop and
+/// persisted to `StateStore`; this struct holds no in-memory checkpoint.
 pub struct MysqlSource {
     config: MysqlConnectionConfig,
     server_id: u32,
@@ -138,8 +140,6 @@ pub struct MysqlSource {
     binlog_conn: Option<Mutex<mysql_async::Conn>>,
     /// Cached table schemas keyed by fully-qualified table name (`db.table`).
     schema_cache: Arc<Mutex<HashMap<String, SourceTableSchema>>>,
-    /// The last known GTID set, used for checkpointing.
-    current_gtid: Option<String>,
 }
 
 impl MysqlSource {
@@ -159,7 +159,6 @@ impl MysqlSource {
             query_conn: None,
             binlog_conn: None,
             schema_cache: Arc::new(Mutex::new(HashMap::new())),
-            current_gtid: None,
         })
     }
 
@@ -350,23 +349,23 @@ impl Source for MysqlSource {
             .into_inner();
 
         let server_id = self.config.server_id;
-        let stream = MysqlBinlogStream::new(binlog_conn, server_id).await?;
-        let current_gtid = match &position {
-            Some(SourcePosition::GtidSet(gtid)) => Some(gtid.clone()),
-            _ => self.current_gtid.clone(),
-        };
-        if let Some(ref gtid) = current_gtid {
-            info!("Resuming MySQL binlog from GTID: {}", gtid);
-        } else {
-            info!("Starting MySQL binlog from current position");
+        let resume_gtid = extract_resume_gtid_set(&position);
+        match resume_gtid.as_deref() {
+            Some(gtid) if !gtid.is_empty() => {
+                info!("Resuming MySQL binlog from Gtid_set: {}", gtid)
+            }
+            _ => info!("Starting MySQL binlog from earliest available position"),
         }
+        let stream = MysqlBinlogStream::new(binlog_conn, server_id, resume_gtid.as_deref()).await?;
 
         Ok(Box::new(stream))
     }
 
-    /// Return the current checkpoint position (GTID set).
+    /// MySQL has no in-source checkpoint state — the live triple
+    /// `(file, position, gtid_executed)` is owned by the replication loop
+    /// and persisted to `StateStore::save_mysql_checkpoint`.
     fn checkpoint_position(&self) -> Option<SourcePosition> {
-        self.current_gtid.clone().map(SourcePosition::GtidSet)
+        None
     }
 
     /// Cleanup: drop connections and release resources.
@@ -374,32 +373,48 @@ impl Source for MysqlSource {
         self.query_conn = None;
         self.binlog_conn = None;
         self.schema_cache.lock().await.clear();
-        self.current_gtid = None;
         info!("MySQL cleanup complete");
         Ok(())
     }
 
     async fn create_loop(
         &mut self,
-        _position: Option<SourcePosition>,
+        position: Option<SourcePosition>,
     ) -> Result<Box<dyn crate::engine::replication::ReplicationLoop>> {
-        let typed_stream = self.start_replication_typed().await?;
+        let resume_gtid = extract_resume_gtid_set(&position);
+        let typed_stream = self.start_replication_typed(resume_gtid.as_deref()).await?;
         Ok(Box::new(
             crate::engine::replication::MysqlReplicationLoop::new(typed_stream),
         ))
     }
 }
 
+/// Pick the GTID-set string the binlog stream should resume from.
+/// Only `MysqlBinlog { gtid_executed }` carries a meaningful resume value;
+/// every other variant means "no checkpoint, start from the earliest
+/// available binlog".
+fn extract_resume_gtid_set(position: &Option<SourcePosition>) -> Option<String> {
+    match position {
+        Some(SourcePosition::MysqlBinlog { gtid_executed, .. }) if !gtid_executed.is_empty() => {
+            Some(gtid_executed.clone())
+        }
+        _ => None,
+    }
+}
+
 impl MysqlSource {
-    /// Start a typed binlog stream (bypasses ReplicationStream trait).
-    pub async fn start_replication_typed(&mut self) -> Result<mysql_async::BinlogStream> {
+    /// Start a typed binlog stream (used by `create_loop`).
+    pub async fn start_replication_typed(
+        &mut self,
+        initial_gtid_set: Option<&str>,
+    ) -> Result<mysql_async::BinlogStream> {
         use crate::source::mysql::binlog_stream::MysqlBinlogStream;
         let conn: mysql_async::Conn = self
             .binlog_conn
             .take()
             .ok_or_else(|| anyhow::anyhow!("binlog connection not available"))?
             .into_inner();
-        let stream = MysqlBinlogStream::new(conn, self.config.server_id).await?;
+        let stream = MysqlBinlogStream::new(conn, self.config.server_id, initial_gtid_set).await?;
         Ok(stream.into_inner())
     }
 }
@@ -416,7 +431,6 @@ impl std::fmt::Debug for MysqlSource {
             .field("use_gtid", &self.use_gtid)
             .field("has_query_conn", &self.query_conn.is_some())
             .field("has_binlog_conn", &self.binlog_conn.is_some())
-            .field("current_gtid", &self.current_gtid)
             .finish_non_exhaustive()
     }
 }

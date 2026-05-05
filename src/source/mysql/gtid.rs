@@ -30,7 +30,7 @@ pub struct GtidInterval {
 ///
 /// Parsed order is preserved; intervals may overlap.
 /// An empty or whitespace-only string parses to an empty set.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GtidSet {
     pub intervals: HashMap<String, Vec<(u64, u64)>>,
 }
@@ -137,6 +137,33 @@ impl GtidSet {
         let high = GtidSet::parse(high_set)?;
 
         Ok(!low.contains(uuid, txn) && high.contains(uuid, txn))
+    }
+
+    /// Append a single GTID `(uuid, transaction_id)` to this set.
+    ///
+    /// If the new transaction is contiguous with the last interval for that
+    /// UUID (i.e. `last.end + 1 == transaction_id`), the interval is extended
+    /// in place. Otherwise a new singleton interval is added. This keeps the
+    /// serialized form compact for the common case of monotonic GTID
+    /// streaming from a single source.
+    pub fn add_gtid(&mut self, uuid: String, transaction_id: u64) {
+        let entry = self.intervals.entry(uuid).or_default();
+        if let Some(last) = entry.last_mut() {
+            if last.1 + 1 == transaction_id {
+                last.1 = transaction_id;
+                return;
+            }
+            if transaction_id >= last.0 && transaction_id <= last.1 {
+                // Already covered; idempotent on duplicate event delivery.
+                return;
+            }
+        }
+        entry.push((transaction_id, transaction_id));
+    }
+
+    /// Returns `true` if the set has no entries.
+    pub fn is_empty(&self) -> bool {
+        self.intervals.values().all(|v| v.is_empty())
     }
 
     /// Format the GTID set into its canonical string representation (UUIDs are sorted lexicographically).
@@ -335,6 +362,49 @@ mod tests {
         let set = GtidSet::parse(" uuid1:1-10 , uuid2:20-30 ").unwrap();
         assert!(set.contains("uuid1", 5));
         assert!(set.contains("uuid2", 25));
+    }
+
+    #[test]
+    fn test_add_gtid_extends_contiguous() {
+        let mut set = GtidSet::parse("uuid:1-5").unwrap();
+        set.add_gtid("uuid".to_string(), 6);
+        assert_eq!(set.format(), "uuid:1-6");
+        set.add_gtid("uuid".to_string(), 7);
+        assert_eq!(set.format(), "uuid:1-7");
+    }
+
+    #[test]
+    fn test_add_gtid_new_singleton_when_gap() {
+        let mut set = GtidSet::parse("uuid:1-5").unwrap();
+        set.add_gtid("uuid".to_string(), 10);
+        // Gap: keeps as separate interval. Format keeps insertion order per uuid.
+        assert!(set.contains("uuid", 5));
+        assert!(set.contains("uuid", 10));
+        assert!(!set.contains("uuid", 6));
+    }
+
+    #[test]
+    fn test_add_gtid_idempotent_on_duplicate() {
+        let mut set = GtidSet::parse("uuid:1-5").unwrap();
+        set.add_gtid("uuid".to_string(), 3);
+        assert_eq!(set.format(), "uuid:1-5");
+    }
+
+    #[test]
+    fn test_add_gtid_new_uuid() {
+        let mut set = GtidSet::parse("uuid-a:1-5").unwrap();
+        set.add_gtid("uuid-b".to_string(), 1);
+        assert!(set.contains("uuid-a", 3));
+        assert!(set.contains("uuid-b", 1));
+    }
+
+    #[test]
+    fn test_add_gtid_to_empty() {
+        let mut set = GtidSet::parse("").unwrap();
+        assert!(set.is_empty());
+        set.add_gtid("uuid".to_string(), 1);
+        assert_eq!(set.format(), "uuid:1");
+        assert!(!set.is_empty());
     }
 
     #[test]

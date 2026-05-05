@@ -9,10 +9,11 @@ use mysql_common::binlog::events::{
 use mysql_common::binlog::value::BinlogValue;
 
 use crate::core::SourcePosition;
+use crate::source::mysql::gtid::GtidSet;
 
 /// MySQL binlog event types relevant for CDC processing.
 /// Populated from mysql_async's typed events — no raw byte parsing.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum BinlogEvent {
     Begin {
         gtid: String,
@@ -55,6 +56,7 @@ pub enum BinlogEvent {
         table_id: u64,
         col_types: Vec<u8>,
     },
+    #[default]
     Heartbeat,
     Ddl {
         schema_name: String,
@@ -62,9 +64,29 @@ pub enum BinlogEvent {
     },
 }
 
-impl Default for BinlogEvent {
-    fn default() -> Self {
-        Self::Heartbeat
+/// Mutable parser state carried across binlog events on the same stream.
+///
+/// `current_file` advances on real `RotateEvent`s. `current_gtid_set`
+/// accumulates every `GtidEvent` in transaction order. `current_txn_gtid`
+/// holds the GTID of the in-flight transaction (used to label `Commit`).
+///
+/// All three fields are part of the on-the-wire `MysqlBinlog` checkpoint
+/// emitted with each event; restart correctness depends on them being
+/// kept up to date.
+#[derive(Debug, Default, Clone)]
+pub struct ParserState {
+    pub current_file: String,
+    pub current_gtid_set: GtidSet,
+    pub current_txn_gtid: Option<String>,
+}
+
+impl ParserState {
+    pub fn new(initial_file: String, initial_gtid_set: GtidSet) -> Self {
+        Self {
+            current_file: initial_file,
+            current_gtid_set: initial_gtid_set,
+            current_txn_gtid: None,
+        }
     }
 }
 
@@ -73,10 +95,14 @@ impl Default for BinlogEvent {
 /// Required:
 /// - `tme_cache`: persistent cache mapping table_id → TableMapEvent (populated by TABLE_MAP_EVENT)
 /// - `col_names_map`: (schema, table) → Vec<column_name> from schema introspection
+/// - `state`: mutable parser state (current binlog file, accumulated GTID set,
+///   in-flight transaction GTID). Must outlive a single event so GTIDs and
+///   file rotations are tracked across calls.
 pub fn process_typed_event(
     event: &mysql_common::binlog::events::Event,
     tme_cache: &mut HashMap<u64, TableMapEvent<'static>>,
     col_names_map: &HashMap<(String, String), Vec<String>>,
+    state: &mut ParserState,
 ) -> Result<Vec<BinlogEvent>> {
     let data = event
         .read_data()
@@ -86,6 +112,15 @@ pub fn process_typed_event(
     let header = event.header();
     let timestamp = header.timestamp();
     let log_pos = header.log_pos();
+
+    // Helper: build the canonical MySQL checkpoint position for an event in
+    // this stream. The triple (file, position, gtid_executed) is what restart
+    // logic in MysqlSource::start_replication consumes.
+    let make_position = |state: &ParserState| SourcePosition::MysqlBinlog {
+        file: state.current_file.clone(),
+        position: log_pos as u64,
+        gtid_executed: state.current_gtid_set.format(),
+    };
 
     match data {
         EventData::TableMapEvent(tme) => {
@@ -98,9 +133,14 @@ pub fn process_typed_event(
 
         EventData::RowsEvent(rows_data) => {
             let table_id = rows_data.table_id();
-            let tme = tme_cache
-                .get(&table_id)
-                .unwrap_or_else(|| panic!("No TableMapEvent found for table_id {}", table_id));
+            let tme = tme_cache.get(&table_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MySQL binlog protocol violation: RowsEvent for table_id {} \
+                     arrived without a preceding TableMapEvent in this session. \
+                     Aborting CDC to avoid emitting events with incorrect schema metadata.",
+                    table_id
+                )
+            })?;
 
             let schema = tme.database_name().to_string();
             let table = tme.table_name().to_string();
@@ -129,6 +169,9 @@ pub fn process_typed_event(
                 Ok(rows)
             }
 
+            // Update events return (before_rows, after_rows). Local helper —
+            // not worth a top-level type alias just to satisfy clippy.
+            #[allow(clippy::type_complexity)]
             fn collect_before_after<R>(
                 re: &R,
                 tme: &TableMapEvent,
@@ -180,7 +223,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 RowsEventData::WriteRowsEventV1(ref re) => {
@@ -192,7 +235,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 RowsEventData::UpdateRowsEvent(ref re) => {
@@ -205,7 +248,7 @@ pub fn process_typed_event(
                         after_rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 RowsEventData::UpdateRowsEventV1(ref re) => {
@@ -218,7 +261,7 @@ pub fn process_typed_event(
                         after_rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 RowsEventData::DeleteRowsEvent(ref re) => {
@@ -230,7 +273,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 RowsEventData::DeleteRowsEventV1(ref re) => {
@@ -242,7 +285,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
-                        position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
+                        position: make_position(state),
                     }])
                 }
                 _ => Ok(vec![]),
@@ -250,15 +293,35 @@ pub fn process_typed_event(
         }
 
         EventData::GtidEvent(gtid_event) => {
+            // Track the in-flight transaction GTID and merge it into the
+            // executed-set running tally. Both are used for the next emitted
+            // events' SourcePosition and for the Commit label.
             let gtid = format_gtid(&gtid_event);
+            if let Some((uuid, txn_str)) = gtid.split_once(':') {
+                if let Ok(txn) = txn_str.parse::<u64>() {
+                    state.current_gtid_set.add_gtid(uuid.to_string(), txn);
+                }
+            }
+            state.current_txn_gtid = Some(gtid.clone());
             Ok(vec![BinlogEvent::Begin { gtid, timestamp }])
         }
 
-        EventData::XidEvent(_xid) => Ok(vec![BinlogEvent::Commit {
-            gtid: format!("XID:{}", timestamp),
-            timestamp,
-            position: SourcePosition::GtidSet(format!("{:X}", log_pos)),
-        }]),
+        EventData::XidEvent(_xid) => {
+            // The Commit event labels the transaction that just finished.
+            // Use the GTID parsed from the preceding GtidEvent if present.
+            // Falling back to an XID-derived label is only for non-GTID setups
+            // where MySQL never emits a GtidEvent — but in that mode restart
+            // is already (file, position)-only.
+            let gtid = state
+                .current_txn_gtid
+                .take()
+                .unwrap_or_else(|| format!("XID:{}", timestamp));
+            Ok(vec![BinlogEvent::Commit {
+                gtid,
+                timestamp,
+                position: make_position(state),
+            }])
+        }
 
         EventData::QueryEvent(qe) => Ok(vec![BinlogEvent::Ddl {
             schema_name: qe.schema().to_string(),
@@ -267,9 +330,17 @@ pub fn process_typed_event(
 
         EventData::HeartbeatEvent => Ok(vec![BinlogEvent::Heartbeat]),
 
-        EventData::RotateEvent(_) | EventData::FormatDescriptionEvent(_) | EventData::StopEvent => {
+        EventData::RotateEvent(rotate) => {
+            // RotateEvent advances current_file. The TableMap cache is left
+            // intact: real rotations re-emit TableMaps for active tables, and
+            // mysql_async/MariaDB occasionally emit "fake" RotateEvents on
+            // reconnect (see Debezium PR #4959, MariaDB KB on fake rotate).
+            // Invalidating the cache here breaks those streams.
+            state.current_file = rotate.name().to_string();
             Ok(vec![])
         }
+
+        EventData::FormatDescriptionEvent(_) | EventData::StopEvent => Ok(vec![]),
 
         _ => Ok(vec![]),
     }

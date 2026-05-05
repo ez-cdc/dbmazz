@@ -14,11 +14,11 @@ use mysql_async::prelude::Queryable;
 #[cfg(feature = "mysql-source")]
 use tracing::info;
 
-/// Backend for LSN / checkpoint persistence.
+/// Backend for checkpoint persistence.
 ///
 /// Detects the database scheme from the URL:
 /// - `postgres://` → PostgreSQL with `lsn BIGINT`
-/// - `mysql://` → MySQL with `position TEXT` (for future GTID support)
+/// - `mysql://`    → MySQL with `(mysql_binlog_file, mysql_gtid_set)`
 #[derive(Clone)]
 enum StoreBackend {
     Postgres {
@@ -96,7 +96,9 @@ impl StateStore {
         })
     }
 
-    /// MySQL backend — creates a `dbmazz_checkpoints` table with a `position TEXT` column.
+    /// MySQL backend — creates `dbmazz_checkpoints` with the
+    /// `(mysql_binlog_file, mysql_gtid_set)` triple used by MySQL CDC
+    /// restart.
     #[cfg(feature = "mysql-source")]
     async fn new_mysql(database_url: &str) -> Result<Self> {
         let opts = build_mysql_opts(database_url)
@@ -110,7 +112,9 @@ impl StateStore {
         conn.query_drop(
             "CREATE TABLE IF NOT EXISTS dbmazz_checkpoints (
                 slot_name VARCHAR(255) PRIMARY KEY,
-                position TEXT,
+                mysql_binlog_file VARCHAR(512) NOT NULL,
+                mysql_binlog_position BIGINT UNSIGNED NOT NULL,
+                mysql_gtid_set TEXT NOT NULL,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
@@ -126,7 +130,10 @@ impl StateStore {
         })
     }
 
-    /// Persist a checkpoint position for the given slot.
+    /// Persist a Postgres LSN checkpoint for the given slot.
+    ///
+    /// MySQL uses `save_mysql_checkpoint` instead — this method is
+    /// Postgres-only and rejects calls against the MySQL backend.
     pub async fn save_checkpoint(&self, slot: &str, lsn: u64) -> Result<()> {
         match &self.backend {
             StoreBackend::Postgres { client } => {
@@ -140,25 +147,80 @@ impl StateStore {
                         &[&slot, &(lsn as i64)],
                     )
                     .await?;
+                Ok(())
             }
             #[cfg(feature = "mysql-source")]
+            StoreBackend::Mysql { .. } => {
+                anyhow::bail!(
+                    "save_checkpoint(slot, lsn) is Postgres-only; \
+                     use save_mysql_checkpoint(slot, file, position, gtid_set) for MySQL."
+                )
+            }
+        }
+    }
+
+    /// Persist the MySQL binlog checkpoint triple `(file, position, gtid_set)`.
+    /// Rejected by the Postgres backend — Postgres uses `save_checkpoint`.
+    #[cfg(feature = "mysql-source")]
+    pub async fn save_mysql_checkpoint(
+        &self,
+        slot: &str,
+        binlog_file: &str,
+        position: u64,
+        gtid_set: &str,
+    ) -> Result<()> {
+        match &self.backend {
+            StoreBackend::Postgres { .. } => anyhow::bail!(
+                "save_mysql_checkpoint called on a Postgres state store; \
+                 use save_checkpoint(slot, lsn) for Postgres."
+            ),
             StoreBackend::Mysql { conn } => {
                 let mut conn = conn.lock().await;
                 conn.exec_drop(
-                    "INSERT INTO dbmazz_checkpoints (slot_name, position)
-                     VALUES (?, ?)
-                     ON DUPLICATE KEY UPDATE position = VALUES(position),
-                                             updated_at = CURRENT_TIMESTAMP",
-                    (slot, lsn.to_string()),
+                    "INSERT INTO dbmazz_checkpoints \
+                       (slot_name, mysql_binlog_file, mysql_binlog_position, mysql_gtid_set) \
+                     VALUES (?, ?, ?, ?) \
+                     ON DUPLICATE KEY UPDATE \
+                       mysql_binlog_file = VALUES(mysql_binlog_file), \
+                       mysql_binlog_position = VALUES(mysql_binlog_position), \
+                       mysql_gtid_set = VALUES(mysql_gtid_set), \
+                       updated_at = CURRENT_TIMESTAMP",
+                    (slot, binlog_file, position, gtid_set),
                 )
                 .await
-                .context("StateStore (MySQL): failed to save checkpoint")?;
+                .context("StateStore (MySQL): failed to save mysql checkpoint")?;
+                Ok(())
             }
         }
-        Ok(())
     }
 
-    /// Load the last checkpoint position for the given slot, or `None` if none exists.
+    /// Load the MySQL binlog checkpoint triple, or `None` if not persisted.
+    /// Rejected by the Postgres backend.
+    #[cfg(feature = "mysql-source")]
+    pub async fn load_mysql_checkpoint(&self, slot: &str) -> Result<Option<(String, u64, String)>> {
+        match &self.backend {
+            StoreBackend::Postgres { .. } => anyhow::bail!(
+                "load_mysql_checkpoint called on a Postgres state store; \
+                 use load_checkpoint(slot) for Postgres."
+            ),
+            StoreBackend::Mysql { conn } => {
+                let mut conn = conn.lock().await;
+                let row: Option<(String, u64, String)> = conn
+                    .exec_first(
+                        "SELECT mysql_binlog_file, mysql_binlog_position, mysql_gtid_set \
+                         FROM dbmazz_checkpoints \
+                         WHERE slot_name = ?",
+                        (slot,),
+                    )
+                    .await
+                    .context("StateStore (MySQL): failed to load mysql checkpoint")?;
+                Ok(row)
+            }
+        }
+    }
+
+    /// Load the last Postgres LSN checkpoint for the given slot.
+    /// Postgres-only — MySQL uses `load_mysql_checkpoint`.
     pub async fn load_checkpoint(&self, slot: &str) -> Result<Option<u64>> {
         match &self.backend {
             StoreBackend::Postgres { client } => {
@@ -169,29 +231,13 @@ impl StateStore {
                         &[&slot],
                     )
                     .await?;
-
                 Ok(row.map(|r| r.get::<_, i64>(0) as u64))
             }
             #[cfg(feature = "mysql-source")]
-            StoreBackend::Mysql { conn } => {
-                let mut conn = conn.lock().await;
-                let row: Option<(String,)> = conn
-                    .exec_first(
-                        "SELECT position FROM dbmazz_checkpoints WHERE slot_name = ?",
-                        (slot,),
-                    )
-                    .await
-                    .context("StateStore (MySQL): failed to load checkpoint")?;
-
-                match row {
-                    Some((pos,)) => match pos.parse::<u64>() {
-                        Ok(lsn) => Ok(Some(lsn)),
-                        // Position might be a GTID string — LSN interface can't represent it.
-                        Err(_) => Ok(None),
-                    },
-                    None => Ok(None),
-                }
-            }
+            StoreBackend::Mysql { .. } => anyhow::bail!(
+                "load_checkpoint(slot) is Postgres-only; \
+                 use load_mysql_checkpoint(slot) for MySQL."
+            ),
         }
     }
 }
