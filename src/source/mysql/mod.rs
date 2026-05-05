@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use mysql_async::prelude::Queryable;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{MysqlSourceConfig, SourceType};
 use crate::core::traits::SourceTableSchema;
@@ -44,6 +44,7 @@ struct MysqlConnectionConfig {
     user: String,
     password: String,
     server_id: u32,
+    tls_skip_verify: bool,
 }
 
 impl std::fmt::Debug for MysqlConnectionConfig {
@@ -55,6 +56,7 @@ impl std::fmt::Debug for MysqlConnectionConfig {
             .field("user", &self.user)
             .field("password", &"[REDACTED]")
             .field("server_id", &self.server_id)
+            .field("tls_skip_verify", &self.tls_skip_verify)
             .finish()
     }
 }
@@ -67,7 +69,7 @@ impl MysqlConnectionConfig {
     ///
     /// # Errors
     /// Returns an error if the URL cannot be parsed or is missing required fields.
-    fn from_url(url: &str, server_id: u32) -> Result<Self> {
+    fn from_url(url: &str, server_id: u32, tls_skip_verify: bool) -> Result<Self> {
         let parsed = url::Url::parse(url)
             .context("Failed to parse MySQL URL. Expected: mysql://user:pass@host:port/db")?;
 
@@ -107,20 +109,38 @@ impl MysqlConnectionConfig {
             user,
             password,
             server_id,
+            tls_skip_verify,
         })
     }
 
-    /// Build `mysql_async::Opts` for creating connections, with TLS enabled.
+    /// Build `mysql_async::Opts` for creating connections.
+    ///
+    /// TLS is enabled with full verification by default. When the connection
+    /// config has `tls_skip_verify = true`, certificate validation is
+    /// disabled (development only).
     fn to_opts(&self) -> mysql_async::Opts {
-        let ssl_opts = mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true);
         let builder = mysql_async::OptsBuilder::default()
             .ip_or_hostname(self.host.clone())
             .tcp_port(self.port)
             .db_name(Some(self.database.clone()))
             .user(Some(self.user.clone()))
             .pass(Some(self.password.clone()))
-            .ssl_opts(ssl_opts);
+            .ssl_opts(mysql_ssl_opts(self.tls_skip_verify));
         mysql_async::Opts::from(builder)
+    }
+}
+
+/// Build `SslOpts` for MySQL connections.
+///
+/// Default: rely on the system trust store. When `skip_verify` is true,
+/// the danger flag is set — emit a `warn!` once at startup so the unsafe
+/// posture is visible in logs.
+pub(crate) fn mysql_ssl_opts(skip_verify: bool) -> mysql_async::SslOpts {
+    let opts = mysql_async::SslOpts::default();
+    if skip_verify {
+        opts.with_danger_accept_invalid_certs(true)
+    } else {
+        opts
     }
 }
 
@@ -147,11 +167,18 @@ impl MysqlSource {
     ///
     /// Connections are opened lazily in [`Source::setup()`].
     pub async fn new(url: &str, config: &MysqlSourceConfig) -> Result<Self> {
-        let conn_config = MysqlConnectionConfig::from_url(url, config.server_id)?;
+        let conn_config =
+            MysqlConnectionConfig::from_url(url, config.server_id, config.tls_skip_verify)?;
         info!(
             "MySQL source configured (server_id: {}, gtid: {})",
             config.server_id, config.gtid_enabled
         );
+        if config.tls_skip_verify {
+            warn!(
+                "MySQL TLS certificate verification disabled \
+                 (MYSQL_TLS_SKIP_VERIFY=true). This is unsafe in production."
+            );
+        }
         Ok(Self {
             config: conn_config,
             server_id: config.server_id,
@@ -441,30 +468,39 @@ mod tests {
 
     #[test]
     fn test_mysql_connection_config_parsing() {
-        let cfg =
-            MysqlConnectionConfig::from_url("mysql://user:pass@localhost:3306/mydb", 5400).unwrap();
+        let cfg = MysqlConnectionConfig::from_url(
+            "mysql://user:pass@localhost:3306/mydb",
+            5400,
+            false,
+        )
+        .unwrap();
         assert_eq!(cfg.host, "localhost");
         assert_eq!(cfg.port, 3306);
         assert_eq!(cfg.database, "mydb");
         assert_eq!(cfg.user, "user");
         assert_eq!(cfg.password, "pass");
+        assert!(!cfg.tls_skip_verify);
 
-        let cfg = MysqlConnectionConfig::from_url("mysql://host.com/db", 5401).unwrap();
+        let cfg = MysqlConnectionConfig::from_url("mysql://host.com/db", 5401, true).unwrap();
         assert_eq!(cfg.host, "host.com");
         assert_eq!(cfg.port, 3306);
         assert_eq!(cfg.database, "db");
         assert_eq!(cfg.user, "root");
         assert_eq!(cfg.password, "");
+        assert!(cfg.tls_skip_verify);
 
-        let result = MysqlConnectionConfig::from_url("mysql://user:pass@localhost", 5402);
+        let result = MysqlConnectionConfig::from_url("mysql://user:pass@localhost", 5402, false);
         assert!(result.is_err()); // no database path
 
-        let result = MysqlConnectionConfig::from_url("postgres://localhost/db", 5403);
+        let result = MysqlConnectionConfig::from_url("postgres://localhost/db", 5403, false);
         assert!(result.is_err()); // wrong scheme
 
-        let cfg =
-            MysqlConnectionConfig::from_url("mysql://user%40host:p%40ss@localhost/mydb", 5404)
-                .unwrap();
+        let cfg = MysqlConnectionConfig::from_url(
+            "mysql://user%40host:p%40ss@localhost/mydb",
+            5404,
+            false,
+        )
+        .unwrap();
         assert_eq!(cfg.host, "localhost");
         assert_eq!(cfg.user, "user%40host");
         assert_eq!(cfg.password, "p%40ss");
@@ -475,6 +511,7 @@ mod tests {
         let mysql_config = MysqlSourceConfig {
             server_id: 6000,
             gtid_enabled: true,
+            tls_skip_verify: false,
         };
         let source = MysqlSource::new("mysql://root@localhost/testdb", &mysql_config).await;
         assert!(source.is_ok());
@@ -490,6 +527,7 @@ mod tests {
         let mysql_config = MysqlSourceConfig {
             server_id: 6000,
             gtid_enabled: true,
+            tls_skip_verify: false,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let source = rt
@@ -509,6 +547,7 @@ mod tests {
         let mysql_config = MysqlSourceConfig {
             server_id: 6000,
             gtid_enabled: true,
+            tls_skip_verify: false,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let source = rt

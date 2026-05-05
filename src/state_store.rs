@@ -243,6 +243,10 @@ impl StateStore {
 }
 
 /// Build `mysql_async::Opts` from a `mysql://` URL.
+///
+/// Reads `MYSQL_TLS_SKIP_VERIFY` to honour the same opt-out the source
+/// connections use. The state store usually runs against the same MySQL
+/// instance as the source, so a single env var controls both.
 #[cfg(feature = "mysql-source")]
 fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
     let parsed = url::Url::parse(url).context("StateStore (MySQL): failed to parse URL")?;
@@ -263,7 +267,10 @@ fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
     let password = parsed.password().unwrap_or("");
     let database = parsed.path().trim_start_matches('/');
 
-    let ssl_opts = mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true);
+    let tls_skip_verify = std::env::var("MYSQL_TLS_SKIP_VERIFY")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let ssl_opts = crate::source::mysql::mysql_ssl_opts(tls_skip_verify);
 
     let builder = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)

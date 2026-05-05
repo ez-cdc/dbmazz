@@ -882,14 +882,14 @@ async fn mysql_rows_synced_for_table(
 /// Build a `mysql_async::Pool` from the source URL.
 fn build_mysql_pool(
     url: &str,
-    _mysql_cfg: &crate::config::MysqlSourceConfig,
+    mysql_cfg: &crate::config::MysqlSourceConfig,
 ) -> Result<mysql_async::Pool> {
-    let opts = build_mysql_opts(url)?;
+    let opts = build_mysql_opts(url, mysql_cfg.tls_skip_verify)?;
     Ok(mysql_async::Pool::new(opts))
 }
 
 /// Build `mysql_async::Opts` from a `mysql://` URL.
-fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
+fn build_mysql_opts(url: &str, tls_skip_verify: bool) -> Result<mysql_async::Opts> {
     let parsed = url::Url::parse(url).context("MySQL snapshot: failed to parse MySQL URL")?;
 
     anyhow::ensure!(
@@ -908,15 +908,13 @@ fn build_mysql_opts(url: &str) -> Result<mysql_async::Opts> {
     let password = parsed.password().unwrap_or("");
     let database = parsed.path().trim_start_matches('/');
 
-    let ssl_opts = mysql_async::SslOpts::default().with_danger_accept_invalid_certs(true);
-
     let builder = mysql_async::OptsBuilder::default()
         .ip_or_hostname(host)
         .tcp_port(port)
         .db_name(Some(database))
         .user(Some(user))
         .pass(Some(password))
-        .ssl_opts(ssl_opts);
+        .ssl_opts(crate::source::mysql::mysql_ssl_opts(tls_skip_verify));
 
     Ok(mysql_async::Opts::from(builder))
 }
@@ -1107,19 +1105,19 @@ mod tests {
 
     #[test]
     fn test_build_mysql_opts_full_url() {
-        let opts = build_mysql_opts("mysql://user:pass@host:3307/mydb").unwrap();
+        let opts = build_mysql_opts("mysql://user:pass@host:3307/mydb", false).unwrap();
         let _ = opts;
     }
 
     #[test]
     fn test_build_mysql_opts_defaults() {
-        let opts = build_mysql_opts("mysql://root@localhost/test").unwrap();
+        let opts = build_mysql_opts("mysql://root@localhost/test", false).unwrap();
         let _ = opts;
     }
 
     #[test]
     fn test_build_mysql_opts_invalid_scheme() {
-        let result = build_mysql_opts("postgres://localhost/db");
+        let result = build_mysql_opts("postgres://localhost/db", false);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1129,8 +1127,17 @@ mod tests {
 
     #[test]
     fn test_build_mysql_opts_bad_url() {
-        let result = build_mysql_opts("not-a-url");
+        let result = build_mysql_opts("not-a-url", false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_mysql_opts_tls_skip_verify_toggle() {
+        // Both modes parse successfully — runtime SslOpts are opaque, so
+        // we only smoke-test the surface here. Behaviour is covered by
+        // integration tests that exercise the actual TLS handshake.
+        let _ = build_mysql_opts("mysql://root@localhost/test", true).unwrap();
+        let _ = build_mysql_opts("mysql://root@localhost/test", false).unwrap();
     }
 
     // extract_database_name tests

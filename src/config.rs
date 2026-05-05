@@ -53,6 +53,11 @@ pub struct PostgresSourceConfig {
 pub struct MysqlSourceConfig {
     pub server_id: u32,
     pub gtid_enabled: bool,
+    /// When `true`, the MySQL TLS handshake accepts any server certificate
+    /// (no chain or hostname validation). Unsafe — for development only,
+    /// since it disables protection against on-path attackers. Default: `false`.
+    /// Toggled via `MYSQL_TLS_SKIP_VERIFY=true`.
+    pub tls_skip_verify: bool,
 }
 
 /// Generic source configuration
@@ -315,6 +320,7 @@ impl Config {
             SourceType::Mysql => Some(MysqlSourceConfig {
                 server_id: parse_mysql_server_id(),
                 gtid_enabled: optional_env("MYSQL_GTID_ENABLED", "true") == "true",
+                tls_skip_verify: optional_env("MYSQL_TLS_SKIP_VERIFY", "false") == "true",
             }),
         };
 
