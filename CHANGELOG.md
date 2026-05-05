@@ -4,6 +4,31 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **MySQL source (BETA).** New CDC source connector that streams from MySQL
+  via binlog (ROW format, GTID-aware), supporting StarRocks, PostgreSQL, and
+  Snowflake sinks. Concurrent snapshot + CDC is supported via the read-only
+  DBLog Incremental Snapshot algorithm (Debezium 2022): per-chunk GTID
+  watermarks plus binlog-event-wins-on-PK-collision reconciliation. Requires
+  `gtid_mode=ON` and `binlog_format=ROW`. Marked BETA pending production
+  miles on schema/type coverage edge cases.
+
+### Fixed
+
+- MySQL source now persists `(binlog_file, position, gtid_executed)` as the
+  checkpoint, restoring restart correctness across binlog rotations and
+  daemon restarts. Earlier, the persisted "checkpoint" was a hex-encoded
+  byte offset mislabeled as a GTID and the parsed GTID was discarded.
+- MySQL snapshot progress query no longer uses `FILTER (WHERE ...)`
+  (PostgreSQL-only syntax that MySQL ≤ 8.4 rejects with a parse error).
+
+### Security
+
+- MySQL source TLS certificate verification is now **on by default**. Set
+  `MYSQL_TLS_SKIP_VERIFY=true` to opt out (unsafe — for dev environments
+  only). The previous behaviour silently accepted any certificate.
+
 ## [2.2.0] - 2026-04-29
 
 ### Added
