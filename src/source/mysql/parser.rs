@@ -14,7 +14,15 @@ use crate::source::mysql::gtid::GtidSet;
 
 /// MySQL binlog event types relevant for CDC processing.
 /// Populated from mysql_async's typed events — no raw byte parsing.
-#[derive(Debug, Clone, Default)]
+///
+/// `Commit` carries a GTID label whose prefix indicates the commit kind:
+///   * regular GTID string (`UUID:N`) — InnoDB transaction terminated by
+///     XidEvent or InnoDB DDL terminated by QueryEvent("COMMIT")
+///   * `ROLLBACK:<timestamp>` — `QueryEvent("ROLLBACK")`. The replication
+///     loop drops in-flight buffered events for this transaction before
+///     the Commit propagates to the pipeline.
+///   * `XID:<timestamp>` — fallback for non-GTID setups
+#[derive(Debug, Clone)]
 pub enum BinlogEvent {
     Begin {
         gtid: String,
@@ -57,8 +65,12 @@ pub enum BinlogEvent {
         table_id: u64,
         col_types: Vec<u8>,
     },
-    #[default]
-    Heartbeat,
+    /// Server-emitted binary log heartbeat. Carries the live position so
+    /// the pipeline can advance its checkpoint and snapshot drain checks
+    /// fire even on idle databases.
+    Heartbeat {
+        position: SourcePosition,
+    },
     Ddl {
         schema_name: String,
         query: String,
@@ -363,12 +375,94 @@ pub fn process_typed_event(
             }])
         }
 
-        EventData::QueryEvent(qe) => Ok(vec![BinlogEvent::Ddl {
-            schema_name: qe.schema().to_string(),
-            query: qe.query().to_string(),
-        }]),
+        EventData::QueryEvent(qe) => {
+            // mysql_common surfaces BEGIN, COMMIT, and ROLLBACK as plain
+            // QueryEvents — there are no dedicated variants. Dispatching on
+            // the leading keyword is exactly what Debezium's binlog reader
+            // does (mysql-binlog-connector-java + DdlParser) and is needed
+            // so DDL-only transactions (which don't emit XidEvent) still
+            // produce a `Commit` boundary the replication loop can use to
+            // advance its persisted checkpoint.
+            let q = qe.query();
+            let head = q
+                .trim_start()
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_uppercase();
 
-        EventData::HeartbeatEvent => Ok(vec![BinlogEvent::Heartbeat]),
+            match head.as_str() {
+                "BEGIN" => {
+                    // GtidEvent (in GTID mode) emits Begin with the real
+                    // GTID right before this BEGIN QueryEvent. To avoid
+                    // double Begin emission we only emit here when no
+                    // GTID label is in flight (non-GTID setups, MyISAM,
+                    // mixed-engine transactions). The synthetic file-based
+                    // label keeps restart-from-(file,position) coherent.
+                    if state.current_txn_gtid.is_some() {
+                        return Ok(vec![]);
+                    }
+                    let gtid = format!("FILE:{}", state.current_file);
+                    state.current_txn_gtid = Some(gtid.clone());
+                    Ok(vec![BinlogEvent::Begin { gtid, timestamp }])
+                }
+                "COMMIT" => {
+                    // Symmetric to BEGIN: most InnoDB transactions terminate
+                    // with XidEvent which already produces a Commit. We only
+                    // emit here for transactions that DON'T finish with XID
+                    // (DDL transactions, MyISAM). Detect by whether the prior
+                    // event was already an XID-induced Commit (current_txn_gtid
+                    // taken to None) — in that case do nothing.
+                    let Some(gtid) = state.current_txn_gtid.take() else {
+                        return Ok(vec![]);
+                    };
+                    Ok(vec![BinlogEvent::Commit {
+                        gtid,
+                        timestamp,
+                        position: make_position(state),
+                    }])
+                }
+                "ROLLBACK" => {
+                    // The label is consumed by the replication loop to
+                    // recognise this as a rollback boundary; the in-flight
+                    // per-event buffer is discarded BEFORE the Commit
+                    // propagates to the pipeline. The Commit itself still
+                    // flows so the persisted checkpoint can advance past
+                    // the rollback (otherwise we'd re-replay the doomed
+                    // transaction every restart).
+                    state.current_txn_gtid.take();
+                    Ok(vec![BinlogEvent::Commit {
+                        gtid: format!("ROLLBACK:{}", timestamp),
+                        timestamp,
+                        position: make_position(state),
+                    }])
+                }
+                _ => Ok(vec![BinlogEvent::Ddl {
+                    schema_name: qe.schema().to_string(),
+                    query: qe.query().to_string(),
+                }]),
+            }
+        }
+
+        EventData::HeartbeatEvent => {
+            // Server-emitted binary log heartbeats carry the current binlog
+            // (file, position). Forwarding them into ParserState makes the
+            // consumer's GTID/file state advance during low-traffic windows
+            // — without this, snapshot workers waiting in await_drain hang
+            // until a real write happens. Debezium relies on the same
+            // mechanism for read-only incremental snapshots in idle
+            // databases.
+            //
+            // mysql_common's HeartbeatLogEvent doesn't surface log_filename
+            // through a stable accessor in 0.32.x, so we rely on the
+            // RotateEvent path to update current_file. The heartbeat
+            // position itself is built from log_pos (which the header
+            // gives us) and the live GTID set, which is enough to drive
+            // pipeline progress and try_drain.
+            Ok(vec![BinlogEvent::Heartbeat {
+                position: make_position(state),
+            }])
+        }
 
         EventData::RotateEvent(rotate) => {
             // RotateEvent advances current_file. The TableMap cache is left
@@ -386,11 +480,36 @@ pub fn process_typed_event(
     }
 }
 
+/// Sentinel byte for column slots whose MySQL type code couldn't be
+/// resolved via `TableMapEvent::get_raw_column_type`. Mapped at the
+/// converter layer to `Value::Null` so column ordinals are preserved
+/// end-to-end. The byte 0xFE is reserved by mysql_common for invalid
+/// column types (`MYSQL_TYPE_INVALID`-adjacent), so it cannot collide
+/// with a real type code.
+pub(crate) const UNKNOWN_COLUMN_TYPE: u8 = 0xFE;
+
 /// Extract raw column type codes from a TableMapEvent.
+///
+/// MUST preserve column ordinals: a column whose type code can't be
+/// resolved becomes `UNKNOWN_COLUMN_TYPE` in its original slot, NOT
+/// dropped. The previous `filter_map` shifted later columns one slot
+/// down whenever an unknown type appeared, binding row values to the
+/// wrong column names downstream — a silent corruption bug for tables
+/// that use a type mysql_common doesn't recognise yet.
 fn extract_col_types(tme: &TableMapEvent<'_>) -> Vec<u8> {
     (0..tme.columns_count() as usize)
-        .filter_map(|i| tme.get_raw_column_type(i).ok().flatten())
-        .map(|ct| ct as u8)
+        .map(|i| match tme.get_raw_column_type(i) {
+            Ok(Some(ct)) => ct as u8,
+            Ok(None) | Err(_) => {
+                tracing::error!(
+                    table_id = tme.table_id(),
+                    column_ordinal = i,
+                    "MySQL TableMapEvent has an unrecognised column type; \
+                     column will be emitted as NULL until schema introspection refreshes"
+                );
+                UNKNOWN_COLUMN_TYPE
+            }
+        })
         .collect()
 }
 

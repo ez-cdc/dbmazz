@@ -1000,8 +1000,9 @@ fn build_mysql_pool(
     Ok(mysql_async::Pool::new(opts))
 }
 
-/// Build `mysql_async::Opts` from a `mysql://` URL.
-fn build_mysql_opts(url: &str, tls_skip_verify: bool) -> Result<mysql_async::Opts> {
+/// Build `mysql_async::Opts` from a `mysql://` URL. Visible to other
+/// MySQL-feature modules (e.g., the replication loop's startup probe).
+pub(crate) fn build_mysql_opts(url: &str, tls_skip_verify: bool) -> Result<mysql_async::Opts> {
     let parsed = url::Url::parse(url).context("MySQL snapshot: failed to parse MySQL URL")?;
 
     anyhow::ensure!(

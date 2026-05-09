@@ -3,7 +3,7 @@
 
 //! MySQL replication loop — reads binlog events and pushes to pipeline.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -12,9 +12,13 @@ use futures_util::StreamExt;
 use mysql_common::binlog::events::TableMapEvent;
 use tracing::{debug, error, info, warn};
 
+use anyhow::Context;
+use mysql_async::prelude::Queryable;
+
 use crate::core::SourcePosition;
 use crate::engine::replication::{LoopContext, LoopHelper, ReplicationLoop};
 use crate::engine::ControlFlow;
+use crate::engine::snapshot::mysql::build_mysql_opts;
 use crate::pipeline::PipelineEvent;
 use crate::source::mysql::converter::convert_to_cdc_records;
 use crate::source::mysql::gtid::GtidSet;
@@ -105,6 +109,44 @@ impl MysqlReplicationLoop {
                 active_chunks.record_eviction(snap.id, &pk_value).await;
             }
         }
+    }
+
+    /// Validate that the server's `@@global.gtid_executed` is a superset
+    /// of the persisted `gtid_executed`. Fatal if not — typically caused
+    /// by a pre-fix daemon that persisted a mid-transaction GTID whose
+    /// commit never actually landed in the binlog, or by a server
+    /// failover that lost transactions, or by binlog purge before resume.
+    async fn validate_persisted_gtid(source_url: &str, persisted: &str) -> Result<()> {
+        let opts = build_mysql_opts(source_url, false)
+            .context("MySQL CDC startup probe: failed to build connection opts")?;
+        let mut conn = mysql_async::Conn::new(opts)
+            .await
+            .context("MySQL CDC startup probe: failed to connect for GTID validation")?;
+        let row: Option<(u8,)> = conn
+            .exec_first(
+                "SELECT GTID_SUBSET(?, @@global.gtid_executed)",
+                (persisted,),
+            )
+            .await
+            .context("MySQL CDC startup probe: GTID_SUBSET query failed")?;
+        // Best-effort close; ignore disconnect errors.
+        let _ = conn.disconnect().await;
+        let is_subset = row.map(|(b,)| b != 0).unwrap_or(false);
+        if !is_subset {
+            error!(
+                persisted_gtid_executed = persisted,
+                "MySQL CDC: persisted gtid_executed is not a subset of the server's \
+                 @@global.gtid_executed. The server is missing GTIDs that we previously \
+                 acknowledged — typically caused by a binlog purge or a pre-fix daemon \
+                 that persisted a mid-transaction checkpoint. Fatal: delete the row \
+                 from dbmazz_checkpoints and re-run with DO_SNAPSHOT=true to reset."
+            );
+            anyhow::bail!(
+                "MySQL CDC: persisted gtid_executed not a subset of server's gtid_executed; \
+                 manual reset required (see logs)"
+            );
+        }
+        Ok(())
     }
 
     /// Returns `true` if the event targets a tracked table.
@@ -206,6 +248,21 @@ impl ReplicationLoop for MysqlReplicationLoop {
                 (String::new(), GtidSet::default())
             }
         };
+        // Crash-recovery sanity check: if we're resuming from a persisted
+        // checkpoint, validate that the server still has every GTID we
+        // think we've seen. A pre-fix daemon could persist a mid-
+        // transaction `gtid_executed` whose in-flight GTID never actually
+        // landed in the binlog — on restart MySQL would error with
+        // "Slave has more GTIDs than the master has" anyway, but we
+        // surface a clearer fatal message and avoid the silent loop of
+        // reconnect attempts. `GTID_SUBSET(persisted, executed) = 1`
+        // means every persisted GTID is on the server; 0 means we're
+        // ahead of the source and need an operator reset.
+        let persisted_gtid_executed = initial_set.format();
+        if !persisted_gtid_executed.is_empty() {
+            Self::validate_persisted_gtid(&config.source.url, &persisted_gtid_executed).await?;
+        }
+
         // Seed the shared consumer-GTID handle with the persisted set, then
         // hand the same Arc to ParserState. From here on, every parser write
         // also updates what snapshot workers observe — no separate channel.
@@ -221,6 +278,21 @@ impl ReplicationLoop for MysqlReplicationLoop {
         // resolve back to the real triple when the sink confirms.
         let mut next_synthetic_lsn: u64 = 1;
         let mut pending_positions: BTreeMap<u64, SourcePosition> = BTreeMap::new();
+        // Commit-boundary buffer. Per Debezium's offset commit contract, we
+        // persist checkpoints ONLY at transaction commit boundaries — never
+        // mid-transaction. The pipeline acknowledges per-record (synthetic
+        // LSN granularity), but each `BinlogEvent::Commit` pushes its
+        // (synthetic_lsn, position) here, and on feedback we look up the
+        // highest commit-boundary entry ≤ confirmed_lsn and persist that.
+        // A crash mid-transaction now resumes from the last committed
+        // boundary rather than past an in-flight GTID.
+        //
+        // Cap is FLUSH_SIZE * 4 to bound memory on bursty commit streams;
+        // overflow triggers a structured WARN and the persisted checkpoint
+        // stays pinned at the last in-bounds commit (never advances past
+        // an unbounded transaction).
+        let mut pending_txn_positions: VecDeque<(u64, SourcePosition)> = VecDeque::new();
+        let txn_buffer_cap = config.flush_size.saturating_mul(4).max(64);
         let slot_name = format!("mysql_{}", config.source.mysql().server_id);
 
         let mut binlog_stream = self.binlog_stream;
@@ -302,6 +374,21 @@ impl ReplicationLoop for MysqlReplicationLoop {
                                 if !Self::is_tracked_table_event(event, &tracked_tables) {
                                     continue;
                                 }
+                                // Note any commit-boundary GTID label so we can
+                                // record this synthetic LSN as a persistable checkpoint
+                                // boundary AFTER the Commit record is sent to the
+                                // pipeline. ROLLBACK boundaries also count as commit
+                                // boundaries for checkpoint purposes — events streamed
+                                // before the ROLLBACK are already in the pipeline (we
+                                // don't have an "un-commit" channel), so the persistence
+                                // layer just advances past the rollback marker.
+                                let commit_boundary_label =
+                                    if let BinlogEvent::Commit { gtid, .. } = event {
+                                        Some(gtid.clone())
+                                    } else {
+                                        None
+                                    };
+
                                 let records = convert_to_cdc_records(event)?;
                                 for record in records {
                                     // DBLog reconciliation: if this record mutates a row
@@ -318,9 +405,41 @@ impl ReplicationLoop for MysqlReplicationLoop {
 
                                     let synthetic_lsn = next_synthetic_lsn;
                                     next_synthetic_lsn = next_synthetic_lsn.wrapping_add(1);
-                                    if let Some(pos) = record.position().cloned() {
+                                    let record_position = record.position().cloned();
+                                    if let Some(pos) = record_position.clone() {
                                         pending_positions.insert(synthetic_lsn, pos);
                                     }
+
+                                    // If this record is the Commit, record its
+                                    // synthetic LSN as a commit-boundary entry so
+                                    // the feedback handler persists THIS position
+                                    // rather than an arbitrary mid-transaction one.
+                                    if let (Some(label), Some(pos)) =
+                                        (commit_boundary_label.as_ref(), record_position)
+                                    {
+                                        if matches!(
+                                            record,
+                                            crate::core::CdcRecord::Commit { .. }
+                                        ) {
+                                            // Cap-and-drop policy on overflow: keep
+                                            // the persisted checkpoint pinned at the
+                                            // most recent successfully-buffered
+                                            // commit. Better stale than wrong.
+                                            if pending_txn_positions.len() >= txn_buffer_cap {
+                                                warn!(
+                                                    txn_buffer_cap,
+                                                    txn_label = %label,
+                                                    "MySQL CDC: pending commit-boundary buffer full; \
+                                                     persisted checkpoint will not advance until \
+                                                     the pipeline catches up. Consider raising FLUSH_SIZE."
+                                                );
+                                            } else {
+                                                pending_txn_positions
+                                                    .push_back((synthetic_lsn, pos));
+                                            }
+                                        }
+                                    }
+
                                     let pipeline_event = PipelineEvent {
                                         lsn: synthetic_lsn,
                                         record,
@@ -355,35 +474,52 @@ impl ReplicationLoop for MysqlReplicationLoop {
                 // MySQL has no client → server position ack (binlogs are time-purged,
                 // not consumer-purged), but we DO use the pipeline feedback to drive
                 // the client-side checkpoint that restart correctness depends on.
-                // Resolve the confirmed synthetic LSN back to the (file, pos, gtid)
-                // triple from pending_positions and persist it.
+                //
+                // CRITICAL: only persist positions at transaction commit boundaries.
+                // The pipeline acknowledges per-record, but persisting a row event's
+                // mid-transaction position would let `gtid_executed` include an
+                // in-flight GTID — on crash before the matching XID, MySQL would
+                // resume past that GTID entirely and we'd lose the entire txn.
+                // pending_txn_positions is populated only by `BinlogEvent::Commit`.
                 Some(confirmed_lsn) = feedback_rx.recv() => {
-                    if let Some((_, position)) = pending_positions
-                        .range(..=confirmed_lsn)
-                        .next_back()
-                        .map(|(k, v)| (*k, v.clone()))
-                    {
-                        if let SourcePosition::MysqlBinlog {
-                            ref file,
-                            position: pos,
-                            ref gtid_executed,
-                        } = position
-                        {
-                            if let Err(e) = state_store
-                                .save_mysql_checkpoint(&slot_name, file, pos, gtid_executed)
-                                .await
-                            {
-                                warn!("MySQL checkpoint save failed: {}", e);
-                            } else {
-                                debug!(
-                                    "MySQL checkpoint saved: file={}, pos={}, gtid_executed={}",
-                                    file, pos, gtid_executed
-                                );
-                            }
+                    // Find the highest commit-boundary position whose synthetic
+                    // LSN is ≤ confirmed_lsn. Pop earlier commits from the
+                    // VecDeque (they're now superseded). Anything > confirmed_lsn
+                    // stays for a future feedback message.
+                    let mut latest_commit: Option<SourcePosition> = None;
+                    while let Some((lsn, _)) = pending_txn_positions.front() {
+                        if *lsn > confirmed_lsn {
+                            break;
                         }
-                        // Drop confirmed entries.
-                        pending_positions = pending_positions.split_off(&(confirmed_lsn + 1));
+                        let (_, pos) = pending_txn_positions.pop_front().unwrap();
+                        latest_commit = Some(pos);
                     }
+
+                    if let Some(SourcePosition::MysqlBinlog {
+                        ref file,
+                        position: pos,
+                        ref gtid_executed,
+                    }) = latest_commit.as_ref()
+                    {
+                        if let Err(e) = state_store
+                            .save_mysql_checkpoint(&slot_name, file, *pos, gtid_executed)
+                            .await
+                        {
+                            warn!("MySQL checkpoint save failed: {}", e);
+                        } else {
+                            debug!(
+                                "MySQL checkpoint saved (commit boundary): file={}, pos={}, \
+                                 gtid_executed={}",
+                                file, pos, gtid_executed
+                            );
+                        }
+                    }
+                    // Always drop per-event metadata up to confirmed_lsn so
+                    // pending_positions doesn't grow unbounded; this map is
+                    // now informational only (used by the eviction logic to
+                    // resolve a record's position) — it no longer drives
+                    // persistence.
+                    pending_positions = pending_positions.split_off(&(confirmed_lsn + 1));
                 }
             }
         }

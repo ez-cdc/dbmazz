@@ -2,7 +2,6 @@ use mysql_common::binlog::value::BinlogValue;
 use mysql_common::value::Value as MysqlValue;
 
 use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
-use crate::core::SourcePosition;
 use anyhow::Result;
 
 use super::parser::BinlogEvent;
@@ -102,8 +101,8 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             position: position.clone(),
             commit_timestamp_us: 0,
         }],
-        BinlogEvent::Heartbeat => vec![CdcRecord::Heartbeat {
-            position: SourcePosition::GtidSet("0".to_string()),
+        BinlogEvent::Heartbeat { position } => vec![CdcRecord::Heartbeat {
+            position: position.clone(),
         }],
         BinlogEvent::TableMap { .. } => vec![],
         BinlogEvent::Ddl { .. } => vec![],
@@ -167,6 +166,7 @@ fn decode_row_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::SourcePosition;
 
     fn v_int(i: i64) -> BinlogValue<'static> {
         BinlogValue::Value(MysqlValue::Int(i))
