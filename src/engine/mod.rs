@@ -25,7 +25,10 @@ use crate::state_store::StateStore;
 use setup::SetupManager;
 
 /// Factory that creates fresh Sink instances (used by snapshot workers).
-type SinkFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn crate::core::Sink>> + Send + Sync>;
+///
+/// `pub` so integration tests can supply a custom factory (e.g., an
+/// in-memory test sink) via [`CdcEngine::with_sink_factory`].
+pub type SinkFactory = Arc<dyn Fn() -> anyhow::Result<Box<dyn crate::core::Sink>> + Send + Sync>;
 
 /// Main CDC engine that orchestrates all components
 pub struct CdcEngine {
@@ -54,6 +57,16 @@ pub struct CdcEngine {
 
 impl CdcEngine {
     pub async fn new(config: Config) -> Result<Self> {
+        let sink_config = config.sink.clone();
+        let sink_factory: SinkFactory =
+            Arc::new(move || create_sink(&sink_config, SinkMode::SnapshotWorker));
+        Self::with_sink_factory(config, sink_factory).await
+    }
+
+    /// Construct a CDC engine with a caller-supplied sink factory. Used by
+    /// integration tests to inject an in-memory or recording sink without
+    /// going through `create_sink`. Production callers should use [`new`].
+    pub async fn with_sink_factory(config: Config, sink_factory: SinkFactory) -> Result<Self> {
         let (slot_name, tables_for_cdc) = match config.source.source_type {
             SourceType::Postgres => (
                 config.source.postgres().slot_name.clone(),
@@ -70,10 +83,6 @@ impl CdcEngine {
         let shared_state = SharedState::new(cdc_config);
 
         let state_store = StateStore::new(&config.source.url).await?;
-
-        let sink_config = config.sink.clone();
-        let sink_factory: SinkFactory =
-            Arc::new(move || create_sink(&sink_config, SinkMode::SnapshotWorker));
 
         Ok(Self {
             config,

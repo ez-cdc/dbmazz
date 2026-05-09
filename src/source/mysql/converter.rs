@@ -203,6 +203,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // arbitrary test values, not π/e
     fn test_decode_row_values_float_double() {
         let col_names = vec!["f".to_string(), "d".to_string()];
         let row = vec![v_float(3.14), v_double(2.71828)];
