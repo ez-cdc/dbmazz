@@ -66,6 +66,16 @@ impl MysqlReplicationLoop {
             return;
         }
 
+        // Snapshot the parser's current GTID set once for this batch of chunks
+        // (cheap clone; HashMap of intervals). Avoids holding the read lock
+        // across the eviction loop and matches the LOW-via-consumer
+        // discipline the snapshot worker uses on the other side.
+        let consumer_gtid_now = parser_state
+            .current_gtid_set
+            .read()
+            .expect("MySQL parser GTID set lock poisoned")
+            .clone();
+
         // The "in window" check has two regimes:
         //   - high_set is None  → SELECT still in flight; every event
         //     since LOW is a candidate (it can't be after HIGH yet).
@@ -85,10 +95,10 @@ impl MysqlReplicationLoop {
                 continue;
             }
             let in_window = match &snap.high_set {
-                None => parser_state.current_gtid_set.is_superset_of(&snap.low_set),
+                None => consumer_gtid_now.is_superset_of(&snap.low_set),
                 Some(high) => {
-                    parser_state.current_gtid_set.is_superset_of(&snap.low_set)
-                        && !parser_state.current_gtid_set.is_superset_of(high)
+                    consumer_gtid_now.is_superset_of(&snap.low_set)
+                        && !consumer_gtid_now.is_superset_of(high)
                 }
             };
             if in_window {
@@ -144,6 +154,7 @@ impl ReplicationLoop for MysqlReplicationLoop {
             source_schemas,
             sink_factory,
             active_chunks,
+            consumer_gtid,
             ..
         } = ctx;
 
@@ -169,8 +180,10 @@ impl ReplicationLoop for MysqlReplicationLoop {
         // Parser state — tracks the binlog file we're currently in and the
         // accumulated GTID-executed set. The set seeds from any prior
         // checkpoint persisted in StateStore so resumed streams continue
-        // adding to a real cumulative set, not start from zero.
-        let initial_gtid_set = match state_store
+        // adding to a real cumulative set, not start from zero. The GTID
+        // set lives behind `consumer_gtid` so snapshot workers can read
+        // it for LOW/HIGH watermarks (DBLog read-only mode).
+        let (initial_file, initial_set): (String, GtidSet) = match state_store
             .load_mysql_checkpoint(&format!("mysql_{}", config.source.mysql().server_id))
             .await
         {
@@ -179,24 +192,27 @@ impl ReplicationLoop for MysqlReplicationLoop {
                     "MySQL CDC resume: starting from checkpoint file={}, gtid_executed={}",
                     file, gtid_str
                 );
-                let initial_set = GtidSet::parse(&gtid_str).unwrap_or_default();
-                let mut parser_state = ParserState::new(file, initial_set);
-                parser_state.current_txn_gtid = None;
-                parser_state
+                (file, GtidSet::parse(&gtid_str).unwrap_or_default())
             }
             Ok(None) => {
                 info!("MySQL CDC: no prior checkpoint, tracking from stream start");
-                ParserState::default()
+                (String::new(), GtidSet::default())
             }
             Err(e) => {
                 warn!(
                     "MySQL CDC: failed to load checkpoint ({}); tracking from stream start",
                     e
                 );
-                ParserState::default()
+                (String::new(), GtidSet::default())
             }
         };
-        let mut parser_state = initial_gtid_set;
+        // Seed the shared consumer-GTID handle with the persisted set, then
+        // hand the same Arc to ParserState. From here on, every parser write
+        // also updates what snapshot workers observe — no separate channel.
+        *consumer_gtid
+            .write()
+            .expect("consumer_gtid lock poisoned at startup") = initial_set;
+        let mut parser_state = ParserState::with_shared_gtid(initial_file, consumer_gtid.clone());
 
         // Synthetic LSN counter — required because the generic pipeline
         // feedback channel speaks in `u64`, but MySQL positions are triples.
@@ -314,9 +330,14 @@ impl ReplicationLoop for MysqlReplicationLoop {
                             }
                             // After a batch of events, wake any snapshot worker whose
                             // chunk window has now been fully covered by this consumer.
-                            active_chunks
-                                .try_drain(&parser_state.current_gtid_set)
-                                .await;
+                            // Snapshot the GTID set under a brief read lock so try_drain
+                            // doesn't hold it for the duration of its registry walk.
+                            let consumer_gtid_now = parser_state
+                                .current_gtid_set
+                                .read()
+                                .expect("MySQL parser GTID set lock poisoned")
+                                .clone();
+                            active_chunks.try_drain(&consumer_gtid_now).await;
                         }
                         Some(Err(e)) => {
                             error!("MySQL binlog stream error: {}", e);

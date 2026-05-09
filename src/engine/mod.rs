@@ -248,6 +248,10 @@ impl CdcEngine {
             sink_factory: self.sink_factory.clone(),
             #[cfg(feature = "mysql-source")]
             active_chunks: self.active_chunks.clone(),
+            #[cfg(feature = "mysql-source")]
+            consumer_gtid: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::source::mysql::gtid::GtidSet::default(),
+            )),
         };
 
         match self.config.source.source_type {

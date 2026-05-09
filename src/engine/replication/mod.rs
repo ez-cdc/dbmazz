@@ -41,6 +41,15 @@ pub struct LoopContext {
     /// pipelines, where it stays empty).
     #[cfg(feature = "mysql-source")]
     pub active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
+    /// MySQL-only: live, shared view of the consumer's accumulated
+    /// `gtid_executed`. The MySQL replication loop is the single writer
+    /// (via `ParserState::current_gtid_set`); snapshot workers read it
+    /// when registering chunks (LOW watermark) and again after the
+    /// chunk SELECT (HIGH watermark) — replacing per-chunk
+    /// `SELECT @@global.gtid_executed` queries against the source.
+    /// Default-constructed for non-MySQL pipelines.
+    #[cfg(feature = "mysql-source")]
+    pub consumer_gtid: std::sync::Arc<std::sync::RwLock<crate::source::mysql::gtid::GtidSet>>,
 }
 
 /// Each source type implements its own replication event loop.

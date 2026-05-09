@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use mysql_common::binlog::events::{
@@ -73,20 +74,47 @@ pub enum BinlogEvent {
 /// All three fields are part of the on-the-wire `MysqlBinlog` checkpoint
 /// emitted with each event; restart correctness depends on them being
 /// kept up to date.
+///
+/// `current_gtid_set` is wrapped in `Arc<RwLock<...>>` so the snapshot
+/// worker can read the consumer's live GTID set when registering chunks
+/// (DBLog read-only LOW/HIGH watermarks). The replication loop is the
+/// single writer; the lock is `std::sync::RwLock` because
+/// `process_typed_event` is synchronous and held for negligibly short
+/// windows (one `format()` or one `add_gtid()` per event).
 #[derive(Debug, Default, Clone)]
 pub struct ParserState {
     pub current_file: String,
-    pub current_gtid_set: GtidSet,
+    pub current_gtid_set: Arc<RwLock<GtidSet>>,
     pub current_txn_gtid: Option<String>,
 }
 
 impl ParserState {
+    /// Construct a fresh parser state, wrapping the initial GTID set in a new
+    /// `Arc<RwLock<...>>`. Use [`with_shared_gtid`] when the loop wants to
+    /// share the same Arc with snapshot workers.
     pub fn new(initial_file: String, initial_gtid_set: GtidSet) -> Self {
+        Self::with_shared_gtid(initial_file, Arc::new(RwLock::new(initial_gtid_set)))
+    }
+
+    /// Construct a parser state that shares an externally-owned GTID set
+    /// (typically from `LoopContext::consumer_gtid`). The replication loop
+    /// uses this so the snapshot worker can observe the live GTID set
+    /// without going through the loop itself.
+    pub fn with_shared_gtid(
+        initial_file: String,
+        current_gtid_set: Arc<RwLock<GtidSet>>,
+    ) -> Self {
         Self {
             current_file: initial_file,
-            current_gtid_set: initial_gtid_set,
+            current_gtid_set,
             current_txn_gtid: None,
         }
+    }
+
+    /// Cheap clone of the shared GTID set Arc — for plumbing into
+    /// `LoopContext::consumer_gtid` and snapshot workers.
+    pub fn shared_gtid(&self) -> Arc<RwLock<GtidSet>> {
+        self.current_gtid_set.clone()
     }
 }
 
@@ -115,11 +143,17 @@ pub fn process_typed_event(
 
     // Helper: build the canonical MySQL checkpoint position for an event in
     // this stream. The triple (file, position, gtid_executed) is what restart
-    // logic in MysqlSource::start_replication consumes.
+    // logic in MysqlSource::start_replication consumes. Holds a brief read
+    // lock on the shared GTID set; snapshot workers reading concurrently
+    // see the same `gtid_executed` snapshot the position carries.
     let make_position = |state: &ParserState| SourcePosition::MysqlBinlog {
         file: state.current_file.clone(),
         position: log_pos as u64,
-        gtid_executed: state.current_gtid_set.format(),
+        gtid_executed: state
+            .current_gtid_set
+            .read()
+            .expect("MySQL parser GTID set lock poisoned")
+            .format(),
     };
 
     match data {
@@ -295,11 +329,17 @@ pub fn process_typed_event(
         EventData::GtidEvent(gtid_event) => {
             // Track the in-flight transaction GTID and merge it into the
             // executed-set running tally. Both are used for the next emitted
-            // events' SourcePosition and for the Commit label.
+            // events' SourcePosition and for the Commit label. Brief write
+            // lock — `add_gtid` is O(1) amortised when transactions arrive
+            // monotonically (Debezium's standard streaming case).
             let gtid = format_gtid(&gtid_event);
             if let Some((uuid, txn_str)) = gtid.split_once(':') {
                 if let Ok(txn) = txn_str.parse::<u64>() {
-                    state.current_gtid_set.add_gtid(uuid.to_string(), txn);
+                    state
+                        .current_gtid_set
+                        .write()
+                        .expect("MySQL parser GTID set lock poisoned")
+                        .add_gtid(uuid.to_string(), txn);
                 }
             }
             state.current_txn_gtid = Some(gtid.clone());
