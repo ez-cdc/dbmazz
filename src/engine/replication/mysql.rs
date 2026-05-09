@@ -17,8 +17,8 @@ use mysql_async::prelude::Queryable;
 
 use crate::core::SourcePosition;
 use crate::engine::replication::{LoopContext, LoopHelper, ReplicationLoop};
-use crate::engine::ControlFlow;
 use crate::engine::snapshot::mysql::build_mysql_opts;
+use crate::engine::ControlFlow;
 use crate::pipeline::PipelineEvent;
 use crate::source::mysql::converter::convert_to_cdc_records;
 use crate::source::mysql::gtid::GtidSet;

@@ -468,12 +468,9 @@ mod tests {
 
     #[test]
     fn test_mysql_connection_config_parsing() {
-        let cfg = MysqlConnectionConfig::from_url(
-            "mysql://user:pass@localhost:3306/mydb",
-            5400,
-            false,
-        )
-        .unwrap();
+        let cfg =
+            MysqlConnectionConfig::from_url("mysql://user:pass@localhost:3306/mydb", 5400, false)
+                .unwrap();
         assert_eq!(cfg.host, "localhost");
         assert_eq!(cfg.port, 3306);
         assert_eq!(cfg.database, "mydb");

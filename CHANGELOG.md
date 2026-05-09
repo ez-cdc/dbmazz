@@ -24,6 +24,53 @@ All notable changes to dbmazz will be documented here.
   byte offset mislabeled as a GTID and the parsed GTID was discarded.
 - MySQL snapshot progress query no longer uses `FILTER (WHERE ...)`
   (PostgreSQL-only syntax that MySQL ≤ 8.4 rejects with a parse error).
+- MySQL CDC checkpoints are now persisted only at transaction commit
+  boundaries, never mid-transaction. The previous code persisted positions
+  per acknowledged record, including the in-flight `gtid_executed` added
+  on `GtidEvent`; a crash before the matching `XidEvent` advanced the
+  saved checkpoint past an uncommitted transaction and silently dropped it
+  on restart. (Debezium-faithful adaptation: the connector emits per-event
+  but commits the offset only at transaction boundaries.)
+- DDL-only transactions (`CREATE TABLE`, `ALTER TABLE`, etc., which
+  terminate with `QueryEvent("COMMIT")` instead of `XidEvent`) now produce
+  a `BinlogEvent::Commit` boundary so the pipeline flushes and the
+  persisted checkpoint advances past the DDL.
+- MySQL snapshot `await_drain` no longer deadlocks under concurrent
+  `try_drain` calls. The previous polling-then-awaiting pattern lost
+  `Notify::notify_waiters` wake-ups fired between the flag check and the
+  await; reproduced reliably under load and verified fixed by a
+  10 000-iteration race-stress unit test.
+- MySQL snapshot chunk LOW/HIGH watermarks are now derived from the binlog
+  consumer's live GTID set (an `Arc<RwLock<GtidSet>>` shared with the
+  parser), not from `SELECT @@global.gtid_executed` against the source.
+  Eliminates the LOW-capture-vs-chunk-registration race that emitted
+  duplicate snapshot+CDC records for rows mutated during the window.
+- MySQL heartbeat events now carry the live `(file, position,
+  gtid_executed)` triple and trigger snapshot drain checks so idle
+  databases don't hang the snapshot worker. Heartbeats previously emitted
+  a placeholder `SourcePosition::GtidSet("0")` that corrupted any
+  checkpoint persisting a heartbeat.
+- MySQL `TableMapEvent` parsing preserves column ordinals when a column
+  type is unrecognised. Previously `extract_col_types` silently dropped
+  unknown columns via `filter_map`, shifting subsequent columns one slot
+  down and binding row values to the wrong column names — a silent
+  corruption bug for tables using a type mysql_common didn't yet
+  recognise. Unknown columns now produce a sentinel byte in their
+  original slot; downstream value decoding emits `Value::Null` for them
+  and a structured `ERROR` log surfaces the table+ordinal.
+- MySQL CDC startup runs a `GTID_SUBSET(persisted, @@global.gtid_executed)`
+  probe; if the persisted set isn't a subset of the server's executed set
+  (binlog purge, server failover, or a pre-fix daemon's mid-transaction
+  checkpoint), the daemon now exits non-zero with operator-actionable
+  remediation rather than retry-looping forever.
+
+### Removed
+
+- `SourcePosition::is_ahead_of` no longer attempts to order
+  `SourcePosition::GtidSet` values. GTID sets are partial orders (set
+  inclusion of UUID:range pairs); the previous lexicographic string
+  compare was meaningless. Callers needing partial-order semantics MUST
+  use `crate::source::mysql::gtid::GtidSet::is_superset_of` directly.
 
 ### Security
 

@@ -112,10 +112,7 @@ impl ParserState {
     /// (typically from `LoopContext::consumer_gtid`). The replication loop
     /// uses this so the snapshot worker can observe the live GTID set
     /// without going through the loop itself.
-    pub fn with_shared_gtid(
-        initial_file: String,
-        current_gtid_set: Arc<RwLock<GtidSet>>,
-    ) -> Self {
+    pub fn with_shared_gtid(initial_file: String, current_gtid_set: Arc<RwLock<GtidSet>>) -> Self {
         Self {
             current_file: initial_file,
             current_gtid_set,
@@ -385,7 +382,6 @@ pub fn process_typed_event(
             // advance its persisted checkpoint.
             let q = qe.query();
             let head = q
-                .trim_start()
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
