@@ -56,8 +56,13 @@ impl SourcePosition {
         }
     }
 
-    /// Compares two positions, returns true if this position is ahead of the other
-    /// Returns None if positions are incomparable (different types)
+    /// Compares two positions, returns `Some(true)` iff `self` is strictly
+    /// ahead of `other`. Returns `None` for incomparable pairs.
+    ///
+    /// `GtidSet` pairs are intentionally **incomparable** (returns `None`):
+    /// MySQL GTID sets are partial orders (set inclusion), not totally
+    /// ordered. Callers needing partial-order semantics MUST use
+    /// `crate::source::mysql::gtid::GtidSet::is_superset_of` directly.
     pub fn is_ahead_of(&self, other: &SourcePosition) -> Option<bool> {
         match (self, other) {
             (SourcePosition::Lsn(a), SourcePosition::Lsn(b)) => Some(a > b),
@@ -101,11 +106,9 @@ impl SourcePosition {
                     Some(f1 > f2)
                 }
             }
-            (SourcePosition::GtidSet(a), SourcePosition::GtidSet(b)) => {
-                // GTID comparison is complex, for now just compare strings
-                // In production, this should use proper GTID set comparison
-                Some(a > b)
-            }
+            // GTID sets are partial orders; lexicographic string compare is
+            // meaningless. Use `GtidSet::is_superset_of` for set inclusion.
+            (SourcePosition::GtidSet(_), SourcePosition::GtidSet(_)) => None,
             _ => None, // Incomparable types
         }
     }
@@ -237,6 +240,21 @@ mod tests {
         let without_gtid =
             SourcePosition::mysql_binlog("binlog.000003".to_string(), 12345, String::new());
         assert_eq!(without_gtid.to_string(), "MySQL:binlog.000003:12345");
+    }
+
+    #[test]
+    fn test_gtid_set_is_ahead_of_returns_none() {
+        // GTID sets are partial orders; is_ahead_of must return None for any
+        // pair, including identical sets. Callers must use
+        // `GtidSet::is_superset_of` for set-inclusion semantics.
+        let a = SourcePosition::gtid_set("uuid-A:1-100".into());
+        let b = SourcePosition::gtid_set("uuid-B:1-100".into());
+        let same = SourcePosition::gtid_set("uuid-A:1-100".into());
+
+        assert_eq!(a.is_ahead_of(&b), None);
+        assert_eq!(b.is_ahead_of(&a), None);
+        assert_eq!(a.is_ahead_of(&same), None);
+        assert_eq!(same.is_ahead_of(&a), None);
     }
 
     #[test]
