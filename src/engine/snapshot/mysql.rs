@@ -11,7 +11,7 @@
 //! All code behind `#[cfg(feature = "mysql-source")]`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use mysql_async::prelude::Queryable;
@@ -25,6 +25,7 @@ use crate::core::position::SourcePosition;
 use crate::core::record::DataType;
 use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
 use crate::core::traits::{Sink, SourceTableSchema};
+use crate::source::mysql::gtid::GtidSet;
 use crate::source::mysql::schema::introspect_mysql_schemas;
 
 /// Run the full MySQL snapshot for all configured tables.
@@ -33,11 +34,17 @@ use crate::source::mysql::schema::introspect_mysql_schemas;
 /// and streams chunks from the producer to workers via an mpsc channel.
 ///
 /// `sink_factory` creates a fresh `Sink` instance for each parallel worker.
+/// `consumer_gtid` is the live, shared view of the binlog consumer's
+/// accumulated GTID set — chunk LOW/HIGH watermarks are read from this
+/// handle, not from `SELECT @@global.gtid_executed`. See
+/// `mysql-cdc-correctness` spec, "snapshot chunks SHALL be registered
+/// before the LOW watermark is captured" requirement.
 pub async fn run_mysql_snapshot(
     config: Arc<Config>,
     shared_state: Arc<SharedState>,
     sink_factory: Arc<dyn Fn() -> Result<Box<dyn Sink>> + Send + Sync>,
     active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
+    consumer_gtid: Arc<RwLock<GtidSet>>,
 ) -> Result<()> {
     info!(
         "MySQL snapshot worker starting (chunk_size={}, workers={})",
@@ -208,6 +215,7 @@ pub async fn run_mysql_snapshot(
         let shared_state = Arc::clone(&shared_state);
         let table_meta = Arc::clone(&table_meta);
         let active_chunks = active_chunks.clone();
+        let consumer_gtid = consumer_gtid.clone();
 
         join_set.spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
@@ -249,6 +257,7 @@ pub async fn run_mysql_snapshot(
                 &shared_state,
                 meta,
                 &active_chunks,
+                &consumer_gtid,
             )
             .await;
 
@@ -503,9 +512,8 @@ async fn process_mysql_chunk(
     shared_state: &Arc<SharedState>,
     meta: &TableMeta,
     active_chunks: &crate::engine::snapshot::active_chunks::ActiveChunks,
+    consumer_gtid: &Arc<RwLock<GtidSet>>,
 ) -> Result<()> {
-    use crate::source::mysql::gtid::GtidSet;
-
     debug!(
         "MySQL snapshot: processing chunk {}/{}: pk=[{}, {})",
         qualified_table, chunk.partition_id, chunk.start_pk, chunk.end_pk
@@ -519,20 +527,29 @@ async fn process_mysql_chunk(
     );
     let quoted_pk = quote_mysql_ident(&meta.pk_col);
 
-    // Step 1: LOW GTID — capture before SELECT
-    let low_gtid: Option<String> = conn
-        .query_first("SELECT @@global.gtid_executed")
-        .await
-        .context("MySQL snapshot: failed to capture LOW GTID")?;
-    let low_gtid = low_gtid.unwrap_or_default();
-    let low_truncated = truncate_gtid(&low_gtid);
-    let low_set = GtidSet::parse(&low_gtid).unwrap_or_default();
+    // Step 1: capture LOW watermark from the binlog consumer's live GTID
+    // set, NOT from `SELECT @@global.gtid_executed` against the source.
+    // Using the consumer's view is the only watermark that exactly
+    // corresponds to "what the consumer has seen so far"; events the
+    // server has but the consumer hasn't processed yet legitimately fall
+    // INSIDE the window and must be evaluated for eviction. Reading the
+    // server would race with the consumer and let those events leak past
+    // the LOW boundary unevicted (snapshot row would emit on top of the
+    // CDC update — duplicate emission for the same PK).
+    //
+    // Step 1b (atomic with step 1, behind a single read of the lock):
+    // register the chunk in the active-chunks registry with the LOW set
+    // we just observed. From this instant onward, every binlog event
+    // the consumer processes is evaluated against this chunk; events
+    // BEFORE this instant are in `low_set` and excluded from the window.
+    let low_set = consumer_gtid
+        .read()
+        .expect("consumer_gtid lock poisoned")
+        .clone();
+    let low_truncated = truncate_gtid(&low_set.format());
 
-    // Step 1b: register the chunk in the active-chunk registry. The binlog
-    // consumer reads this registry and records evictions for events that
-    // fall in our window. Range is [start_pk, end_pk) in the chunker; the
-    // registry uses an inclusive [start, end] range, so the upper bound is
-    // end_pk - 1 to preserve semantics.
+    // Range is [start_pk, end_pk) in the chunker; the registry uses an
+    // inclusive [start, end] range, so the upper bound is end_pk - 1.
     let pk_range = (
         crate::core::Value::Int64(chunk.start_pk),
         crate::core::Value::Int64(chunk.end_pk - 1),
@@ -574,14 +591,17 @@ async fn process_mysql_chunk(
 
     let row_count = rows.len() as i64;
 
-    // Step 3: HIGH GTID — capture after SELECT
-    let high_gtid: Option<String> = conn
-        .query_first("SELECT @@global.gtid_executed")
-        .await
-        .context("MySQL snapshot: failed to capture HIGH GTID")?;
-    let high_gtid = high_gtid.unwrap_or_default();
+    // Step 3: HIGH watermark — again from the consumer's live GTID set.
+    // Once SELECT returns, the snapshot is "as of" some point in the
+    // committed history; the consumer's set tells us exactly which
+    // committed transactions could possibly have raced our SELECT. The
+    // window is `(LOW, HIGH]` for eviction reconciliation.
+    let high_set = consumer_gtid
+        .read()
+        .expect("consumer_gtid lock poisoned")
+        .clone();
+    let high_gtid = high_set.format();
     let high_truncated = truncate_gtid(&high_gtid);
-    let high_set = GtidSet::parse(&high_gtid).unwrap_or_default();
     active_chunks.set_high_watermark(chunk_id, high_set).await;
 
     info!(

@@ -263,12 +263,14 @@ impl ReplicationLoop for MysqlReplicationLoop {
                         let snap_state = shared_state.clone();
                         let snap_factory = sink_factory.clone();
                         let snap_active_chunks = active_chunks.clone();
+                        let snap_consumer_gtid = consumer_gtid.clone();
                         tokio::spawn(async move {
                             match crate::engine::snapshot::mysql::run_mysql_snapshot(
                                 snap_config,
                                 snap_state.clone(),
                                 snap_factory,
                                 snap_active_chunks,
+                                snap_consumer_gtid,
                             )
                             .await
                             {

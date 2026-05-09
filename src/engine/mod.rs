@@ -43,6 +43,13 @@ pub struct CdcEngine {
     /// and signal drain. Always present; empty for non-MySQL pipelines.
     #[cfg(feature = "mysql-source")]
     active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks,
+    /// Live, shared view of the MySQL CDC consumer's accumulated
+    /// `gtid_executed`. Single-writer (the replication loop, via
+    /// `ParserState`); read by snapshot workers when capturing chunk
+    /// LOW/HIGH watermarks (Debezium read-only DBLog adaptation).
+    /// Always present; default-constructed (empty) for non-MySQL.
+    #[cfg(feature = "mysql-source")]
+    consumer_gtid: std::sync::Arc<std::sync::RwLock<crate::source::mysql::gtid::GtidSet>>,
 }
 
 impl CdcEngine {
@@ -76,6 +83,10 @@ impl CdcEngine {
             sink_factory,
             #[cfg(feature = "mysql-source")]
             active_chunks: crate::engine::snapshot::active_chunks::ActiveChunks::new(),
+            #[cfg(feature = "mysql-source")]
+            consumer_gtid: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::source::mysql::gtid::GtidSet::default(),
+            )),
         })
     }
 
@@ -249,9 +260,7 @@ impl CdcEngine {
             #[cfg(feature = "mysql-source")]
             active_chunks: self.active_chunks.clone(),
             #[cfg(feature = "mysql-source")]
-            consumer_gtid: std::sync::Arc::new(std::sync::RwLock::new(
-                crate::source::mysql::gtid::GtidSet::default(),
-            )),
+            consumer_gtid: self.consumer_gtid.clone(),
         };
 
         match self.config.source.source_type {
@@ -319,6 +328,7 @@ impl CdcEngine {
         let snap_state = self.shared_state.clone();
         let snap_sink_factory = Arc::clone(&self.sink_factory);
         let snap_active_chunks = self.active_chunks.clone();
+        let snap_consumer_gtid = self.consumer_gtid.clone();
 
         tokio::spawn(async move {
             match snapshot::mysql::run_mysql_snapshot(
@@ -326,6 +336,7 @@ impl CdcEngine {
                 snap_state.clone(),
                 snap_sink_factory,
                 snap_active_chunks,
+                snap_consumer_gtid,
             )
             .await
             {
