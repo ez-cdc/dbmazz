@@ -236,8 +236,20 @@ impl ActiveChunks {
     /// Returns immediately if it already is. The caller passes the
     /// `Notify` returned by `register`; we re-check the flag after
     /// each wake to handle spurious wakeups.
+    ///
+    /// The `Notified` future is created BEFORE the flag check so any
+    /// `notify_waiters()` call fired between the check and the await
+    /// still wakes us. `notify_waiters` only wakes futures already
+    /// registered on the queue — a polling-then-awaiting structure
+    /// loses wake-ups fired in the gap.
     pub async fn await_drain(&self, id: ChunkId, notify: Arc<Notify>) {
         loop {
+            // Pre-register the waiter on the Notify queue. From this point
+            // on, any notify_waiters() call will wake `waiter`, including
+            // calls that race with the flag read below.
+            let waiter = notify.notified();
+            tokio::pin!(waiter);
+
             let already = self
                 .inner
                 .chunks
@@ -248,7 +260,8 @@ impl ActiveChunks {
             if already {
                 return;
             }
-            notify.notified().await;
+
+            waiter.await;
         }
     }
 
@@ -470,6 +483,49 @@ mod tests {
         assert_eq!(snap[0].id, h1.id());
         std::mem::forget(h1);
         std::mem::forget(h2);
+    }
+
+    /// Stresses the race window between `await_drain`'s flag check and the
+    /// future poll. The pre-Notify-pin code lost wake-ups when `try_drain`
+    /// fired between those two operations and would hang forever. With the
+    /// fix, every iteration must complete within a tight timeout.
+    ///
+    /// 1000 iterations is enough to hit the race reliably on the old code
+    /// (manually verified during fix development); 10_000 is overkill but
+    /// adds margin and still finishes well under the cargo-test budget.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn await_drain_no_lost_wakeup() {
+        for iter in 0..10_000_u32 {
+            let registry = ActiveChunks::new();
+            let high = GtidSet::parse("uuid:1-50").unwrap();
+            let (handle, notify) = registry
+                .register(
+                    ("db".into(), "t".into()),
+                    "id".into(),
+                    (Value::Int64(1), Value::Int64(100)),
+                    empty_set(),
+                )
+                .await;
+            let id = handle.id();
+            registry.set_high_watermark(id, high.clone()).await;
+
+            let waiter_registry = registry.clone();
+            let waiter_notify = notify.clone();
+            let waiter =
+                tokio::spawn(async move { waiter_registry.await_drain(id, waiter_notify).await });
+
+            // No yield between spawn and try_drain — maximises the chance
+            // that try_drain's notify_waiters() fires while await_drain is
+            // mid-flight (between `let waiter = notify.notified()` and the
+            // flag check, or between the flag check and the await).
+            registry.try_drain(&high).await;
+
+            tokio::time::timeout(Duration::from_millis(50), waiter)
+                .await
+                .unwrap_or_else(|_| panic!("await_drain hung at iteration {}", iter))
+                .unwrap();
+            std::mem::forget(handle);
+        }
     }
 
     #[test]
