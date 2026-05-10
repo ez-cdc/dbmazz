@@ -173,10 +173,24 @@ fn map_mysql_value(val: &MysqlValue, col_type: u8) -> Value {
         },
         MysqlValue::Float(f) => Value::Float64(*f as f64),
         MysqlValue::Double(d) => Value::Float64(*d),
-        MysqlValue::Bytes(b) => match String::from_utf8(b.clone()) {
-            Ok(s) => Value::String(s),
-            Err(_) => Value::Bytes(b.clone()),
-        },
+        MysqlValue::Bytes(b) => {
+            // Empirical observation: mysql_common 0.32.4 in binlog mode
+            // returns TIMESTAMP/TIMESTAMP2 columns as `MysqlValue::Bytes`
+            // containing the ASCII epoch (e.g. b"1778368097"), not as
+            // `MysqlValue::Int`. Catch that path so the downstream sink
+            // sees an ISO timestamp string instead of the raw epoch.
+            if matches!(col_type, MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2) {
+                if let Ok(s) = std::str::from_utf8(b) {
+                    if let Ok(epoch) = s.parse::<i64>() {
+                        return format_epoch_as_iso(epoch);
+                    }
+                }
+            }
+            match String::from_utf8(b.clone()) {
+                Ok(s) => Value::String(s),
+                Err(_) => Value::Bytes(b.clone()),
+            }
+        }
         MysqlValue::Date(y, m, d, hh, mm, ss, _us) => Value::String(format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             y, m, d, hh, mm, ss
@@ -280,6 +294,22 @@ mod tests {
     fn test_decode_row_values_empty() {
         let cols = decode_row_values(&[], &[], &[]);
         assert!(cols.is_empty());
+    }
+
+    #[test]
+    fn test_bytes_for_timestamp_column_emits_iso() {
+        // mysql_common 0.32.4 in binlog mode returns TIMESTAMP as
+        // ASCII-epoch bytes, not as Int. Catch that path too.
+        let col_names = vec!["created_at".to_string()];
+        let col_types = vec![MYSQL_TYPE_TIMESTAMP_T];
+        let row = vec![BinlogValue::Value(MysqlValue::Bytes(
+            b"1778368097".to_vec(),
+        ))];
+        let cols = decode_row_values(&row, &col_names, &col_types);
+        assert_eq!(
+            cols[0].value,
+            Value::String("2026-05-09 23:08:17".to_string())
+        );
     }
 
     #[test]
