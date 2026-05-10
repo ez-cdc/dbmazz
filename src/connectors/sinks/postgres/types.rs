@@ -6,6 +6,43 @@
 //! Mostly identity mapping since both sides are PostgreSQL.
 //! Notable exceptions: serial types become plain integers (no sequence in target).
 
+use crate::core::record::DataType;
+use crate::core::traits::SourceColumn;
+
+/// Maps a SourceColumn's type info to the target PostgreSQL DDL type.
+/// Uses mysql_data_type_to_pg for MySQL columns (pg_type_id == 0),
+/// otherwise uses pg_oid_to_target_type for PG-to-PG identity mapping.
+pub fn column_type(col: &SourceColumn) -> &'static str {
+    if col.pg_type_id == 0 {
+        mysql_data_type_to_pg(&col.data_type)
+    } else {
+        pg_oid_to_target_type(col.pg_type_id)
+    }
+}
+
+/// Map a MySQL DataType to the target PostgreSQL column type DDL string.
+/// Used when the source is MySQL (pg_type_id is always 0).
+/// Falls back to "text" for unknown types.
+pub fn mysql_data_type_to_pg(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Boolean => "boolean",
+        DataType::Int16 => "smallint",
+        DataType::Int32 => "integer",
+        DataType::Int64 => "bigint",
+        DataType::Float32 => "real",
+        DataType::Float64 => "double precision",
+        DataType::Decimal { .. } => "numeric",
+        DataType::String | DataType::Text => "text",
+        DataType::Bytes => "bytea",
+        DataType::Json | DataType::Jsonb => "jsonb",
+        DataType::Date => "date",
+        DataType::Time => "time without time zone",
+        DataType::Timestamp => "timestamp without time zone",
+        DataType::TimestampTz => "timestamp with time zone",
+        DataType::Uuid => "uuid",
+    }
+}
+
 /// Map a PostgreSQL type OID to the target column type DDL string.
 /// Returns the SQL type name suitable for CREATE TABLE.
 pub fn pg_oid_to_target_type(pg_type_id: u32) -> &'static str {

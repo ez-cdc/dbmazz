@@ -4,6 +4,99 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-04
+
+### Added
+
+- **MySQL source (BETA).** New CDC source connector that streams from MySQL
+  via binlog (ROW format, GTID-aware), supporting StarRocks, PostgreSQL, and
+  Snowflake sinks. Concurrent snapshot + CDC via the read-only DBLog
+  Incremental Snapshot algorithm. Requires `gtid_mode=ON` and
+  `binlog_format=ROW`. Setup, configuration, and BETA scope documented in
+  [`docs/mysql-source.md`](docs/mysql-source.md).
+- **`source::create_source` factory** mirroring the existing
+  `connectors::sinks::create_sink` factory. Single dispatch point per
+  side of the pipeline; the engine now constructs sources via the
+  factory rather than ad-hoc match arms.
+
+### Fixed
+
+- MySQL source now persists `(binlog_file, position, gtid_executed)` as the
+  checkpoint, restoring restart correctness across binlog rotations and
+  daemon restarts. Earlier, the persisted "checkpoint" was a hex-encoded
+  byte offset mislabeled as a GTID and the parsed GTID was discarded.
+- MySQL snapshot progress query no longer uses `FILTER (WHERE ...)`
+  (PostgreSQL-only syntax that MySQL ≤ 8.4 rejects with a parse error).
+- MySQL CDC checkpoints are now persisted only at transaction commit
+  boundaries, never mid-transaction. The previous code persisted positions
+  per acknowledged record, including the in-flight `gtid_executed` added
+  on `GtidEvent`; a crash before the matching `XidEvent` advanced the
+  saved checkpoint past an uncommitted transaction and silently dropped it
+  on restart. (Debezium-faithful adaptation: the connector emits per-event
+  but commits the offset only at transaction boundaries.)
+- DDL-only transactions (`CREATE TABLE`, `ALTER TABLE`, etc., which
+  terminate with `QueryEvent("COMMIT")` instead of `XidEvent`) now produce
+  a `BinlogEvent::Commit` boundary so the pipeline flushes and the
+  persisted checkpoint advances past the DDL.
+- MySQL snapshot `await_drain` no longer deadlocks under concurrent
+  `try_drain` calls. The previous polling-then-awaiting pattern lost
+  `Notify::notify_waiters` wake-ups fired between the flag check and the
+  await; reproduced reliably under load and verified fixed by a
+  10 000-iteration race-stress unit test.
+- MySQL snapshot chunk LOW/HIGH watermarks are now derived from the binlog
+  consumer's live GTID set (an `Arc<RwLock<GtidSet>>` shared with the
+  parser), not from `SELECT @@global.gtid_executed` against the source.
+  Eliminates the LOW-capture-vs-chunk-registration race that emitted
+  duplicate snapshot+CDC records for rows mutated during the window.
+- MySQL heartbeat events now carry the live `(file, position,
+  gtid_executed)` triple and trigger snapshot drain checks so idle
+  databases don't hang the snapshot worker. Heartbeats previously emitted
+  a placeholder `SourcePosition::GtidSet("0")` that corrupted any
+  checkpoint persisting a heartbeat.
+- MySQL `TableMapEvent` parsing preserves column ordinals when a column
+  type is unrecognised. Previously `extract_col_types` silently dropped
+  unknown columns via `filter_map`, shifting subsequent columns one slot
+  down and binding row values to the wrong column names — a silent
+  corruption bug for tables using a type mysql_common didn't yet
+  recognise. Unknown columns now produce a sentinel byte in their
+  original slot; downstream value decoding emits `Value::Null` for them
+  and a structured `ERROR` log surfaces the table+ordinal.
+- MySQL CDC startup runs a `GTID_SUBSET(persisted, @@global.gtid_executed)`
+  probe; if the persisted set isn't a subset of the server's executed set
+  (binlog purge, server failover, or a pre-fix daemon's mid-transaction
+  checkpoint), the daemon now exits non-zero with operator-actionable
+  remediation rather than retry-looping forever.
+- MySQL `TIMESTAMP` and `TIMESTAMP2` columns are now emitted as ISO-8601
+  formatted strings (`"YYYY-MM-DD HH:MM:SS"` UTC) instead of being passed
+  through as the raw epoch-seconds integer. Previously every row of a
+  table containing a `TIMESTAMP` column failed the PG sink's MERGE cast
+  (`(_data->>'created_at')::timestamp with time zone`), silently dropping
+  the entire batch and preventing any data from reaching the target.
+  Surfaced by the first MySQL→PG end-to-end run via `ez-cdc verify`.
+  This is the minimum-viable temporal fidelity for MySQL beta; the
+  forward-compatible `Value::Timestamp(i64 micros)` with `tz_aware`
+  semantics is scoped to `mysql-cdc-beta-to-ga`.
+  - Both wire-protocol shapes are handled: `MysqlValue::Int(epoch)`
+    (legacy `TIMESTAMP`, code `0x07`) and `MysqlValue::Bytes(epoch_ascii)`
+    (mysql_common 0.32.4 returns `TIMESTAMP2` (code `0x11`) as ASCII
+    epoch bytes in binlog mode). Plain `INT/BIGINT` columns remain
+    untouched — verified by a unit test asserting non-temporal int
+    columns keep their `Value::Int64` shape.
+
+### Removed
+
+- `SourcePosition::is_ahead_of` no longer attempts to order
+  `SourcePosition::GtidSet` values. GTID sets are partial orders (set
+  inclusion of UUID:range pairs); the previous lexicographic string
+  compare was meaningless. Callers needing partial-order semantics MUST
+  use `crate::source::mysql::gtid::GtidSet::is_superset_of` directly.
+
+### Security
+
+- MySQL source TLS certificate verification is now **on by default**. Set
+  `MYSQL_TLS_SKIP_VERIFY=true` to opt out (unsafe — for dev environments
+  only). The previous behaviour silently accepted any certificate.
+
 ## [2.2.0] - 2026-04-29
 
 ### Added

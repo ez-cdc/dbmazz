@@ -3,22 +3,11 @@
 
 #![warn(clippy::all)]
 
-mod config;
-mod connectors;
-mod control;
-mod core;
-mod engine;
-mod pipeline;
-mod replication;
-mod source;
-mod state_store;
-mod utils;
-
 use anyhow::Result;
 use dotenvy::dotenv;
 
-use crate::config::Config;
-use crate::engine::CdcEngine;
+use dbmazz::config::Config;
+use dbmazz::engine::CdcEngine;
 
 #[tokio::main]
 async fn main() -> Result<()> {

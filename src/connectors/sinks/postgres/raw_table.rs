@@ -15,7 +15,7 @@ use tokio_postgres::Client;
 use tracing::info;
 
 use super::schema_tracking::{self, SchemaState};
-use super::types::pg_oid_to_target_type;
+use super::types;
 use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
 use crate::core::record::{CdcRecord, ColumnValue, Value};
 use crate::core::traits::SourceTableSchema;
@@ -62,15 +62,13 @@ pub async fn write_batch_to_raw(
     //     is complete (Risk #6). A COPY failure rolls back the DDL too.
     for (table, diff) in &pending_diffs {
         for added in &diff.added {
-            let pg_type_id = added
-                .pg_type_id
-                .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
+            let col_type = match added.pg_type_id {
+                Some(oid) => types::pg_oid_to_target_type(oid),
+                None => types::mysql_data_type_to_pg(&added.data_type),
+            };
             let sql = format!(
                 r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
-                target_schema,
-                table.name,
-                added.name,
-                pg_oid_to_target_type(pg_type_id)
+                target_schema, table.name, added.name, col_type
             );
             tx.batch_execute(&sql).await.with_context(|| {
                 format!(

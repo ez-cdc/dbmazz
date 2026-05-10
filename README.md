@@ -123,7 +123,7 @@ Full Docker reference (env vars, healthcheck, persisting state, build-from-sourc
 | PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
 | PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported; requires `ALTER TABLE` privilege on target schema |
 | PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
-| MySQL | * | 🚧 Roadmap | The source layer is generic; PostgreSQL is the only implementation today |
+| MySQL 5.7+ / 8.0+ | All sinks | 🧪 Beta | Binlog-based with GTID-aware checkpointing. See [`docs/mysql-source.md`](docs/mysql-source.md). |
 
 Adding a new sink is intentionally small: implement a 6-method `Sink` trait and CDC + snapshot work automatically. See [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
 

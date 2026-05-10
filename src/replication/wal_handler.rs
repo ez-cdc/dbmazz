@@ -187,6 +187,7 @@ async fn extract_int_pk(
 }
 
 /// Handle KeepAlive message
+#[allow(dead_code)]
 pub async fn handle_keepalive<S>(
     lsn: u64,
     reply_requested: bool,
