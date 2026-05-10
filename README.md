@@ -123,11 +123,9 @@ Full Docker reference (env vars, healthcheck, persisting state, build-from-sourc
 | PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
 | PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported; requires `ALTER TABLE` privilege on target schema |
 | PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
-| MySQL 5.7+ / 8.0+ | All sinks | 🧪 Beta | Binlog-based (ROW format, GTID-aware). Concurrent snapshot+CDC via the read-only DBLog Incremental Snapshot algorithm. Requires `gtid_mode=ON`. See [docs/configuration.md](docs/configuration.md). |
+| MySQL 5.7+ / 8.0+ | All sinks | 🧪 Beta | Binlog-based with GTID-aware checkpointing. See [`docs/mysql-source.md`](docs/mysql-source.md). |
 
 Adding a new sink is intentionally small: implement a 6-method `Sink` trait and CDC + snapshot work automatically. See [`docs/contributing-connectors.md`](docs/contributing-connectors.md).
-
-> **🧪 MySQL is in BETA (v2.3.0).** Core CDC is functional: binlog streaming (ROW format, GTID-aware), commit-boundary checkpointing of `(binlog_file, position, gtid_executed)` (Debezium-faithful: offsets advance only at transaction commit, never mid-transaction), **and concurrent snapshot + CDC** via the read-only DBLog Incremental Snapshot algorithm (Debezium 2022 design — per-chunk GTID watermarks read from the live binlog consumer state, with binlog-event-wins-on-PK-collision reconciliation). Requires `gtid_mode=ON` and `binlog_format=ROW`. TLS verification is on by default; set `MYSQL_TLS_SKIP_VERIFY=true` only for dev environments. Beta scope still open: type-mapping fidelity (BIGINT UNSIGNED, DECIMAL precision, DATETIME microseconds), first-run binlog bootstrap, non-integer primary keys — see the issue tracker. Feedback welcome via [Discussions](https://github.com/ez-cdc/dbmazz/discussions).
 
 ---
 

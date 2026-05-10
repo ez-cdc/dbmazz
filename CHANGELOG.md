@@ -10,11 +10,14 @@ All notable changes to dbmazz will be documented here.
 
 - **MySQL source (BETA).** New CDC source connector that streams from MySQL
   via binlog (ROW format, GTID-aware), supporting StarRocks, PostgreSQL, and
-  Snowflake sinks. Concurrent snapshot + CDC is supported via the read-only
-  DBLog Incremental Snapshot algorithm (Debezium 2022): per-chunk GTID
-  watermarks plus binlog-event-wins-on-PK-collision reconciliation. Requires
-  `gtid_mode=ON` and `binlog_format=ROW`. Marked BETA pending production
-  miles on schema/type coverage edge cases.
+  Snowflake sinks. Concurrent snapshot + CDC via the read-only DBLog
+  Incremental Snapshot algorithm. Requires `gtid_mode=ON` and
+  `binlog_format=ROW`. Setup, configuration, and BETA scope documented in
+  [`docs/mysql-source.md`](docs/mysql-source.md).
+- **`source::create_source` factory** mirroring the existing
+  `connectors::sinks::create_sink` factory. Single dispatch point per
+  side of the pipeline; the engine now constructs sources via the
+  factory rather than ad-hoc match arms.
 
 ### Fixed
 

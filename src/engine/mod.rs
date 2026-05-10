@@ -18,9 +18,7 @@ use crate::control::{self, CdcConfig, Stage};
 use crate::core::{SinkMode, Source, SourcePosition};
 use crate::pipeline::schema_cache::SchemaCache;
 use crate::pipeline::{Pipeline, PipelineEvent};
-#[cfg(feature = "mysql-source")]
-use crate::source::mysql::MysqlSource;
-use crate::source::postgres::{introspect_schemas, PostgresSource};
+use crate::source::postgres::introspect_schemas;
 use crate::state_store::StateStore;
 use setup::SetupManager;
 
@@ -427,32 +425,12 @@ impl CdcEngine {
         });
     }
 
-    /// Initialize source (returns trait object for source-agnostic dispatch)
+    /// Initialize source via the [`crate::source::create_source`] factory.
+    /// Thin wrapper kept on `CdcEngine` for ergonomics; the dispatch
+    /// itself lives in `src/source/mod.rs`, mirroring the
+    /// `create_sink` factory under `src/connectors/sinks/mod.rs`.
     async fn init_source(&self) -> Result<Box<dyn Source>> {
-        match self.config.source.source_type {
-            SourceType::Postgres => {
-                let pg = self.config.source.postgres();
-                let source = PostgresSource::new(
-                    &self.config.source.url,
-                    pg.slot_name.clone(),
-                    pg.publication_name.clone(),
-                )
-                .await?;
-                Ok(Box::new(source))
-            }
-            #[cfg(feature = "mysql-source")]
-            SourceType::Mysql => {
-                let mysql_cfg = self.config.source.mysql();
-                let source = MysqlSource::new(&self.config.source.url, mysql_cfg).await?;
-                Ok(Box::new(source))
-            }
-            #[cfg(not(feature = "mysql-source"))]
-            SourceType::Mysql => {
-                anyhow::bail!(
-                    "MySQL source support is not enabled. Build with --features mysql-source"
-                )
-            }
-        }
+        crate::source::create_source(&self.config.source).await
     }
 
     /// Initialize pipeline with sink (core::Sink, no adapter)
