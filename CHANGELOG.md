@@ -63,6 +63,22 @@ All notable changes to dbmazz will be documented here.
   (binlog purge, server failover, or a pre-fix daemon's mid-transaction
   checkpoint), the daemon now exits non-zero with operator-actionable
   remediation rather than retry-looping forever.
+- MySQL `TIMESTAMP` and `TIMESTAMP2` columns are now emitted as ISO-8601
+  formatted strings (`"YYYY-MM-DD HH:MM:SS"` UTC) instead of being passed
+  through as the raw epoch-seconds integer. Previously every row of a
+  table containing a `TIMESTAMP` column failed the PG sink's MERGE cast
+  (`(_data->>'created_at')::timestamp with time zone`), silently dropping
+  the entire batch and preventing any data from reaching the target.
+  Surfaced by the first MySQL→PG end-to-end run via `ez-cdc verify`.
+  This is the minimum-viable temporal fidelity for MySQL beta; the
+  forward-compatible `Value::Timestamp(i64 micros)` with `tz_aware`
+  semantics is scoped to `mysql-cdc-beta-to-ga`.
+  - Both wire-protocol shapes are handled: `MysqlValue::Int(epoch)`
+    (legacy `TIMESTAMP`, code `0x07`) and `MysqlValue::Bytes(epoch_ascii)`
+    (mysql_common 0.32.4 returns `TIMESTAMP2` (code `0x11`) as ASCII
+    epoch bytes in binlog mode). Plain `INT/BIGINT` columns remain
+    untouched — verified by a unit test asserting non-temporal int
+    columns keep their `Value::Int64` shape.
 
 ### Removed
 
