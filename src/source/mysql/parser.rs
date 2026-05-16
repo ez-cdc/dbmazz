@@ -40,6 +40,11 @@ pub enum BinlogEvent {
         rows: Vec<Vec<BinlogValue<'static>>>,
         col_names: Vec<String>,
         col_types: Vec<u8>,
+        /// Per-column `DataType` from schema introspection. Source-agnostic
+        /// type info that the converter uses to dispatch (e.g.,
+        /// `DataType::UInt64` for BIGINT UNSIGNED, `DataType::Decimal{p,s}`
+        /// with real precision). Same length as `col_names`/`col_types`.
+        col_data_types: Vec<crate::core::record::DataType>,
         position: SourcePosition,
     },
     Update {
@@ -50,6 +55,7 @@ pub enum BinlogEvent {
         after_rows: Vec<Vec<BinlogValue<'static>>>,
         col_names: Vec<String>,
         col_types: Vec<u8>,
+        col_data_types: Vec<crate::core::record::DataType>,
         position: SourcePosition,
     },
     Delete {
@@ -59,6 +65,7 @@ pub enum BinlogEvent {
         rows: Vec<Vec<BinlogValue<'static>>>,
         col_names: Vec<String>,
         col_types: Vec<u8>,
+        col_data_types: Vec<crate::core::record::DataType>,
         position: SourcePosition,
     },
     TableMap {
@@ -139,6 +146,7 @@ pub fn process_typed_event(
     event: &mysql_common::binlog::events::Event,
     tme_cache: &mut HashMap<u64, TableMapEvent<'static>>,
     col_names_map: &HashMap<(String, String), Vec<String>>,
+    col_data_types_map: &HashMap<(String, String), Vec<crate::core::record::DataType>>,
     state: &mut ParserState,
 ) -> Result<Vec<BinlogEvent>> {
     let data = event
@@ -193,6 +201,19 @@ pub fn process_typed_event(
                 .get(&(schema.clone(), table.clone()))
                 .cloned()
                 .unwrap_or_else(|| (0..col_types.len()).map(|i| format!("@{}", i)).collect());
+            // Per-column DataType from schema introspection. Missing
+            // entries (table outside the tracked set, or a column
+            // appearing in the binlog that introspection didn't catch)
+            // fall back to `DataType::String` so the converter still
+            // emits a value rather than panicking.
+            let col_data_types = col_data_types_map
+                .get(&(schema.clone(), table.clone()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    (0..col_types.len())
+                        .map(|_| crate::core::record::DataType::String)
+                        .collect()
+                });
 
             /// Helper: extract rows from any rows event that has `rows()`.
             fn collect_after<R>(
@@ -266,6 +287,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }
@@ -278,6 +300,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }
@@ -291,6 +314,7 @@ pub fn process_typed_event(
                         after_rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }
@@ -304,6 +328,7 @@ pub fn process_typed_event(
                         after_rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }
@@ -316,6 +341,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }
@@ -328,6 +354,7 @@ pub fn process_typed_event(
                         rows,
                         col_names,
                         col_types,
+                        col_data_types: col_data_types.clone(),
                         position: make_position(state),
                     }])
                 }

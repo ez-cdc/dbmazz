@@ -93,26 +93,41 @@ async fn introspect_columns(
     schema: &str,
     table: &str,
 ) -> Result<Vec<SourceColumn>> {
+    // Read NUMERIC_PRECISION / NUMERIC_SCALE for DECIMAL fidelity and
+    // COLUMN_TYPE to detect the `unsigned` suffix on integer columns
+    // (BIGINT UNSIGNED → DataType::UInt64).
     let col_query = format!(
-        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE \
+        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, \
+                COALESCE(NUMERIC_PRECISION, 0), \
+                COALESCE(NUMERIC_SCALE, 0), \
+                COLUMN_TYPE \
          FROM information_schema.columns \
          WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
          ORDER BY ORDINAL_POSITION",
         quote_string(schema),
         quote_string(table),
     );
-    let col_rows: Vec<(String, String, String)> = conn
+    let col_rows: Vec<(String, String, String, u64, u64, String)> = conn
         .query(col_query)
         .await
         .context("Failed to query information_schema.columns")?;
     let columns: Vec<SourceColumn> = col_rows
         .into_iter()
-        .map(|(name, data_type, nullable)| SourceColumn {
-            name,
-            data_type: mysql_type_to_data_type(&data_type),
-            nullable: nullable.to_uppercase() == "YES",
-            pg_type_id: None,
-        })
+        .map(
+            |(name, data_type, nullable, numeric_precision, numeric_scale, column_type)| {
+                SourceColumn {
+                    name,
+                    data_type: mysql_type_to_data_type(
+                        &data_type,
+                        numeric_precision as u32,
+                        numeric_scale as u32,
+                        &column_type,
+                    ),
+                    nullable: nullable.to_uppercase() == "YES",
+                    pg_type_id: None,
+                }
+            },
+        )
         .collect();
     Ok(columns)
 }
@@ -137,26 +152,65 @@ async fn introspect_primary_keys(
     Ok(pk_rows.into_iter().map(|r| r.0).collect())
 }
 
-/// Maps MySQL type name strings to generic DataType.
-pub fn mysql_type_to_data_type(mysql_type: &str) -> DataType {
+/// Maps MySQL type metadata to generic DataType.
+///
+/// `numeric_precision` and `numeric_scale` come from
+/// `information_schema.columns` and are used for DECIMAL fidelity
+/// (defaults of 0 mean the type doesn't have numeric precision —
+/// non-numeric columns).
+///
+/// `column_type` is the raw declaration string (e.g. `"bigint(20) unsigned"`).
+/// Used to detect the `unsigned` suffix on BIGINT and lift the column
+/// to `DataType::UInt64`. Smaller unsigned integer types fit in i64
+/// and stay on their existing variants.
+pub fn mysql_type_to_data_type(
+    mysql_type: &str,
+    numeric_precision: u32,
+    numeric_scale: u32,
+    column_type: &str,
+) -> DataType {
+    let is_unsigned = column_type.to_lowercase().contains(" unsigned");
     match mysql_type.to_uppercase().as_str() {
         "TINYINT" => DataType::Int16,
         "BOOL" | "BOOLEAN" => DataType::Boolean,
         "SMALLINT" | "YEAR" => DataType::Int16,
         "MEDIUMINT" | "INT" | "INTEGER" => DataType::Int32,
-        "BIGINT" => DataType::Int64,
+        "BIGINT" => {
+            if is_unsigned {
+                DataType::UInt64
+            } else {
+                DataType::Int64
+            }
+        }
         "FLOAT" => DataType::Float32,
         "DOUBLE" | "REAL" => DataType::Float64,
-        "DECIMAL" | "NUMERIC" => DataType::Decimal {
-            precision: 38,
-            scale: 9,
-        },
+        "DECIMAL" | "NUMERIC" => {
+            // MySQL allows precision up to 65; dbmazz / sinks clamp at 38
+            // (the Snowflake / StarRocks / PG NUMERIC max we support).
+            // Log when clamping so an operator can spot fidelity loss.
+            if numeric_precision > 38 {
+                tracing::warn!(
+                    "DECIMAL precision {} exceeds dbmazz max of 38; clamping",
+                    numeric_precision
+                );
+            }
+            let p = if numeric_precision == 0 {
+                38
+            } else {
+                numeric_precision.min(38) as u8
+            };
+            let s = numeric_scale.min(p as u32) as u8;
+            DataType::Decimal {
+                precision: p,
+                scale: s,
+            }
+        }
         "DATE" => DataType::Date,
         "TIME" => DataType::Time,
         "TIMESTAMP" => DataType::TimestampTz,
         "DATETIME" => DataType::Timestamp,
         "CHAR" | "VARCHAR" | "ENUM" | "SET" => DataType::String,
-        "TEXT" | "MEDIUMTEXT" | "LONGTEXT" => DataType::Text,
+        "TEXT" | "MEDIUMTEXT" | "LONGTEXT" | "TINYTEXT" => DataType::Text,
         "BINARY" | "VARBINARY" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" | "TINYBLOB" | "GEOMETRY"
         | "POINT" | "LINESTRING" | "POLYGON" => DataType::Bytes,
         "JSON" => DataType::Json,
@@ -184,31 +238,95 @@ mod tests {
         assert_eq!(quote_identifier("it`self"), "`it``self`");
     }
 
+    /// Helper for tests where precision/unsigned don't apply.
+    fn dt(name: &str) -> DataType {
+        mysql_type_to_data_type(name, 0, 0, "")
+    }
+
     #[test]
-    fn test_mysql_type_to_data_type() {
-        assert_eq!(mysql_type_to_data_type("TINYINT"), DataType::Int16);
-        assert_eq!(mysql_type_to_data_type("BOOL"), DataType::Boolean);
-        assert_eq!(mysql_type_to_data_type("INT"), DataType::Int32);
-        assert_eq!(mysql_type_to_data_type("BIGINT"), DataType::Int64);
-        assert_eq!(mysql_type_to_data_type("FLOAT"), DataType::Float32);
-        assert_eq!(mysql_type_to_data_type("DOUBLE"), DataType::Float64);
+    fn test_mysql_type_to_data_type_basic() {
+        assert_eq!(dt("TINYINT"), DataType::Int16);
+        assert_eq!(dt("BOOL"), DataType::Boolean);
+        assert_eq!(dt("INT"), DataType::Int32);
+        assert_eq!(dt("BIGINT"), DataType::Int64);
+        assert_eq!(dt("FLOAT"), DataType::Float32);
+        assert_eq!(dt("DOUBLE"), DataType::Float64);
+        assert_eq!(dt("DATE"), DataType::Date);
+        assert_eq!(dt("TIME"), DataType::Time);
+        assert_eq!(dt("DATETIME"), DataType::Timestamp);
+        assert_eq!(dt("TIMESTAMP"), DataType::TimestampTz);
+        assert_eq!(dt("VARCHAR"), DataType::String);
+        assert_eq!(dt("TEXT"), DataType::Text);
+        assert_eq!(dt("BLOB"), DataType::Bytes);
+        assert_eq!(dt("JSON"), DataType::Json);
+        assert_eq!(dt("GEOMETRY"), DataType::Bytes);
+        assert_eq!(dt("UNKNOWN"), DataType::String);
+    }
+
+    #[test]
+    fn test_bigint_unsigned_lifts_to_uint64() {
+        // Trailing " unsigned" in COLUMN_TYPE is the discriminator.
+        let dt = mysql_type_to_data_type("BIGINT", 19, 0, "bigint(20) unsigned");
+        assert_eq!(dt, DataType::UInt64);
+    }
+
+    #[test]
+    fn test_bigint_signed_stays_int64() {
+        let dt = mysql_type_to_data_type("BIGINT", 19, 0, "bigint(20)");
+        assert_eq!(dt, DataType::Int64);
+    }
+
+    #[test]
+    fn test_smaller_int_unsigned_stays_signed() {
+        // INT/MEDIUMINT/SMALLINT/TINYINT UNSIGNED fit in i64; no UInt32
+        // variant needed — they stay on their existing signed mapping.
         assert_eq!(
-            mysql_type_to_data_type("DECIMAL"),
+            mysql_type_to_data_type("INT", 10, 0, "int(11) unsigned"),
+            DataType::Int32
+        );
+        assert_eq!(
+            mysql_type_to_data_type("SMALLINT", 5, 0, "smallint(6) unsigned"),
+            DataType::Int16
+        );
+    }
+
+    #[test]
+    fn test_decimal_uses_actual_precision() {
+        let dt = mysql_type_to_data_type("DECIMAL", 10, 2, "decimal(10,2)");
+        assert_eq!(
+            dt,
             DataType::Decimal {
-                precision: 38,
-                scale: 9
+                precision: 10,
+                scale: 2
             }
         );
-        assert_eq!(mysql_type_to_data_type("DATE"), DataType::Date);
-        assert_eq!(mysql_type_to_data_type("TIME"), DataType::Time);
-        assert_eq!(mysql_type_to_data_type("DATETIME"), DataType::Timestamp);
-        assert_eq!(mysql_type_to_data_type("TIMESTAMP"), DataType::TimestampTz);
-        assert_eq!(mysql_type_to_data_type("VARCHAR"), DataType::String);
-        assert_eq!(mysql_type_to_data_type("TEXT"), DataType::Text);
-        assert_eq!(mysql_type_to_data_type("BLOB"), DataType::Bytes);
-        assert_eq!(mysql_type_to_data_type("JSON"), DataType::Json);
-        assert_eq!(mysql_type_to_data_type("GEOMETRY"), DataType::Bytes);
-        assert_eq!(mysql_type_to_data_type("UNKNOWN"), DataType::String);
+    }
+
+    #[test]
+    fn test_decimal_zero_precision_defaults_to_38() {
+        // When information_schema returns NULL (coalesced to 0), keep
+        // the previous default of 38-precision.
+        let dt = mysql_type_to_data_type("DECIMAL", 0, 0, "decimal");
+        assert_eq!(
+            dt,
+            DataType::Decimal {
+                precision: 38,
+                scale: 0
+            }
+        );
+    }
+
+    #[test]
+    fn test_decimal_precision_clamped_at_38() {
+        // MySQL allows up to 65 — dbmazz/sinks cap at 38.
+        let dt = mysql_type_to_data_type("DECIMAL", 50, 10, "decimal(50,10)");
+        assert_eq!(
+            dt,
+            DataType::Decimal {
+                precision: 38,
+                scale: 10
+            }
+        );
     }
 
     #[test]

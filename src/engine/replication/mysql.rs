@@ -149,6 +149,81 @@ impl MysqlReplicationLoop {
         Ok(())
     }
 
+    /// First-run bootstrap (H5): capture the server's current binlog
+    /// position via `SHOW MASTER STATUS` and return `(file, position,
+    /// gtid_executed)`. The caller persists this as a PROVISIONAL
+    /// checkpoint before the snapshot worker spawns so the post-snapshot
+    /// CDC stream resumes from this point rather than the oldest
+    /// available binlog.
+    ///
+    /// Requires `REPLICATION CLIENT` (or `REPLICATION SLAVE`) on the
+    /// MySQL user — already documented as a CDC prerequisite.
+    ///
+    /// Fails when:
+    /// - The MySQL user lacks the required privilege.
+    /// - The server returned no row (binlog disabled — also a CDC
+    ///   prerequisite, but easier to mis-configure on Aurora reader
+    ///   endpoints).
+    /// - The connection itself failed.
+    async fn capture_initial_position(source_url: &str) -> Result<(String, u64, String)> {
+        let opts = build_mysql_opts(source_url, false)
+            .context("MySQL CDC bootstrap: failed to build connection opts")?;
+        let mut conn = mysql_async::Conn::new(opts)
+            .await
+            .context("MySQL CDC bootstrap: failed to connect for SHOW MASTER STATUS")?;
+        // SHOW MASTER STATUS columns: File, Position, Binlog_Do_DB,
+        // Binlog_Ignore_DB, Executed_Gtid_Set. We want col 0, 1, 4.
+        let row: Option<mysql_async::Row> = conn
+            .query_first("SHOW MASTER STATUS")
+            .await
+            .context("MySQL CDC bootstrap: SHOW MASTER STATUS failed (privilege issue?)")?;
+        // Best-effort close.
+        let _ = conn.disconnect().await;
+        let row = row.ok_or_else(|| {
+            anyhow::anyhow!(
+                "MySQL CDC bootstrap: SHOW MASTER STATUS returned no row — \
+                 binlog likely disabled on this server"
+            )
+        })?;
+        // Defensive: column names vary slightly across MySQL versions
+        // (e.g., MySQL 8.4 renamed it `SHOW BINARY LOG STATUS`). We
+        // read by index to keep the code resilient.
+        let file: String = row
+            .as_ref(0)
+            .and_then(|v| match v {
+                mysql_async::Value::Bytes(b) => std::str::from_utf8(b).ok().map(String::from),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("MySQL CDC bootstrap: missing File column in SHOW MASTER STATUS")
+            })?;
+        let position: u64 = row
+            .as_ref(1)
+            .and_then(|v| match v {
+                mysql_async::Value::Int(i) => Some(*i as u64),
+                #[allow(clippy::cast_possible_truncation)]
+                mysql_async::Value::UInt(u) => Some(*u),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "MySQL CDC bootstrap: missing Position column in SHOW MASTER STATUS"
+                )
+            })?;
+        // Executed_Gtid_Set may be empty if GTID mode is off; we treat
+        // that as a non-fatal warning at the caller. Return "" so the
+        // caller seeds an empty GtidSet (parse_default).
+        let gtid: String = row
+            .as_ref(4)
+            .and_then(|v| match v {
+                mysql_async::Value::Bytes(b) => std::str::from_utf8(b).ok().map(String::from),
+                mysql_async::Value::NULL => Some(String::new()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        Ok((file, position, gtid))
+    }
+
     /// Returns `true` if the event targets a tracked table.
     ///
     /// Unfiltered types (`Begin`, `Commit`, `Heartbeat`, `TableMap`) always pass.
@@ -207,10 +282,15 @@ impl ReplicationLoop for MysqlReplicationLoop {
         // Table map event cache and column name map from schema introspection
         let mut tme_cache: HashMap<u64, TableMapEvent<'static>> = HashMap::new();
         let mut col_names_map: HashMap<(String, String), Vec<String>> = HashMap::new();
+        let mut col_data_types_map: HashMap<(String, String), Vec<crate::core::record::DataType>> =
+            HashMap::new();
         let mut tracked_tables: HashSet<(String, String)> = HashSet::new();
         for s in source_schemas.iter() {
             let names: Vec<String> = s.columns.iter().map(|c| c.name.clone()).collect();
+            let data_types: Vec<crate::core::record::DataType> =
+                s.columns.iter().map(|c| c.data_type.clone()).collect();
             col_names_map.insert((s.schema.clone(), s.name.clone()), names);
+            col_data_types_map.insert((s.schema.clone(), s.name.clone()), data_types);
             tracked_tables.insert((s.schema.clone(), s.name.clone()));
         }
         info!(
@@ -225,29 +305,76 @@ impl ReplicationLoop for MysqlReplicationLoop {
         // adding to a real cumulative set, not start from zero. The GTID
         // set lives behind `consumer_gtid` so snapshot workers can read
         // it for LOW/HIGH watermarks (DBLog read-only mode).
-        let (initial_file, initial_set): (String, GtidSet) = match state_store
-            .load_mysql_checkpoint(&format!("mysql_{}", config.source.mysql().server_id))
-            .await
-        {
-            Ok(Some((file, _pos, gtid_str))) => {
-                info!(
-                    "MySQL CDC resume: starting from checkpoint file={}, gtid_executed={}",
-                    file, gtid_str
-                );
-                (file, GtidSet::parse(&gtid_str).unwrap_or_default())
-            }
-            Ok(None) => {
-                info!("MySQL CDC: no prior checkpoint, tracking from stream start");
-                (String::new(), GtidSet::default())
-            }
-            Err(e) => {
-                warn!(
-                    "MySQL CDC: failed to load checkpoint ({}); tracking from stream start",
-                    e
-                );
-                (String::new(), GtidSet::default())
-            }
-        };
+        let bootstrap_slot = format!("mysql_{}", config.source.mysql().server_id);
+        let (initial_file, initial_set): (String, GtidSet) =
+            match state_store.load_mysql_checkpoint(&bootstrap_slot).await {
+                Ok(Some((file, _pos, gtid_str))) => {
+                    info!(
+                        "MySQL CDC resume: starting from checkpoint file={}, gtid_executed={}",
+                        file, gtid_str
+                    );
+                    (file, GtidSet::parse(&gtid_str).unwrap_or_default())
+                }
+                Ok(None) => {
+                    // First-run bootstrap (H5): capture the server's current
+                    // binlog position BEFORE the snapshot worker spawns and
+                    // persist as PROVISIONAL. The post-snapshot CDC stream
+                    // resumes from that point — no replaying days of binlogs,
+                    // no hard error on purged old binlogs.
+                    //
+                    // Seeding `consumer_gtid` with this set (below) means the
+                    // snapshot worker's first chunk LOW watermark already
+                    // reflects what the server had at bootstrap. Events with
+                    // gtid > S flow through the consumer normally and are
+                    // evaluated against the chunk window (DBLog invariant
+                    // preserved — see design.md Decision 5).
+                    match Self::capture_initial_position(&config.source.url).await {
+                        Ok((file, pos, gtid_str)) => {
+                            let truncated = if gtid_str.len() > 60 {
+                                format!("{}...", &gtid_str[..60])
+                            } else {
+                                gtid_str.clone()
+                            };
+                            info!(
+                                "MySQL CDC first-run bootstrap: SHOW MASTER STATUS captured \
+                             file={}, position={}, gtid_executed={}",
+                                file, pos, truncated
+                            );
+                            if let Err(e) = state_store
+                                .save_mysql_provisional_checkpoint(
+                                    &bootstrap_slot,
+                                    &file,
+                                    pos,
+                                    &gtid_str,
+                                )
+                                .await
+                            {
+                                warn!(
+                                "MySQL CDC bootstrap: failed to persist provisional checkpoint \
+                                 ({}); first commit will overwrite anyway",
+                                e
+                            );
+                            }
+                            (file, GtidSet::parse(&gtid_str).unwrap_or_default())
+                        }
+                        Err(e) => {
+                            warn!(
+                            "MySQL CDC bootstrap: SHOW MASTER STATUS failed ({}); falling back \
+                             to stream-start (may replay history)",
+                            e
+                        );
+                            (String::new(), GtidSet::default())
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "MySQL CDC: failed to load checkpoint ({}); tracking from stream start",
+                        e
+                    );
+                    (String::new(), GtidSet::default())
+                }
+            };
         // Crash-recovery sanity check: if we're resuming from a persisted
         // checkpoint, validate that the server still has every GTID we
         // think we've seen. A pre-fix daemon could persist a mid-
@@ -368,6 +495,7 @@ impl ReplicationLoop for MysqlReplicationLoop {
                                 &event,
                                 &mut tme_cache,
                                 &col_names_map,
+                                &col_data_types_map,
                                 &mut parser_state,
                             )?;
                             for event in &binlog_events {

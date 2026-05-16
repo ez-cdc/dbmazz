@@ -1,8 +1,10 @@
-# MySQL source (BETA)
+# MySQL source
 
 dbmazz can stream changes from MySQL 5.7+ / 8.0+ to any of the supported sinks (StarRocks, PostgreSQL, Snowflake) via the `mysql-source` cargo feature.
 
-This document covers MySQL-specific setup, configuration, and the BETA scope. For general dbmazz architecture, see [architecture.md](architecture.md).
+**Status**: ✅ Stable as of v2.5.0 (was BETA in v2.3.0 – v2.4.x). All correctness gaps from the beta scope are closed: BIGINT UNSIGNED, microsecond DATETIME, real DECIMAL precision/scale, first-run binlog bootstrap via `SHOW MASTER STATUS`, cursor-based snapshot chunking, non-integer primary keys.
+
+This document covers MySQL-specific setup, configuration, and what's in / out of scope. For general dbmazz architecture, see [architecture.md](architecture.md).
 
 ## Prerequisites
 
@@ -75,22 +77,41 @@ dbmazz follows Debezium's MySQL connector design, adapted to dbmazz's single-bin
 - **Incremental snapshot** — read-only DBLog (Andreakis & Papapanagiotou 2020), adapted to use the binlog consumer's live GTID set as low/high watermarks instead of a writable signal table. Concurrent CDC + snapshot is supported; per-PK reconciliation drops snapshot rows that lost a race to a concurrent binlog event.
 - **Schema introspection** — `information_schema` query at startup; the schema is cached in-memory and used to map binlog row payloads to the engine's generic `CdcRecord` shape.
 
-## BETA scope
-
-What works today:
+## What's supported
 
 - Binlog streaming (INSERT / UPDATE / DELETE) for ROW format, GTID mode.
-- Incremental snapshot for tables with single-column integer primary keys.
-- Concurrent snapshot + CDC reconciliation.
-- Crash-recovery startup probe (validates persisted GTID set vs `@@global.gtid_executed`).
-- Verified end-to-end against PostgreSQL and StarRocks sinks via `ez-cdc verify` (Tier 1: A1-A4, B1/B1b/B2/B3, CDC, D4, D5, C10, H1).
+- Incremental snapshot for tables with single-column primary keys of type
+  `INT*` / `BIGINT` / `BIGINT UNSIGNED` / `VARCHAR` / `CHAR` / `BINARY` /
+  `VARBINARY` / `UUID`. Composite PK and no-PK tables are skipped with a
+  WARN log.
+- Concurrent snapshot + CDC reconciliation (read-only DBLog watermarks).
+- Cursor-based snapshot chunker — row-balanced chunks for sparse PK
+  distributions.
+- First-run binlog bootstrap via `SHOW MASTER STATUS` — no replay of
+  historical binlogs on the first start; works on long-running databases
+  with binlog purge.
+- Type fidelity: `BIGINT UNSIGNED` (full u64 range), `DATETIME(p)` with
+  microseconds, `TIMESTAMP` UTC-canonical micros, `DECIMAL(p, s)` with
+  real precision/scale, JSON pass-through.
+- Crash-recovery startup probe (validates persisted GTID set vs
+  `@@global.gtid_executed`).
+- Verified end-to-end against PostgreSQL and StarRocks sinks via
+  `ez-cdc verify` (full Tier 1 including C11 type-roundtrip).
 
-What's known to be incomplete (tracked in `openspec/changes/mysql-cdc-beta-to-ga`):
+## Out of scope
 
-- **Type fidelity**: `BIGINT UNSIGNED` overflow at the `i64` boundary; `DECIMAL` precision/scale not propagated from `information_schema`; `DATETIME` microseconds discarded; `ENUM`/`SET` semantics; full JSON typed roundtrip. The `C11` (Type roundtrip) verify check is expected to FAIL until this lands — use `ez-cdc verify --skip C11` in CI.
-- **Snapshot bootstrap from arbitrary binlog position**: today the daemon resumes from the persisted checkpoint or starts at the binlog tail; no first-run bootstrap that walks backwards.
-- **Cursor-based snapshot chunker**: today's chunker is range-based; cursor-based gives more uniform chunk sizes for non-contiguous PK distributions.
-- **Non-integer primary keys**: composite, UUID, and string PKs are not yet supported in the snapshot path.
+- **Composite primary keys** in incremental snapshot. The active-chunks
+  PK-range model is single-column today; tracked as future work.
+- **DDL replication**: MySQL `QueryEvent` → `CdcRecord::SchemaChange`
+  parsing requires a MySQL DDL parser; separate change.
+- **TINYINT / SMALLINT / MEDIUMINT / INT UNSIGNED**: they fit losslessly
+  in `i64` and stay on the existing `Int*` variants — no `UInt32`
+  variant.
+- **GEOMETRY / POINT / POLYGON** typed parsing — WKB bytes pass through
+  as `Value::Bytes`.
+- **Read-only source DB support**: dbmazz writes `dbmazz_checkpoints`
+  and `dbmazz_snapshot_state` to the source; read-only replicas without
+  write access remain unsupported.
 
 ## Verifying
 

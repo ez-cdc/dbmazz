@@ -21,7 +21,7 @@ use tracing::{info, warn};
 
 use crate::config::{MysqlSourceConfig, SourceType};
 use crate::core::traits::SourceTableSchema;
-use crate::core::{ReplicationStream, Source, SourcePosition};
+use crate::core::{Source, SourcePosition};
 
 pub mod binlog_stream;
 pub mod converter;
@@ -362,48 +362,6 @@ impl Source for MysqlSource {
         Ok(())
     }
 
-    /// Start MySQL binlog replication. Consumes the binlog connection and returns a MysqlBinlogStream.
-    async fn start_replication(
-        &mut self,
-        position: Option<SourcePosition>,
-    ) -> Result<Box<dyn ReplicationStream>> {
-        use crate::source::mysql::binlog_stream::MysqlBinlogStream;
-
-        let binlog_conn: mysql_async::Conn = self
-            .binlog_conn
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("binlog connection not available"))?
-            .into_inner();
-
-        let server_id = self.config.server_id;
-        let resume_gtid = extract_resume_gtid_set(&position);
-        match resume_gtid.as_deref() {
-            Some(gtid) if !gtid.is_empty() => {
-                info!("Resuming MySQL binlog from Gtid_set: {}", gtid)
-            }
-            _ => info!("Starting MySQL binlog from earliest available position"),
-        }
-        let stream = MysqlBinlogStream::new(binlog_conn, server_id, resume_gtid.as_deref()).await?;
-
-        Ok(Box::new(stream))
-    }
-
-    /// MySQL has no in-source checkpoint state — the live triple
-    /// `(file, position, gtid_executed)` is owned by the replication loop
-    /// and persisted to `StateStore::save_mysql_checkpoint`.
-    fn checkpoint_position(&self) -> Option<SourcePosition> {
-        None
-    }
-
-    /// Cleanup: drop connections and release resources.
-    async fn cleanup(&mut self) -> Result<()> {
-        self.query_conn = None;
-        self.binlog_conn = None;
-        self.schema_cache.lock().await.clear();
-        info!("MySQL cleanup complete");
-        Ok(())
-    }
-
     async fn create_loop(
         &mut self,
         position: Option<SourcePosition>,
@@ -536,7 +494,6 @@ mod tests {
 
         assert_eq!(source.name(), "mysql");
         assert_eq!(source.source_type(), SourceType::Mysql);
-        assert!(source.checkpoint_position().is_none());
     }
 
     #[test]
@@ -595,7 +552,7 @@ mod tests {
             ("unknown_type", "String"),
         ];
         for (mysql_type, expected_variant) in &cases {
-            let dt = crate::source::mysql::schema::mysql_type_to_data_type(mysql_type);
+            let dt = crate::source::mysql::schema::mysql_type_to_data_type(mysql_type, 0, 0, "");
             let actual = format!("{:?}", dt);
             assert!(
                 actual.starts_with(expected_variant),

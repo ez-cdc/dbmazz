@@ -115,13 +115,29 @@ impl StateStore {
                 mysql_binlog_file VARCHAR(512) NOT NULL,
                 mysql_binlog_position BIGINT UNSIGNED NOT NULL,
                 mysql_gtid_set TEXT NOT NULL,
+                status VARCHAR(16) NULL DEFAULT 'ACTIVE',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
         )
         .await
         .context("StateStore (MySQL): failed to create dbmazz_checkpoints table")?;
-        info!("StateStore (MySQL): ensured dbmazz_checkpoints table");
+        // Idempotent v1→v2 migration: add `status` column. Older 8.0
+        // versions don't support ADD COLUMN IF NOT EXISTS, so probe
+        // with SHOW COLUMNS first.
+        let has_status: Vec<mysql_async::Row> = conn
+            .query("SHOW COLUMNS FROM dbmazz_checkpoints LIKE 'status'")
+            .await
+            .context("StateStore (MySQL): failed to probe status column")?;
+        if has_status.is_empty() {
+            conn.query_drop(
+                "ALTER TABLE dbmazz_checkpoints \
+                 ADD COLUMN status VARCHAR(16) NULL DEFAULT 'ACTIVE'",
+            )
+            .await
+            .context("StateStore (MySQL): failed to add status column")?;
+        }
+        info!("StateStore (MySQL): ensured dbmazz_checkpoints table (v2)");
 
         Ok(Self {
             backend: StoreBackend::Mysql {
@@ -161,6 +177,11 @@ impl StateStore {
 
     /// Persist the MySQL binlog checkpoint triple `(file, position, gtid_set)`.
     /// Rejected by the Postgres backend — Postgres uses `save_checkpoint`.
+    ///
+    /// Always writes `status = 'ACTIVE'`. For a first-run bootstrap
+    /// checkpoint (captured from `SHOW MASTER STATUS` before the
+    /// snapshot has produced any data), use
+    /// `save_mysql_provisional_checkpoint` instead.
     #[cfg(feature = "mysql-source")]
     pub async fn save_mysql_checkpoint(
         &self,
@@ -168,6 +189,34 @@ impl StateStore {
         binlog_file: &str,
         position: u64,
         gtid_set: &str,
+    ) -> Result<()> {
+        self.save_mysql_checkpoint_with_status(slot, binlog_file, position, gtid_set, "ACTIVE")
+            .await
+    }
+
+    /// Persist a PROVISIONAL bootstrap checkpoint. The row is promoted
+    /// to ACTIVE by the next `save_mysql_checkpoint` call at a real
+    /// commit boundary. Used by the first-run binlog bootstrap (H5).
+    #[cfg(feature = "mysql-source")]
+    pub async fn save_mysql_provisional_checkpoint(
+        &self,
+        slot: &str,
+        binlog_file: &str,
+        position: u64,
+        gtid_set: &str,
+    ) -> Result<()> {
+        self.save_mysql_checkpoint_with_status(slot, binlog_file, position, gtid_set, "PROVISIONAL")
+            .await
+    }
+
+    #[cfg(feature = "mysql-source")]
+    async fn save_mysql_checkpoint_with_status(
+        &self,
+        slot: &str,
+        binlog_file: &str,
+        position: u64,
+        gtid_set: &str,
+        status: &str,
     ) -> Result<()> {
         match &self.backend {
             StoreBackend::Postgres { .. } => anyhow::bail!(
@@ -178,14 +227,16 @@ impl StateStore {
                 let mut conn = conn.lock().await;
                 conn.exec_drop(
                     "INSERT INTO dbmazz_checkpoints \
-                       (slot_name, mysql_binlog_file, mysql_binlog_position, mysql_gtid_set) \
-                     VALUES (?, ?, ?, ?) \
+                       (slot_name, mysql_binlog_file, mysql_binlog_position, \
+                        mysql_gtid_set, status) \
+                     VALUES (?, ?, ?, ?, ?) \
                      ON DUPLICATE KEY UPDATE \
                        mysql_binlog_file = VALUES(mysql_binlog_file), \
                        mysql_binlog_position = VALUES(mysql_binlog_position), \
                        mysql_gtid_set = VALUES(mysql_gtid_set), \
+                       status = VALUES(status), \
                        updated_at = CURRENT_TIMESTAMP",
-                    (slot, binlog_file, position, gtid_set),
+                    (slot, binlog_file, position, gtid_set, status),
                 )
                 .await
                 .context("StateStore (MySQL): failed to save mysql checkpoint")?;

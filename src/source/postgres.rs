@@ -366,33 +366,16 @@ impl Source for PostgresSource {
         Ok(())
     }
 
-    async fn start_replication(
-        &mut self,
-        position: Option<SourcePosition>,
-    ) -> Result<Box<dyn ReplicationStream>> {
-        let start_lsn = match position {
-            Some(SourcePosition::Lsn(lsn)) => lsn,
-            _ => 0,
-        };
-        let stream = self.start_replication_from(start_lsn).await?;
-        Ok(Box::new(PgReplicationStream::new(stream)))
-    }
-
-    fn checkpoint_position(&self) -> Option<SourcePosition> {
-        // PG tracks this via the feedback loop
-        None
-    }
-
-    async fn cleanup(&mut self) -> Result<()> {
-        // Cleanup is done in engine's run_main_loop
-        Ok(())
-    }
-
     async fn create_loop(
         &mut self,
         position: Option<SourcePosition>,
     ) -> Result<Box<dyn crate::engine::replication::ReplicationLoop>> {
-        let stream = self.start_replication(position).await?;
+        let start_lsn = match position {
+            Some(SourcePosition::Lsn(lsn)) => lsn,
+            _ => 0,
+        };
+        let raw_stream = self.start_replication_from(start_lsn).await?;
+        let stream: Box<dyn ReplicationStream> = Box::new(PgReplicationStream::new(raw_stream));
         Ok(Box::new(
             crate::engine::replication::PgReplicationLoop::new(
                 stream,

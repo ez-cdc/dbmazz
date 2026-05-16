@@ -422,16 +422,6 @@ impl Sink for SnowflakeSink {
 
         // Phase 2 — data writes.
 
-        // Track last position
-        let last_position = records.iter().rev().find_map(|r| match r {
-            CdcRecord::Insert { position, .. }
-            | CdcRecord::Update { position, .. }
-            | CdcRecord::Delete { position, .. }
-            | CdcRecord::Commit { position, .. }
-            | CdcRecord::Heartbeat { position, .. } => Some(position.clone()),
-            _ => None,
-        });
-
         // Generate batch_id
         let batch_id = self.next_batch_id();
 
@@ -443,7 +433,6 @@ impl Sink for SnowflakeSink {
             return Ok(SinkResult {
                 records_written: 0,
                 bytes_written: 0,
-                last_position,
                 schema_evolution_skipped: 0,
             });
         }
@@ -479,7 +468,6 @@ impl Sink for SnowflakeSink {
         Ok(SinkResult {
             records_written: data_count,
             bytes_written: file_size,
-            last_position,
             schema_evolution_skipped: 0,
         })
     }

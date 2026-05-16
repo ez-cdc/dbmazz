@@ -48,7 +48,6 @@ pub enum StageFormat {
 pub struct SinkResult {
     pub records_written: usize,
     pub bytes_written: u64,
-    pub last_position: Option<SourcePosition>,
     /// Number of `CdcRecord::SchemaChange` events that the sink could not
     /// auto-apply during this batch (e.g. StarRocks degraded mode where
     /// the target table lacks `fast_schema_evolution=true`). The pipeline
@@ -119,18 +118,6 @@ pub trait Source: Send + Sync {
 
     /// Setup source-side resources (slots for PG, GTID verification for MySQL)
     async fn setup(&mut self, tables: &[String]) -> Result<()>;
-
-    /// Start replication stream from given position
-    async fn start_replication(
-        &mut self,
-        position: Option<SourcePosition>,
-    ) -> Result<Box<dyn ReplicationStream>>;
-
-    /// Get current replication position for checkpointing
-    fn checkpoint_position(&self) -> Option<SourcePosition>;
-
-    /// Cleanup source-side resources
-    async fn cleanup(&mut self) -> Result<()>;
 
     /// Create the appropriate replication loop for this source type.
     /// This replaces the need for downcasting. Each implementation

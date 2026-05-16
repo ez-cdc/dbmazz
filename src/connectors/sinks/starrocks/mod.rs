@@ -436,16 +436,6 @@ impl Sink for StarRocksSink {
         // Cache timestamp for entire batch
         let synced_at = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // Track last position from records
-        let last_position = records.iter().rev().find_map(|r| match r {
-            CdcRecord::Insert { position, .. }
-            | CdcRecord::Update { position, .. }
-            | CdcRecord::Delete { position, .. }
-            | CdcRecord::Commit { position, .. }
-            | CdcRecord::Heartbeat { position, .. } => Some(position.clone()),
-            _ => None,
-        });
-
         // Convert records to JSON batches grouped by table
         let batches = self.records_to_json_batches(&records, &synced_at)?;
 
@@ -477,7 +467,6 @@ impl Sink for StarRocksSink {
         Ok(SinkResult {
             records_written: total_written as usize,
             bytes_written: total_bytes,
-            last_position,
             schema_evolution_skipped,
         })
     }

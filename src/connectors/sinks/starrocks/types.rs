@@ -72,6 +72,9 @@ impl TypeMapper {
             DataType::Int16 => "SMALLINT".to_string(),
             DataType::Int32 => "INT".to_string(),
             DataType::Int64 => "BIGINT".to_string(),
+            // LARGEINT is a 128-bit signed integer in StarRocks; fits
+            // the full u64 range easily.
+            DataType::UInt64 => "LARGEINT".to_string(),
             DataType::Float32 => "FLOAT".to_string(),
             DataType::Float64 => "DOUBLE".to_string(),
             DataType::Decimal { precision, scale } => {
@@ -145,6 +148,9 @@ impl TypeMapper {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::json!(b),
             Value::Int64(i) => serde_json::json!(i),
+            // Stringify u64 so Stream Load parses through LARGEINT
+            // without JSON-number precision loss.
+            Value::UInt64(u) => serde_json::json!(u.to_string()),
             Value::Float64(f) => serde_json::json!(f),
             Value::String(s) => serde_json::json!(s),
             Value::Bytes(b) => {

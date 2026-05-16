@@ -333,6 +333,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::json!(*b),
         Value::Int64(n) => serde_json::json!(*n),
+        Value::UInt64(n) => serde_json::json!(*n),
         Value::Float64(f) => serde_json::json!(*f),
         Value::String(s) => serde_json::json!(s),
         Value::Bytes(b) => {
