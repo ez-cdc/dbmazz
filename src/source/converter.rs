@@ -175,7 +175,13 @@ fn convert_pg_value(text: &str, pg_type_id: u32) -> Value {
     }
 }
 
-/// Convert PostgreSQL type OID to generic DataType
+/// Convert PostgreSQL type OID to generic DataType.
+///
+/// This is the boundary where PG-specific OIDs become source-agnostic
+/// `DataType`. Keep it as faithful as possible so sinks can dispatch on
+/// `DataType` without needing the OID — anything that collapses to
+/// `DataType::String` here forces sinks into OID-based refinement and
+/// re-couples them to PG.
 pub fn pg_type_to_data_type(pg_type_id: u32) -> DataType {
     match pg_type_id {
         16 => DataType::Boolean,
@@ -188,6 +194,8 @@ pub fn pg_type_to_data_type(pg_type_id: u32) -> DataType {
             precision: 38,
             scale: 9,
         },
+        1082 => DataType::Date,
+        1083 | 1266 => DataType::Time,
         1114 => DataType::Timestamp,
         1184 => DataType::TimestampTz,
         25 | 1043 | 1042 => DataType::String,

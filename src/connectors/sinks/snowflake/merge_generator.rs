@@ -50,7 +50,7 @@ pub fn generate_merge(
         .columns
         .iter()
         .map(|col| {
-            let expr = type_mapper.variant_extract_expr(&col.name, col.pg_type_id);
+            let expr = type_mapper.variant_extract_expr(&col.name, &col.data_type, col.pg_type_id);
             format!("{} AS \"{}\"", expr, col.name.to_uppercase())
         })
         .collect();
@@ -65,7 +65,7 @@ pub fn generate_merge(
                 .iter()
                 .find(|c| &c.name == pk)
                 .expect("PK column must exist in schema");
-            type_mapper.variant_extract_expr(&col.name, col.pg_type_id)
+            type_mapper.variant_extract_expr(&col.name, &col.data_type, col.pg_type_id)
         })
         .collect();
 
@@ -269,13 +269,13 @@ mod tests {
                     name: "id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
                 SourceColumn {
                     name: "name".to_string(),
                     data_type: DataType::String,
                     nullable: true,
-                    pg_type_id: 25,
+                    pg_type_id: Some(25),
                 },
                 SourceColumn {
                     name: "amount".to_string(),
@@ -284,7 +284,7 @@ mod tests {
                         scale: 9,
                     },
                     nullable: true,
-                    pg_type_id: 1700,
+                    pg_type_id: Some(1700),
                 },
             ],
             primary_keys: vec!["id".to_string()],
@@ -376,19 +376,19 @@ mod tests {
                     name: "order_id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
                 SourceColumn {
                     name: "item_id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
                 SourceColumn {
                     name: "quantity".to_string(),
                     data_type: DataType::Int32,
                     nullable: true,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
             ],
             primary_keys: vec!["order_id".to_string(), "item_id".to_string()],

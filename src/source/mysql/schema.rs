@@ -111,7 +111,7 @@ async fn introspect_columns(
             name,
             data_type: mysql_type_to_data_type(&data_type),
             nullable: nullable.to_uppercase() == "YES",
-            pg_type_id: 0,
+            pg_type_id: None,
         })
         .collect();
     Ok(columns)

@@ -95,7 +95,7 @@ pub async fn introspect_schemas(
                     name,
                     data_type: pg_type_to_data_type(type_oid as u32),
                     nullable: !not_null,
-                    pg_type_id: type_oid as u32,
+                    pg_type_id: Some(type_oid as u32),
                 }
             })
             .collect();

@@ -234,7 +234,7 @@ impl StarRocksSchemaEvolution {
                             nullable: true,
                             #[allow(clippy::cast_possible_wrap)]
                             ordinal: i as i32,
-                            pg_type_id: Some(src_col.pg_type_id),
+                            pg_type_id: src_col.pg_type_id,
                         });
                 }
             }

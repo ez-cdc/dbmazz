@@ -206,13 +206,13 @@ mod tests {
                     name: "id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23, // integer
+                    pg_type_id: Some(23), // integer
                 },
                 SourceColumn {
                     name: "name".to_string(),
                     data_type: DataType::String,
                     nullable: true,
-                    pg_type_id: 25, // text
+                    pg_type_id: Some(25), // text
                 },
                 SourceColumn {
                     name: "amount".to_string(),
@@ -221,7 +221,7 @@ mod tests {
                         scale: 9,
                     },
                     nullable: true,
-                    pg_type_id: 1700, // numeric
+                    pg_type_id: Some(1700), // numeric
                 },
             ],
             primary_keys: vec!["id".to_string()],
@@ -300,19 +300,19 @@ mod tests {
                     name: "order_id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
                 SourceColumn {
                     name: "item_id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
                 SourceColumn {
                     name: "quantity".to_string(),
                     data_type: DataType::Int32,
                     nullable: true,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 },
             ],
             primary_keys: vec!["order_id".to_string(), "item_id".to_string()],
@@ -378,7 +378,7 @@ mod tests {
             name: "description".to_string(),
             data_type: DataType::String,
             nullable: true,
-            pg_type_id: 25, // text
+            pg_type_id: Some(25), // text
         });
 
         let sql = generate_merge_range(

@@ -17,7 +17,7 @@ use tracing::info;
 use super::schema_tracking::{self, SchemaState};
 use super::types;
 use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
-use crate::core::record::{CdcRecord, ColumnValue, Value};
+use crate::core::record::{CdcRecord, ColumnValue, DataType, Value};
 use crate::core::traits::SourceTableSchema;
 
 /// Metadata schema name
@@ -62,9 +62,11 @@ pub async fn write_batch_to_raw(
     //     is complete (Risk #6). A COPY failure rolls back the DDL too.
     for (table, diff) in &pending_diffs {
         for added in &diff.added {
-            let col_type = match added.pg_type_id {
-                Some(oid) => types::pg_oid_to_target_type(oid),
-                None => types::mysql_data_type_to_pg(&added.data_type),
+            // DataType-primary dispatch; OID is a PG-source refinement
+            // and only adds info when DataType collapses to String.
+            let col_type = match (&added.data_type, added.pg_type_id) {
+                (DataType::String | DataType::Text, Some(oid)) => types::pg_oid_to_target_type(oid),
+                _ => types::data_type_to_pg(&added.data_type),
             };
             let sql = format!(
                 r#"ALTER TABLE "{}"."{}" ADD COLUMN IF NOT EXISTS "{}" {}"#,
@@ -342,7 +344,20 @@ fn value_to_json(value: &Value) -> serde_json::Value {
             // Parse the JSON string to embed it as a JSON value (not a string)
             serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!(s))
         }
-        Value::Timestamp(ts) => serde_json::json!(*ts),
+        Value::Timestamp(ts) => {
+            // Emit ISO-8601 string so the downstream MERGE can cast to
+            // PG timestamp directly. Mirrors the StarRocks/Snowflake
+            // sinks. Without this, MySQL TIMESTAMP→PG was unparseable
+            // because the raw int landed in a JSONB cell and MERGE
+            // could not cast it to timestamp.
+            let secs = ts / 1_000_000;
+            let nanos = ((ts % 1_000_000) * 1000) as u32;
+            if let Some(dt) = chrono::DateTime::from_timestamp(secs, nanos) {
+                serde_json::json!(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+            } else {
+                serde_json::Value::Null
+            }
+        }
         Value::Decimal(s) => serde_json::json!(s),
         Value::Uuid(s) => serde_json::json!(s),
         Value::Unchanged => serde_json::Value::Null, // should not reach here
@@ -378,6 +393,25 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["id"], 1);
         assert!(parsed["deleted_at"].is_null());
+    }
+
+    #[test]
+    fn test_value_to_json_timestamp_iso8601() {
+        // 2024-01-15 10:50:00 UTC in microseconds since epoch
+        let ts: i64 = 1_705_315_800_000_000;
+        let json = value_to_json(&Value::Timestamp(ts));
+        let s = json.as_str().expect("timestamp must serialize to string");
+        assert_eq!(s, "2024-01-15 10:50:00.000000");
+    }
+
+    #[test]
+    fn test_value_to_json_timestamp_with_microseconds() {
+        // Timestamp with fractional microseconds — must round-trip
+        // through the format string with %.6f precision.
+        let ts: i64 = 1_705_315_800_123_456;
+        let json = value_to_json(&Value::Timestamp(ts));
+        let s = json.as_str().unwrap();
+        assert!(s.ends_with(".123456"), "expected microseconds in {s:?}");
     }
 
     #[test]

@@ -18,7 +18,11 @@ impl TypeMapper {
     }
 
     /// Converts a CDC `DataType` to a Snowflake SQL type string.
-    #[allow(dead_code)]
+    ///
+    /// This is the primary type dispatcher. Sinks should use this against
+    /// `SourceColumn::data_type`; `pg_type_id` is only consulted as a
+    /// refinement when present (PG-source-only) AND the DataType is too
+    /// coarse to disambiguate.
     pub fn to_snowflake_type(&self, data_type: &DataType) -> String {
         match data_type {
             DataType::Boolean => "BOOLEAN".to_string(),
@@ -43,7 +47,11 @@ impl TypeMapper {
         }
     }
 
-    /// Converts a PostgreSQL type OID to a Snowflake SQL type string.
+    /// PG-source-only refinement: when the OID gives information beyond
+    /// `DataType` (arrays, money, inet/cidr, interval), return the
+    /// refined Snowflake type. Sinks should call this only when
+    /// `SourceColumn::pg_type_id.is_some()` AND the dispatch on
+    /// `DataType` produced a default like `VARCHAR`.
     pub fn pg_type_to_snowflake(&self, pg_type_id: u32) -> &'static str {
         match pg_type_id {
             16 => "BOOLEAN",               // bool
@@ -101,27 +109,53 @@ impl TypeMapper {
 
     /// Returns the VARIANT extraction expression for a column in MERGE SQL.
     ///
-    /// Used in FLATTENED CTE: `_DATA:col_name::SNOWFLAKE_TYPE AS "COL_NAME"`
-    pub fn variant_extract_expr(&self, col_name: &str, pg_type_id: u32) -> String {
-        let sf_type = self.pg_type_to_snowflake(pg_type_id);
-        match pg_type_id {
-            // Binary: base64 decode
-            17 => format!("BASE64_DECODE_BINARY(_DATA:\"{}\")", col_name),
-            // JSON/JSONB: parse to VARIANT
-            114 | 3802 => {
-                format!("TRY_PARSE_JSON(CAST(_DATA:\"{}\" AS VARCHAR))", col_name)
+    /// Used in FLATTENED CTE: `_DATA:col_name::SNOWFLAKE_TYPE AS "COL_NAME"`.
+    ///
+    /// Dispatches primarily on `data_type` (source-agnostic). When
+    /// `pg_type_id` is present (PG source), it is consulted only as
+    /// refinement for cases the `DataType` is too coarse to express —
+    /// PG arrays, money, inet/cidr, interval — all of which currently
+    /// collapse to `DataType::String` at the PG boundary.
+    pub fn variant_extract_expr(
+        &self,
+        col_name: &str,
+        data_type: &DataType,
+        pg_type_id: Option<u32>,
+    ) -> String {
+        // 1. Cases where DataType alone is sufficient and unambiguous.
+        match data_type {
+            DataType::Bytes => return format!("BASE64_DECODE_BINARY(_DATA:\"{}\")", col_name),
+            DataType::Json | DataType::Jsonb => {
+                return format!("TRY_PARSE_JSON(CAST(_DATA:\"{}\" AS VARCHAR))", col_name);
             }
-            // Numeric with precision: use TRY_CAST to avoid breaking batch
-            1700 | 790 => {
-                format!("TRY_CAST((_DATA:\"{}\")::VARCHAR AS {})", col_name, sf_type)
+            DataType::Decimal { .. } => {
+                let sf_type = self.to_snowflake_type(data_type);
+                return format!("TRY_CAST((_DATA:\"{}\")::VARCHAR AS {})", col_name, sf_type);
             }
-            // Arrays
-            1005 | 1007 | 1016 | 1021 | 1022 | 1009 | 1015 => {
-                format!("TRY_PARSE_JSON(CAST(_DATA:\"{}\" AS VARCHAR))", col_name)
-            }
-            // Default: direct cast
-            _ => format!("_DATA:\"{}\"::{}", col_name, sf_type),
+            _ => {}
         }
+
+        // 2. PG-source-only refinement for DataType::String cases the
+        // PG→DataType boundary cannot disambiguate (arrays, money,
+        // inet/cidr, interval).
+        if let Some(oid) = pg_type_id {
+            match oid {
+                1005 | 1007 | 1016 | 1021 | 1022 | 1009 | 1015 => {
+                    return format!("TRY_PARSE_JSON(CAST(_DATA:\"{}\" AS VARCHAR))", col_name);
+                }
+                790 => {
+                    return format!(
+                        "TRY_CAST((_DATA:\"{}\")::VARCHAR AS NUMBER(19,4))",
+                        col_name
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Default: direct cast using DataType.
+        let sf_type = self.to_snowflake_type(data_type);
+        format!("_DATA:\"{}\"::{}", col_name, sf_type)
     }
 }
 
@@ -246,30 +280,123 @@ mod tests {
     }
 
     #[test]
-    fn test_variant_extract_expr() {
+    fn test_variant_extract_expr_datatype_path() {
         let mapper = TypeMapper::new();
 
-        // Default: direct cast
+        // Every DataType variant must produce a correct expression
+        // without any OID (non-PG sources, e.g., MySQL).
         assert_eq!(
-            mapper.variant_extract_expr("name", 25),
+            mapper.variant_extract_expr("flag", &DataType::Boolean, None),
+            r#"_DATA:"flag"::BOOLEAN"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("n", &DataType::Int32, None),
+            r#"_DATA:"n"::INT"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("n", &DataType::Int64, None),
+            r#"_DATA:"n"::BIGINT"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("amount", &DataType::Float64, None),
+            r#"_DATA:"amount"::DOUBLE"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("name", &DataType::String, None),
             r#"_DATA:"name"::VARCHAR"#
         );
-
-        // Binary: base64 decode
         assert_eq!(
-            mapper.variant_extract_expr("avatar", 17),
+            mapper.variant_extract_expr("name", &DataType::Text, None),
+            r#"_DATA:"name"::VARCHAR"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("id", &DataType::Uuid, None),
+            r#"_DATA:"id"::VARCHAR(36)"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("d", &DataType::Date, None),
+            r#"_DATA:"d"::DATE"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("t", &DataType::Time, None),
+            r#"_DATA:"t"::TIME"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("ts", &DataType::Timestamp, None),
+            r#"_DATA:"ts"::TIMESTAMP_NTZ"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("ts", &DataType::TimestampTz, None),
+            r#"_DATA:"ts"::TIMESTAMP_TZ"#
+        );
+
+        // Bytes always uses BASE64_DECODE_BINARY regardless of source.
+        assert_eq!(
+            mapper.variant_extract_expr("avatar", &DataType::Bytes, None),
             r#"BASE64_DECODE_BINARY(_DATA:"avatar")"#
         );
 
-        // JSON: parse
+        // JSON / JSONB always uses TRY_PARSE_JSON.
         assert_eq!(
-            mapper.variant_extract_expr("metadata", 3802),
-            r#"TRY_PARSE_JSON(CAST(_DATA:"metadata" AS VARCHAR))"#
+            mapper.variant_extract_expr("md", &DataType::Json, None),
+            r#"TRY_PARSE_JSON(CAST(_DATA:"md" AS VARCHAR))"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("md", &DataType::Jsonb, None),
+            r#"TRY_PARSE_JSON(CAST(_DATA:"md" AS VARCHAR))"#
         );
 
-        // Numeric: TRY_CAST
+        // Decimal uses TRY_CAST with full precision.
         assert_eq!(
-            mapper.variant_extract_expr("amount", 1700),
+            mapper.variant_extract_expr(
+                "amount",
+                &DataType::Decimal {
+                    precision: 38,
+                    scale: 9,
+                },
+                None,
+            ),
+            r#"TRY_CAST((_DATA:"amount")::VARCHAR AS NUMBER(38,9))"#
+        );
+    }
+
+    #[test]
+    fn test_variant_extract_expr_pg_refinement() {
+        let mapper = TypeMapper::new();
+
+        // PG arrays collapse to DataType::String — OID refines to ARRAY.
+        assert_eq!(
+            mapper.variant_extract_expr("tags", &DataType::String, Some(1009)),
+            r#"TRY_PARSE_JSON(CAST(_DATA:"tags" AS VARCHAR))"#
+        );
+        assert_eq!(
+            mapper.variant_extract_expr("ids", &DataType::String, Some(1007)),
+            r#"TRY_PARSE_JSON(CAST(_DATA:"ids" AS VARCHAR))"#
+        );
+
+        // PG money OID refines to NUMBER(19,4) TRY_CAST.
+        assert_eq!(
+            mapper.variant_extract_expr("price", &DataType::String, Some(790)),
+            r#"TRY_CAST((_DATA:"price")::VARCHAR AS NUMBER(19,4))"#
+        );
+
+        // PG text OID (25) — no refinement, falls through to DataType.
+        assert_eq!(
+            mapper.variant_extract_expr("name", &DataType::String, Some(25)),
+            r#"_DATA:"name"::VARCHAR"#
+        );
+
+        // Decimal with PG numeric OID — DataType wins (refinement path
+        // is bypassed because the DataType is already precise).
+        assert_eq!(
+            mapper.variant_extract_expr(
+                "amount",
+                &DataType::Decimal {
+                    precision: 38,
+                    scale: 9,
+                },
+                Some(1700),
+            ),
             r#"TRY_CAST((_DATA:"amount")::VARCHAR AS NUMBER(38,9))"#
         );
     }
