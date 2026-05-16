@@ -270,7 +270,9 @@ impl Sink for PostgresSink {
             return Ok(SinkResult::default());
         }
 
-        // Track last position for checkpoint
+        // Extract last position to compute LSN for the metadata write
+        // below. Not surfaced on SinkResult (the pipeline reads LSN
+        // from PipelineEvent, not from sinks).
         let last_position = records.iter().rev().find_map(|r| match r {
             CdcRecord::Insert { position, .. }
             | CdcRecord::Update { position, .. }
@@ -334,7 +336,6 @@ impl Sink for PostgresSink {
         Ok(SinkResult {
             records_written,
             bytes_written,
-            last_position,
             schema_evolution_skipped: 0,
         })
     }

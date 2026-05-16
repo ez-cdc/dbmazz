@@ -4,6 +4,80 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-05-16
+
+### Changed
+
+- **MySQL source graduates from BETA to STABLE.** The remaining type-
+  fidelity and bootstrap-UX gaps from v2.3.0 (BETA) are closed in this
+  release.
+
+### Added
+
+- **`Value::UInt64(u64)` and `DataType::UInt64`** for accurate
+  `BIGINT UNSIGNED` handling. Previously the MySQL source silently
+  wrapped values ≥ 2^63 to negative `i64`. Sinks map to `NUMERIC(20,0)`
+  (PostgreSQL / Snowflake) or `LARGEINT` (StarRocks); `value_to_json`
+  stringifies for sinks where the JSON encoder would lose precision.
+- **First-run binlog bootstrap (H5).** On a fresh start with no prior
+  checkpoint, dbmazz now captures the server's current binlog position
+  via `SHOW MASTER STATUS` **before** the snapshot worker spawns and
+  persists it as a `PROVISIONAL` checkpoint. The post-snapshot CDC
+  stream resumes from that point — no more replaying days of binlogs
+  after first start, and no more hard error when old binlogs were
+  purged on long-running databases. The first commit-boundary
+  checkpoint promotes the row to `ACTIVE`.
+- **Cursor-based snapshot chunker (M3).** Replaces the
+  `MIN(pk) / MAX(pk)` linear partitioner with keyset paging
+  (`SELECT pk FROM t WHERE pk > ? ORDER BY pk LIMIT chunk_size + 1`).
+  Each chunk has bounded row count regardless of PK density — sparse
+  distributions (gaps from DELETEs, auto-increment skips after
+  rollbacks) no longer produce empty / oversized chunks. Trade-off:
+  one bound-discovery SELECT per chunk plus the chunk-data SELECT,
+  roughly 2× the SELECT count of linear partitioning. Negligible at
+  production chunk sizes.
+- **Non-integer primary key support (M4).** Tables with `VARCHAR`,
+  `CHAR`, `UUID`, `BINARY`, or `VARBINARY` primary keys are now
+  snapshot-able. String PKs use `COLLATE utf8mb4_bin` to guarantee
+  deterministic byte-wise ordering for cursor correctness.
+
+### Fixed
+
+- **MySQL `TIMESTAMP` and `DATETIME` columns emit `Value::Timestamp(micros)`
+  directly.** The temporary ISO-string shim from PR #97 (v2.3.0) is
+  removed; sinks consume the canonical typed value. `DATETIME(p)` micros
+  are now preserved end-to-end — previously the `us` parameter of
+  `MysqlValue::Date(y,m,d,h,m,s,us)` was dropped.
+- **MySQL DECIMAL precision and scale are propagated** from
+  `information_schema.columns.NUMERIC_PRECISION` /
+  `NUMERIC_SCALE`. Previously dbmazz hardcoded `Decimal{38, 9}`
+  regardless of source. Precision > 38 clamps with a WARN log
+  (sinks reject anything wider). The converter routes
+  `MYSQL_TYPE_NEWDECIMAL` / `MYSQL_TYPE_DECIMAL` to `Value::Decimal`
+  instead of falling through to `Value::String`.
+
+### Removed
+
+- **`Source` trait dead methods**: `start_replication`,
+  `checkpoint_position`, `cleanup` — engine uses `create_loop`
+  exclusively. Internal-only breaking change.
+- **`SinkResult::last_position`** field — populated by all three
+  sinks but never consumed by the pipeline. LSN flows through
+  `PipelineEvent::lsn`. Internal-only breaking change.
+
+### Migration
+
+- **`dbmazz_snapshot_state` schema** auto-migrates from v1 to v2 on
+  first start with v2.5.0+: adds nullable `start_pk_text TEXT`,
+  `end_pk_text TEXT`, `pk_kind VARCHAR(16)`; drops `NOT NULL` on the
+  legacy `start_pk` / `end_pk` BIGINT columns; backfills the typed
+  columns for legacy Int-kinded rows. Idempotent; re-running on v2
+  is a no-op. Forward-compatible with v1 binaries that read only
+  Int rows.
+- **`dbmazz_checkpoints` schema** adds a nullable `status VARCHAR(16)`
+  column to mark bootstrap-only rows as `PROVISIONAL`. Existing rows
+  default to `ACTIVE`. Forward-compatible.
+
 ## [2.4.0] - 2026-05-16
 
 ### Changed

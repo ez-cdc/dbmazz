@@ -29,6 +29,8 @@ impl TypeMapper {
             DataType::Int16 => "SMALLINT".to_string(),
             DataType::Int32 => "INT".to_string(),
             DataType::Int64 => "BIGINT".to_string(),
+            // NUMBER(20, 0) fits u64::MAX (20 digits) exactly.
+            DataType::UInt64 => "NUMBER(20,0)".to_string(),
             DataType::Float32 => "FLOAT".to_string(),
             DataType::Float64 => "DOUBLE".to_string(),
             DataType::Decimal { precision, scale } => {
@@ -85,6 +87,11 @@ impl TypeMapper {
             Value::Null => serde_json::Value::Null,
             Value::Bool(b) => serde_json::json!(b),
             Value::Int64(i) => serde_json::json!(i),
+            // Stringify u64 to avoid JSON-number precision loss in
+            // downstream parsers that read as i64 / f64. Snowflake's
+            // VARIANT parser tolerates both forms when casting to
+            // NUMBER(20,0).
+            Value::UInt64(u) => serde_json::json!(u.to_string()),
             Value::Float64(f) => serde_json::json!(f),
             Value::String(s) => serde_json::json!(s),
             Value::Bytes(b) => {
