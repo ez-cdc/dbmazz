@@ -550,6 +550,16 @@ impl Sink for MyNewSink {
 
 ### Step 4: Implement Type Mappings
 
+> **Important — dispatch on `DataType`, never on `pg_type_id`.**
+> `SourceColumn::pg_type_id: Option<u32>` is a Postgres-source-only
+> refinement metadata field. Sink type mappers MUST take `&DataType` as
+> the primary input. `pg_type_id` is consulted only as a refinement
+> when the source is Postgres AND `DataType` is too coarse to express
+> the precision the target type system needs (e.g., PG arrays collapse
+> to `DataType::String` and require the OID to disambiguate). For all
+> other cases, ignore `pg_type_id` — it will be `None` for non-PG
+> sources (MySQL today, and any future source).
+
 In `types.rs`, map `core::DataType` to sink-specific types:
 
 ```rust

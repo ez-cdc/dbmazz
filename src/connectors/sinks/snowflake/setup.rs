@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use super::client::SnowflakeClient;
 use super::types::TypeMapper;
 use crate::core::traits::SourceTableSchema;
+use crate::core::DataType;
 
 /// Internal schema name in the target database (TRANSIENT, no fail-safe)
 const INTERNAL_SCHEMA: &str = "_DBMAZZ";
@@ -150,10 +151,21 @@ async fn create_target_table(
     // Build column definitions
     let mut col_defs: Vec<String> = Vec::new();
     for col in &source.columns {
-        let sf_type = if col.pg_type_id == 0 {
-            type_mapper.to_snowflake_type(&col.data_type)
-        } else {
-            type_mapper.pg_type_to_snowflake(col.pg_type_id).to_string()
+        // DataType is the primary axis. For PG sources, the OID is
+        // consulted ONLY when the DataType collapsed to a coarse default
+        // (`String` from arrays, money, etc) and the OID actually
+        // refines that — otherwise stick with DataType to keep
+        // non-PG sources first-class.
+        let sf_type = match (col.pg_type_id, &col.data_type) {
+            (Some(oid), DataType::String) => {
+                let refined = type_mapper.pg_type_to_snowflake(oid);
+                if refined == "VARCHAR" {
+                    type_mapper.to_snowflake_type(&col.data_type)
+                } else {
+                    refined.to_string()
+                }
+            }
+            _ => type_mapper.to_snowflake_type(&col.data_type),
         };
         let nullable = if col.nullable { "" } else { " NOT NULL" };
         col_defs.push(format!(

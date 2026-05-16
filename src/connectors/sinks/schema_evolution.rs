@@ -171,7 +171,7 @@ pub fn diff_against_cache(
                         // map to the same coarse DataType::Decimal bucket.
                         let dt_changed = cached_col.data_type != col.data_type;
                         let oid_changed = match (cached_col.pg_type_id, col.pg_type_id) {
-                            (cached, Some(new)) if cached != 0 => cached != new,
+                            (Some(cached), Some(new)) => cached != new,
                             _ => false,
                         };
                         if dt_changed || oid_changed {
@@ -179,11 +179,7 @@ pub fn diff_against_cache(
                                 name: col.name.clone(),
                                 old_data_type: cached_col.data_type.clone(),
                                 new_data_type: col.data_type.clone(),
-                                old_pg_type_id: if cached_col.pg_type_id == 0 {
-                                    None
-                                } else {
-                                    Some(cached_col.pg_type_id)
-                                },
+                                old_pg_type_id: cached_col.pg_type_id,
                                 new_pg_type_id: col.pg_type_id,
                             });
                         }
@@ -267,7 +263,7 @@ pub fn compute_schema_evolution_plan(
                         name: added.name.clone(),
                         data_type: added.data_type.clone(),
                         nullable: added.nullable,
-                        pg_type_id: added.pg_type_id.unwrap_or(0),
+                        pg_type_id: added.pg_type_id,
                     });
                 }
 
@@ -300,7 +296,7 @@ mod tests {
                     name: "id".to_string(),
                     data_type: DataType::Int32,
                     nullable: false,
-                    pg_type_id: 23,
+                    pg_type_id: Some(23),
                 }],
                 primary_keys: vec!["id".to_string()],
             },
@@ -442,13 +438,13 @@ mod tests {
                         name: "id".into(),
                         data_type: DataType::Int32,
                         nullable: false,
-                        pg_type_id: 23,
+                        pg_type_id: Some(23),
                     },
                     SourceColumn {
                         name: "name".into(),
                         data_type: DataType::String,
                         nullable: true,
-                        pg_type_id: 25,
+                        pg_type_id: Some(25),
                     },
                 ],
                 primary_keys: vec!["id".into()],

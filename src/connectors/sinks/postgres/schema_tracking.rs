@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 
 use crate::connectors::sinks::postgres::types::pg_oid_to_target_type;
 use crate::connectors::sinks::schema_evolution::AddedColumn;
-use crate::core::record::TableRef;
+use crate::core::record::{DataType, TableRef};
 use crate::core::traits::{SourceColumn, SourceTableSchema};
 use crate::source::converter::pg_type_to_data_type;
 
@@ -56,19 +56,36 @@ pub const TRACKING_TABLE: &str = "_dbmazz._schema_tracking";
 // DDL helpers
 // ---------------------------------------------------------------------------
 
-/// Create `_dbmazz._schema_tracking` if it does not exist.
+/// Create `_dbmazz._schema_tracking` if it does not exist, and migrate
+/// any pre-existing legacy schema in place.
+///
+/// Schema versions:
+/// - **v1 (legacy)**: `pg_type_id OID NOT NULL`, no `data_type` column.
+///   Works only for PG sources (which always carry an OID).
+/// - **v2 (current)**: `pg_type_id OID NULL` + `data_type JSONB NULL`.
+///   `data_type` is the authoritative type; `pg_type_id` is a PG-source
+///   refinement. Reads tolerate NULL `data_type` and fall back to
+///   `pg_type_to_data_type(pg_type_id)` to remain backward compatible
+///   with rows written by v1 binaries.
+///
+/// The migration is idempotent: re-running on a v2 table is a no-op.
 ///
 /// Pre: the `_dbmazz` schema already exists (created by `setup::run_setup`).
-/// Post: the table exists with the schema described in solution doc §5.1.
+/// Post: the table exists at v2.
 /// Errors: bubbles up any DDL error. Not transactional — standalone `batch_execute`.
 pub async fn create_tracking_table(client: &Client) -> Result<()> {
-    let ddl = format!(
+    // 1. Create with the v2 shape directly. CREATE TABLE IF NOT EXISTS
+    //    is a no-op when the table already exists at any prior version,
+    //    so we can't rely on it to add new columns — that's handled by
+    //    the ALTERs below.
+    let create = format!(
         r#"CREATE TABLE IF NOT EXISTS {} (
             job_name     TEXT        NOT NULL,
             src_schema   TEXT        NOT NULL,
             src_table    TEXT        NOT NULL,
             column_name  TEXT        NOT NULL,
-            pg_type_id   OID         NOT NULL,
+            pg_type_id   OID,
+            data_type    JSONB,
             ordinal      INT         NOT NULL,
             nullable     BOOLEAN     NOT NULL,
             added_at_lsn BIGINT      NOT NULL DEFAULT 0,
@@ -77,13 +94,87 @@ pub async fn create_tracking_table(client: &Client) -> Result<()> {
         )"#,
         TRACKING_TABLE
     );
-
     client
-        .batch_execute(&ddl)
+        .batch_execute(&create)
         .await
         .context("Failed to create _dbmazz._schema_tracking table")?;
 
-    info!("  [OK] Schema tracking table {} ready", TRACKING_TABLE);
+    // 2. v1 → v2 migration. Both ALTERs are conditional / idempotent.
+    //    Order matters: drop NOT NULL on `pg_type_id` FIRST so subsequent
+    //    inserts from non-PG sources can land NULLs, then add
+    //    `data_type` for future writes.
+    let migrate = format!(
+        r#"
+        ALTER TABLE {table} ADD COLUMN IF NOT EXISTS data_type JSONB;
+        ALTER TABLE {table} ALTER COLUMN pg_type_id DROP NOT NULL;
+        "#,
+        table = TRACKING_TABLE
+    );
+    client
+        .batch_execute(&migrate)
+        .await
+        .context("Failed to migrate _dbmazz._schema_tracking to v2")?;
+
+    // 3. Backfill `data_type` for rows that pre-date the column.
+    //    Bounded by `WHERE data_type IS NULL` so repeat invocations no-op.
+    let rows = client
+        .query(
+            &format!(
+                "SELECT src_schema, src_table, column_name, pg_type_id::int8 \
+                 FROM {} WHERE data_type IS NULL",
+                TRACKING_TABLE
+            ),
+            &[],
+        )
+        .await
+        .context("Failed to scan _schema_tracking for legacy rows")?;
+
+    if !rows.is_empty() {
+        info!(
+            "  Migrating {} legacy tracking row(s) to v2 (backfill data_type)",
+            rows.len()
+        );
+        for row in rows {
+            let src_schema: &str = row.get(0);
+            let src_table: &str = row.get(1);
+            let column_name: &str = row.get(2);
+            let pg_type_id_i64: Option<i64> = row.get(3);
+            // Without a pg_type_id we cannot infer DataType; fall back to
+            // String as the safest default and log so an operator can
+            // investigate.
+            let dt = match pg_type_id_i64 {
+                Some(oid_i64) => {
+                    #[allow(clippy::cast_sign_loss)]
+                    let oid = oid_i64 as u32;
+                    pg_type_to_data_type(oid)
+                }
+                None => {
+                    warn!(
+                        table = %format!("{src_schema}.{src_table}"),
+                        column = %column_name,
+                        "schema_tracking v2 backfill: row has NULL pg_type_id; defaulting data_type to String"
+                    );
+                    DataType::String
+                }
+            };
+            let dt_json =
+                serde_json::to_value(&dt).context("Failed to encode DataType as JSONB")?;
+            client
+                .execute(
+                    &format!(
+                        "UPDATE {} SET data_type = $1 \
+                         WHERE src_schema = $2 AND src_table = $3 AND column_name = $4 \
+                           AND data_type IS NULL",
+                        TRACKING_TABLE
+                    ),
+                    &[&dt_json, &src_schema, &src_table, &column_name],
+                )
+                .await
+                .context("Failed to backfill data_type for tracking row")?;
+        }
+    }
+
+    info!("  [OK] Schema tracking table {} ready (v2)", TRACKING_TABLE);
     Ok(())
 }
 
@@ -108,7 +199,7 @@ pub async fn load_tracking_state(
     let rows = client
         .query(
             &format!(
-                "SELECT src_schema, src_table, column_name, pg_type_id::int8, ordinal, nullable
+                "SELECT src_schema, src_table, column_name, pg_type_id::int8, data_type, ordinal, nullable
                  FROM {}
                  WHERE job_name = $1
                  ORDER BY src_schema, src_table, ordinal ASC",
@@ -127,13 +218,48 @@ pub async fn load_tracking_state(
         let src_schema: &str = row.get(0);
         let src_table: &str = row.get(1);
         let column_name: &str = row.get(2);
-        // pg_type_id is stored as OID (which tokio-postgres maps to u32), but
-        // we cast it to int8 in the query to avoid OID-as-u32 codec issues.
-        let pg_type_id_i64: i64 = row.get(3);
+        // pg_type_id is stored as OID; we cast it to int8 in the query
+        // to avoid OID-as-u32 codec issues. v2 schema makes it NULL-able
+        // because non-PG sources can populate tracking rows without an
+        // OID.
+        let pg_type_id_i64: Option<i64> = row.get(3);
         #[allow(clippy::cast_sign_loss)]
-        let pg_type_id = pg_type_id_i64 as u32;
-        let _ordinal: i32 = row.get(4);
-        let nullable: bool = row.get(5);
+        let pg_type_id = pg_type_id_i64.map(|v| v as u32);
+        let data_type_json: Option<serde_json::Value> = row.get(4);
+        let _ordinal: i32 = row.get(5);
+        let nullable: bool = row.get(6);
+
+        // Prefer `data_type` (authoritative). Fall back to deriving it
+        // from `pg_type_id` only for legacy rows that pre-date the v2
+        // migration backfill or were written by an even older binary
+        // mid-rollout (defensive — the migration in
+        // `create_tracking_table` already backfills all such rows).
+        let data_type: DataType = match data_type_json {
+            Some(j) => serde_json::from_value(j).with_context(|| {
+                format!(
+                    "Corrupt data_type JSON in tracking row {}.{}.{}",
+                    src_schema, src_table, column_name
+                )
+            })?,
+            None => match pg_type_id {
+                Some(oid) => {
+                    warn!(
+                        table = %format!("{src_schema}.{src_table}"),
+                        column = %column_name,
+                        "tracking row missing data_type; deriving from pg_type_id (legacy compat)"
+                    );
+                    pg_type_to_data_type(oid)
+                }
+                None => {
+                    warn!(
+                        table = %format!("{src_schema}.{src_table}"),
+                        column = %column_name,
+                        "tracking row missing both data_type and pg_type_id; defaulting to String"
+                    );
+                    DataType::String
+                }
+            },
+        };
 
         let qn = format!("{}.{}", src_schema, src_table);
         let entry = table_columns
@@ -142,7 +268,7 @@ pub async fn load_tracking_state(
 
         entry.2.push(SourceColumn {
             name: column_name.to_owned(),
-            data_type: pg_type_to_data_type(pg_type_id),
+            data_type,
             nullable,
             pg_type_id,
         });
@@ -194,22 +320,25 @@ pub async fn seed_initial_state(
         for (ordinal, col) in schema.columns.iter().enumerate() {
             #[allow(clippy::cast_possible_wrap)]
             let ordinal_i32 = ordinal as i32;
+            let data_type_json = serde_json::to_value(&col.data_type)
+                .context("Failed to encode SourceColumn data_type as JSONB")?;
             tx.execute(
                 &format!(
-                    "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, ordinal, nullable, added_at_lsn)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+                    "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, data_type, ordinal, nullable, added_at_lsn)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
                      ON CONFLICT DO NOTHING",
                     TRACKING_TABLE
                 ),
-                // pg_type_id is bound as &u32 — tokio-postgres maps u32 → OID
-                // natively. Do NOT bind as i64 (would send INT8 and PG won't
-                // implicitly cast BIGINT → OID).
+                // pg_type_id is bound as `&Option<u32>` — tokio-postgres
+                // serializes None as SQL NULL and Some(oid) as OID. Do
+                // NOT bind as i64 (PG won't implicitly cast BIGINT → OID).
                 &[
                     &job_name,
                     &schema.schema,
                     &schema.name,
                     &col.name,
                     &col.pg_type_id,
+                    &data_type_json,
                     &ordinal_i32,
                     &col.nullable,
                 ],
@@ -271,27 +400,25 @@ pub async fn insert_tracked_columns(
     let lsn_i64 = lsn as i64;
 
     for col in added {
-        // pg_type_id is `Option<u32>` on the shared `AddedColumn` (sink-agnostic).
-        // The PG source always populates it; `.expect()` makes the contract loud
-        // for any future non-PG source that wires SchemaChange events into
-        // this PG sink path (which would be a misconfiguration).
-        let pg_type_id = col
-            .pg_type_id
-            .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
+        // `pg_type_id` is `Option<u32>` on the shared `AddedColumn`
+        // (sink-agnostic). The PG source always populates it; non-PG
+        // sources (MySQL) populate `None`. v2 schema accepts NULL.
+        let data_type_json = serde_json::to_value(&col.data_type)
+            .context("Failed to encode AddedColumn data_type as JSONB")?;
         tx.execute(
             &format!(
-                "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, ordinal, nullable, added_at_lsn)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, data_type, ordinal, nullable, added_at_lsn)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT DO NOTHING",
                 TRACKING_TABLE
             ),
-            // pg_type_id bound as &u32 → OID. See note in seed_initial_state.
             &[
                 &job_name,
                 &src_schema,
                 &table.name,
                 &col.name,
-                &pg_type_id,
+                &col.pg_type_id,
+                &data_type_json,
                 &col.ordinal,
                 &col.nullable,
                 &lsn_i64,
@@ -373,7 +500,7 @@ pub async fn reconcile_on_startup(
                         data_type: source_col.data_type.clone(),
                         nullable: true, // always nullable on reconcile (Risk §5.7)
                         ordinal: next_ordinal,
-                        pg_type_id: Some(source_col.pg_type_id),
+                        pg_type_id: source_col.pg_type_id,
                     };
 
                     let sql = alter_add_column_sql(target_schema, &source.name, &added);
@@ -384,20 +511,22 @@ pub async fn reconcile_on_startup(
                         )
                     })?;
 
+                    let data_type_json = serde_json::to_value(&source_col.data_type)
+                        .context("Failed to encode source_col data_type as JSONB")?;
                     tx.execute(
                         &format!(
-                            "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, ordinal, nullable, added_at_lsn)
-                             VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+                            "INSERT INTO {} (job_name, src_schema, src_table, column_name, pg_type_id, data_type, ordinal, nullable, added_at_lsn)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
                              ON CONFLICT DO NOTHING",
                             TRACKING_TABLE
                         ),
-                        // pg_type_id bound as &u32 → OID. See note in seed_initial_state.
                         &[
                             &job_name,
                             &source.schema,
                             &source.name,
                             &source_col.name,
                             &source_col.pg_type_id,
+                            &data_type_json,
                             &added.ordinal,
                             &added.nullable,
                         ],
@@ -461,14 +590,11 @@ pub async fn reconcile_on_startup(
                     primary_keys: source.primary_keys.clone(),
                 });
             for added in newly_added {
-                let pg_type_id = added
-                    .pg_type_id
-                    .expect("PG sink: AddedColumn must carry pg_type_id (PG source contract)");
                 entry.columns.push(SourceColumn {
                     name: added.name,
-                    data_type: pg_type_to_data_type(pg_type_id),
+                    data_type: added.data_type,
                     nullable: added.nullable,
-                    pg_type_id,
+                    pg_type_id: added.pg_type_id,
                 });
             }
         }

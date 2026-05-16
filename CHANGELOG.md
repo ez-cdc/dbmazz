@@ -4,6 +4,51 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Sinks now dispatch on `DataType` (source-agnostic), not on
+  `pg_type_id`.** PostgreSQL `pg_type_id` is now an optional refinement
+  carried only by Postgres sources (`Option<u32>` on `SourceColumn`);
+  non-PG sources (MySQL today) populate `None`. The previous design used
+  a magic-zero `pg_type_id == 0` sentinel to detect non-PG sources,
+  which coupled every sink to PG OID semantics and silently broke
+  type-aware code paths for MySQL.
+- Internal: `connectors::sinks::postgres::types::mysql_data_type_to_pg`
+  renamed to `data_type_to_pg` (it was never MySQL-specific; the name
+  was a relic of when it was first added).
+
+### Fixed
+
+- **MySQL → Snowflake** MERGE projection now produces correct casts for
+  every column type. Previously, the Snowflake sink dispatched on
+  `pg_type_id` and treated `0` (MySQL marker) as an unknown type,
+  defaulting every column to `VARCHAR` and silently breaking MERGE
+  fidelity. Now the sink dispatches primarily on `DataType` and falls
+  back to the OID only when the `DataType` is too coarse (PG arrays,
+  money) to disambiguate.
+- **PostgreSQL sink** `Value::Timestamp` now serializes as an ISO-8601
+  string (`YYYY-MM-DD HH:MM:SS.ffffff`) instead of a raw int64. Parity
+  with StarRocks/Snowflake sinks. Fixes a pre-existing bug that surfaced
+  when MySQL TIMESTAMP began landing as `Value::Timestamp(i64)` — the
+  raw int landed in the raw table's JSONB cell and the downstream MERGE
+  could not cast it.
+- `pg_type_to_data_type` (PG→`DataType` boundary) now maps `1082`
+  (`date`), `1083` (`time`), and `1266` (`timetz`) to `DataType::Date`
+  and `DataType::Time` respectively, instead of collapsing them to
+  `DataType::String`. Sinks that dispatch on `DataType` (now the
+  primary axis) can produce accurate DDL without consulting the OID.
+
+### Migration
+
+- **`_dbmazz._schema_tracking` schema** auto-migrates from v1 to v2 on
+  first daemon start with v2.4.0+: adds nullable `data_type JSONB`
+  column, drops the `NOT NULL` on `pg_type_id`, and backfills
+  `data_type` for any pre-existing rows. The migration is idempotent;
+  re-running on v2 is a no-op. Old binaries remain forward-compatible
+  with the v2 schema (they will not write the new `data_type` column,
+  but reads tolerate NULL `data_type` with a fallback to
+  `pg_type_to_data_type(pg_type_id)`).
+
 ## [2.3.0] - 2026-05-04
 
 ### Added

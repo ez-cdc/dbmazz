@@ -68,15 +68,26 @@ pub struct SourceTableSchema {
     pub primary_keys: Vec<String>,
 }
 
-/// A single column in a source table schema
+/// A single column in a source table schema.
+///
+/// `data_type` is the authoritative, source-agnostic type info that sinks
+/// dispatch on for DDL generation, MERGE projection casts, and runtime
+/// value conversion. `pg_type_id` is an OPTIONAL refinement carried only
+/// by Postgres sources — sinks consult it as a fallback when `DataType`
+/// is too coarse to disambiguate (e.g., `varchar(N)` vs `text` both
+/// collapse to `DataType::String`). Non-PG sources (MySQL, and any
+/// future source) populate `None`.
+///
+/// **Sinks MUST NOT use the presence/absence of `pg_type_id` as a
+/// source-type discriminator.** The intent is purely refinement, not
+/// branching.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct SourceColumn {
     pub name: String,
     pub data_type: DataType,
     pub nullable: bool,
-    /// Original PostgreSQL type OID (useful for PG-to-PG sinks)
-    pub pg_type_id: u32,
+    pub pg_type_id: Option<u32>,
 }
 
 /// Generic replication stream — replaces PG-specific CopyBothDuplex<Bytes>

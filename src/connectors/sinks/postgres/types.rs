@@ -10,20 +10,31 @@ use crate::core::record::DataType;
 use crate::core::traits::SourceColumn;
 
 /// Maps a SourceColumn's type info to the target PostgreSQL DDL type.
-/// Uses mysql_data_type_to_pg for MySQL columns (pg_type_id == 0),
-/// otherwise uses pg_oid_to_target_type for PG-to-PG identity mapping.
+///
+/// Dispatch primary on `DataType` (source-agnostic). `pg_type_id` is
+/// consulted only as a refinement when present (PG source) AND the
+/// DataType is too coarse to disambiguate — currently only
+/// `DataType::String` benefits from the OID for varchar(N) vs text
+/// fidelity. Every other DataType has a precise PG mapping that does
+/// not need OID help.
 pub fn column_type(col: &SourceColumn) -> &'static str {
-    if col.pg_type_id == 0 {
-        mysql_data_type_to_pg(&col.data_type)
-    } else {
-        pg_oid_to_target_type(col.pg_type_id)
+    // PG-source refinement: when DataType collapses to String, defer to
+    // the OID to recover varchar/inet/cidr/etc. fidelity.
+    if matches!(col.data_type, DataType::String | DataType::Text) {
+        if let Some(oid) = col.pg_type_id {
+            return pg_oid_to_target_type(oid);
+        }
     }
+    data_type_to_pg(&col.data_type)
 }
 
-/// Map a MySQL DataType to the target PostgreSQL column type DDL string.
-/// Used when the source is MySQL (pg_type_id is always 0).
-/// Falls back to "text" for unknown types.
-pub fn mysql_data_type_to_pg(dt: &DataType) -> &'static str {
+/// Map a source-agnostic `DataType` to the target PostgreSQL column
+/// type DDL string. Used for non-PG sources (MySQL today, and any
+/// future source) AND as the PG-to-PG fallback when the OID does not
+/// add fidelity beyond `DataType`.
+///
+/// Falls back to "text" for `DataType::String` and unknown types.
+pub fn data_type_to_pg(dt: &DataType) -> &'static str {
     match dt {
         DataType::Boolean => "boolean",
         DataType::Int16 => "smallint",

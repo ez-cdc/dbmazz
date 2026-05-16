@@ -7,7 +7,15 @@
 //! This module provides mappings between:
 //! - `core::DataType` (database-agnostic) -> StarRocks column types
 //! - `core::Value` -> JSON values for Stream Load
-//! - PostgreSQL type OIDs -> StarRocks types (legacy support)
+//!
+//! ## Sink dispatch axis
+//!
+//! Runtime and DDL dispatch is on `DataType` only (`to_starrocks_type`
+//! and `value_to_json`). The legacy `pg_type_to_starrocks` and
+//! `pg_text_to_json` helpers exist for source-side refinement / future
+//! use; sinks MUST NOT branch on `pg_type_id` as a discriminator. See
+//! `openspec/changes/decouple-sinks-from-pg-source-types/` for the
+//! architectural intent.
 //!
 //! ## StarRocks Type System
 //!
@@ -86,7 +94,10 @@ impl TypeMapper {
 
     /// Converts a PostgreSQL type OID to a StarRocks type string.
     ///
-    /// This is provided for backward compatibility with the legacy sink.
+    /// **PG-source-only refinement.** The runtime path uses
+    /// `to_starrocks_type(&DataType)`; this helper is kept for future
+    /// fine-grained refinement (e.g., `varchar(N)` length) and is not
+    /// currently wired into the schema-evolution or DDL code paths.
     ///
     /// # Arguments
     ///
