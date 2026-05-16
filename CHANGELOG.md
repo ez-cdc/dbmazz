@@ -4,6 +4,8 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-05-16
+
 ### Changed
 
 - **Sinks now dispatch on `DataType` (source-agnostic), not on
