@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    Oracle,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "oracle" => Ok(SinkType::Oracle),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, oracle",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::Oracle => write!(f, "oracle"),
         }
     }
 }
@@ -189,6 +192,7 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    Oracle,
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -359,6 +363,7 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            SinkType::Oracle => SinkSpecificConfig::Oracle,
         };
 
         let sink = SinkConfig {
@@ -468,6 +473,9 @@ impl Config {
             }
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
+            }
+            SinkType::Oracle => {
+                info!("Sink: Oracle (db: {})", self.sink.database);
             }
         }
 
@@ -615,6 +623,14 @@ mod tests {
         assert_eq!(
             SinkType::from_str("SNOWFLAKE").unwrap(),
             SinkType::Snowflake
+        );
+        assert_eq!(
+            SinkType::from_str("oracle").unwrap(),
+            SinkType::Oracle
+        );
+        assert_eq!(
+            SinkType::from_str("ORACLE").unwrap(),
+            SinkType::Oracle
         );
         assert!(SinkType::from_str("clickhouse").is_err());
     }

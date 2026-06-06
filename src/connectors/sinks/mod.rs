@@ -32,6 +32,8 @@ pub mod postgres;
 pub mod snowflake;
 #[cfg(feature = "sink-starrocks")]
 pub mod starrocks;
+#[cfg(feature = "sink-oracle")]
+pub mod oracle;
 
 use anyhow::Result;
 
@@ -41,6 +43,8 @@ use self::postgres::PostgresSink;
 use self::snowflake::SnowflakeSink;
 #[cfg(feature = "sink-starrocks")]
 use self::starrocks::StarRocksSink;
+#[cfg(feature = "sink-oracle")]
+use self::oracle::OracleSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::{Sink, SinkMode};
 
@@ -69,6 +73,11 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
         #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
+        #[cfg(feature = "sink-oracle")]
+        SinkType::Oracle => {
+            let sink = OracleSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         #[allow(unreachable_patterns)]
@@ -144,5 +153,22 @@ mod tests {
 
         std::env::remove_var("SINK_SNOWFLAKE_ACCOUNT");
         std::env::remove_var("SINK_SNOWFLAKE_WAREHOUSE");
+    }
+
+    #[cfg(feature = "sink-oracle")]
+    #[test]
+    fn test_create_oracle_sink() {
+        let config = SinkConfig {
+            sink_type: SinkType::Oracle,
+            url: "localhost:1521/ORCLCDB".to_string(),
+            port: 1521,
+            database: "CDC_SCHEMA".to_string(),
+            user: "cdc_user".to_string(),
+            password: "".to_string(),
+            specific: SinkSpecificConfig::Oracle,
+        };
+
+        let result = create_sink(&config, SinkMode::Primary);
+        assert!(result.is_ok());
     }
 }
