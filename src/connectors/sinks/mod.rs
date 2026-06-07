@@ -28,6 +28,8 @@ pub(crate) mod schema_evolution;
 
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
+#[cfg(feature = "oracle-sink")]
+pub mod oracle;
 #[cfg(feature = "sink-snowflake")]
 pub mod snowflake;
 #[cfg(feature = "sink-starrocks")]
@@ -37,6 +39,8 @@ use anyhow::Result;
 
 #[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
+#[cfg(feature = "oracle-sink")]
+use self::oracle::OracleSink;
 #[cfg(feature = "sink-snowflake")]
 use self::snowflake::SnowflakeSink;
 #[cfg(feature = "sink-starrocks")]
@@ -69,6 +73,11 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
         #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
+        #[cfg(feature = "oracle-sink")]
+        SinkType::Oracle => {
+            let sink = OracleSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         #[allow(unreachable_patterns)]
@@ -134,8 +143,8 @@ mod tests {
             url: "test_account.snowflakecomputing.com".to_string(),
             port: 443,
             database: "test_db".to_string(),
-            user: "test_user".to_string(),
-            password: "test_pass".to_string(),
+            user: std::env::var("SNOWFLAKE_TEST_USER").unwrap_or_else(|_| "test_user".to_string()),
+            password: std::env::var("SNOWFLAKE_TEST_PASSWORD").unwrap_or_else(|_| String::new()),
             specific: SinkSpecificConfig::Snowflake,
         };
 
@@ -144,5 +153,27 @@ mod tests {
 
         std::env::remove_var("SINK_SNOWFLAKE_ACCOUNT");
         std::env::remove_var("SINK_SNOWFLAKE_WAREHOUSE");
+    }
+
+    #[cfg(feature = "oracle-sink")]
+    #[test]
+    fn test_create_oracle_sink() {
+        use crate::config::OracleSinkConfig;
+
+        let config = SinkConfig {
+            sink_type: SinkType::Oracle,
+            url: "//localhost:1521/FREEPDB1".to_string(),
+            port: 1521,
+            database: "TESTDB".to_string(),
+            user: std::env::var("ORACLE_TEST_USER").unwrap_or_else(|_| String::new()),
+            password: std::env::var("ORACLE_TEST_PASSWORD").unwrap_or_else(|_| String::new()),
+            specific: SinkSpecificConfig::Oracle(OracleSinkConfig {
+                schema: "TEST_USER".to_string(),
+                job_name: "test_slot".to_string(),
+            }),
+        };
+
+        let result = create_sink(&config, SinkMode::Primary);
+        assert!(result.is_ok());
     }
 }

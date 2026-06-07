@@ -67,7 +67,7 @@ impl CdcEngine {
     pub async fn with_sink_factory(config: Config, sink_factory: SinkFactory) -> Result<Self> {
         let (slot_name, tables_for_cdc) = match config.source.source_type {
             SourceType::Postgres => (
-                config.source.postgres().slot_name.clone(),
+                config.source.postgres()?.slot_name.clone(),
                 config.source.tables.clone(),
             ),
             SourceType::Mysql => ("mysql_source".to_string(), config.source.tables.clone()),
@@ -382,7 +382,7 @@ impl CdcEngine {
     async fn load_checkpoint(&self) -> Result<u64> {
         match self.config.source.source_type {
             SourceType::Postgres => {
-                let slot_name = &self.config.source.postgres().slot_name;
+                let slot_name = &self.config.source.postgres()?.slot_name;
                 let last_lsn = self.state_store.load_checkpoint(slot_name).await?;
                 let start_lsn = last_lsn.unwrap_or(0);
 

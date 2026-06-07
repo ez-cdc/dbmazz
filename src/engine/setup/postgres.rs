@@ -140,7 +140,15 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create/verify Publication
     async fn ensure_publication(&self) -> Result<(), SetupError> {
-        let pub_name = &self.config.source.postgres().publication_name;
+        let pub_name = &self
+            .config
+            .source
+            .postgres()
+            .map_err(|e| SetupError::PgPublicationFailed {
+                name: String::new(),
+                error: e.to_string(),
+            })?
+            .publication_name;
 
         // Validate publication name to prevent SQL injection
         validate_sql_identifier(pub_name).map_err(|e| SetupError::PgPublicationFailed {
@@ -259,7 +267,15 @@ impl<'a> PostgresSetup<'a> {
 
     /// Create/verify Replication Slot
     async fn ensure_replication_slot(&self) -> Result<(), SetupError> {
-        let slot_name = &self.config.source.postgres().slot_name;
+        let slot_name = &self
+            .config
+            .source
+            .postgres()
+            .map_err(|e| SetupError::PgSlotFailed {
+                name: String::new(),
+                error: e.to_string(),
+            })?
+            .slot_name;
 
         // Check if it exists and if it's active
         let slot_info = self
