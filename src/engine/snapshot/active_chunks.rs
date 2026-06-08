@@ -46,6 +46,9 @@ pub type PkKey = String;
 pub fn pk_key(value: &Value) -> PkKey {
     match value {
         Value::Int64(i) => format!("i:{}", i),
+        // Prefix distinguishes UInt64 from Int64 so a row keyed by
+        // u64::MAX never collides with -1 (their i64 wrap).
+        Value::UInt64(u) => format!("U:{}", u),
         Value::String(s) => format!("s:{}", s),
         Value::Uuid(u) => format!("u:{}", u),
         Value::Decimal(d) => format!("d:{}", d),
@@ -324,7 +327,9 @@ fn cmp_value(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (Value::Int64(x), Value::Int64(y)) => x.cmp(y),
+        (Value::UInt64(x), Value::UInt64(y)) => x.cmp(y),
         (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
         (Value::Uuid(x), Value::Uuid(y)) => x.cmp(y),
         (Value::Decimal(x), Value::Decimal(y)) => x.cmp(y),
         (Value::Timestamp(x), Value::Timestamp(y)) => x.cmp(y),
@@ -545,5 +550,35 @@ mod tests {
         assert!(pk_in_range(&Value::String("g".into()), &r));
         assert!(pk_in_range(&Value::String("m".into()), &r));
         assert!(!pk_in_range(&Value::String("z".into()), &r));
+    }
+
+    #[test]
+    fn pk_in_range_uint64_at_boundary() {
+        // u64::MAX is the wire-level value for an unsigned BIGINT PK at
+        // the upper boundary — must not silently wrap into negative i64
+        // territory in cmp_value.
+        let r = (Value::UInt64(0), Value::UInt64(u64::MAX));
+        assert!(pk_in_range(&Value::UInt64(u64::MAX), &r));
+        assert!(pk_in_range(&Value::UInt64(u64::MAX / 2), &r));
+        assert!(pk_in_range(&Value::UInt64(0), &r));
+    }
+
+    #[test]
+    fn pk_key_distinguishes_int64_and_uint64() {
+        // i64::-1 and u64::MAX share the same 64-bit pattern; their
+        // PkKey must NOT collide or the eviction set would lose rows.
+        let int_key = pk_key(&Value::Int64(-1));
+        let uint_key = pk_key(&Value::UInt64(u64::MAX));
+        assert_ne!(int_key, uint_key);
+        assert!(int_key.starts_with("i:"));
+        assert!(uint_key.starts_with("U:"));
+    }
+
+    #[test]
+    fn pk_in_range_bytes() {
+        let r = (Value::Bytes(vec![0x00; 16]), Value::Bytes(vec![0xff; 16]));
+        assert!(pk_in_range(&Value::Bytes(vec![0x00; 16]), &r));
+        assert!(pk_in_range(&Value::Bytes(vec![0x80; 16]), &r));
+        assert!(pk_in_range(&Value::Bytes(vec![0xff; 16]), &r));
     }
 }

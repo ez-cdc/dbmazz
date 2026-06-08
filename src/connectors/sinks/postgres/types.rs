@@ -40,6 +40,9 @@ pub fn data_type_to_pg(dt: &DataType) -> &'static str {
         DataType::Int16 => "smallint",
         DataType::Int32 => "integer",
         DataType::Int64 => "bigint",
+        // u64::MAX = 18_446_744_073_709_551_615 → 20 digits. NUMERIC(20, 0)
+        // fits the full unsigned range exactly. BIGINT would overflow.
+        DataType::UInt64 => "numeric(20, 0)",
         DataType::Float32 => "real",
         DataType::Float64 => "double precision",
         DataType::Decimal { .. } => "numeric",

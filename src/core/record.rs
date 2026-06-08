@@ -120,6 +120,14 @@ pub enum Value {
     Null,
     Bool(bool),
     Int64(i64),
+    /// Unsigned 64-bit integer. Used for MySQL `BIGINT UNSIGNED` values
+    /// where the upper half (>= 2^63) does not fit in `Int64`. Sinks
+    /// dispatch on `DataType::UInt64` (when present) to emit the
+    /// appropriate wide-integer DDL (`NUMERIC(20,0)` for PG/Snowflake,
+    /// `LARGEINT` for StarRocks). Smaller unsigned integer types
+    /// (TINY/SMALL/MEDIUM/INT UNSIGNED) still fit in `Int64` and are
+    /// emitted as `Int64`.
+    UInt64(u64),
     Float64(f64),
     String(String),
     Bytes(Vec<u8>),
@@ -149,9 +157,16 @@ pub enum DataType {
     Int16,
     Int32,
     Int64,
+    /// Unsigned 64-bit integer (MySQL `BIGINT UNSIGNED`). Sinks map to
+    /// a wide-integer or numeric type that fits the full u64 range.
+    /// Smaller unsigned integer types stay on `Int16/Int32/Int64`.
+    UInt64,
     Float32,
     Float64,
-    Decimal { precision: u8, scale: u8 },
+    Decimal {
+        precision: u8,
+        scale: u8,
+    },
     String,
     Text,
     Bytes,
@@ -172,6 +187,7 @@ impl DataType {
             DataType::Int16
                 | DataType::Int32
                 | DataType::Int64
+                | DataType::UInt64
                 | DataType::Float32
                 | DataType::Float64
                 | DataType::Decimal { .. }

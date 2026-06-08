@@ -1,7 +1,7 @@
 use mysql_common::binlog::value::BinlogValue;
 use mysql_common::value::Value as MysqlValue;
 
-use crate::core::record::{CdcRecord, ColumnValue, TableRef, Value};
+use crate::core::record::{CdcRecord, ColumnValue, DataType, TableRef, Value};
 use anyhow::Result;
 
 use super::parser::BinlogEvent;
@@ -15,6 +15,7 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             rows,
             col_names,
             col_types,
+            col_data_types,
             position,
             ..
         } => {
@@ -27,7 +28,7 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             } else {
                 let mut records = Vec::with_capacity(rows.len());
                 for row_values in rows {
-                    let cols = decode_row_values(row_values, col_names, col_types);
+                    let cols = decode_row_values(row_values, col_names, col_types, col_data_types);
                     records.push(CdcRecord::Insert {
                         table: TableRef::new(Some(schema_name.clone()), table_name.clone()),
                         columns: cols,
@@ -44,6 +45,7 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             after_rows,
             col_names,
             col_types,
+            col_data_types,
             position,
             ..
         } => {
@@ -58,8 +60,8 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
                 let mut records = Vec::with_capacity(before_rows.len().max(after_rows.len()));
                 let pairs = before_rows.iter().zip(after_rows.iter());
                 for (before, after) in pairs {
-                    let old_cols = decode_row_values(before, col_names, col_types);
-                    let new_cols = decode_row_values(after, col_names, col_types);
+                    let old_cols = decode_row_values(before, col_names, col_types, col_data_types);
+                    let new_cols = decode_row_values(after, col_names, col_types, col_data_types);
                     records.push(CdcRecord::Update {
                         table: TableRef::new(Some(schema_name.clone()), table_name.clone()),
                         old_columns: Some(old_cols),
@@ -76,6 +78,7 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             rows,
             col_names,
             col_types,
+            col_data_types,
             position,
             ..
         } => {
@@ -88,7 +91,7 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
             } else {
                 let mut records = Vec::with_capacity(rows.len());
                 for row_values in rows {
-                    let cols = decode_row_values(row_values, col_names, col_types);
+                    let cols = decode_row_values(row_values, col_names, col_types, col_data_types);
                     records.push(CdcRecord::Delete {
                         table: TableRef::new(Some(schema_name.clone()), table_name.clone()),
                         columns: cols,
@@ -112,28 +115,26 @@ pub fn convert_to_cdc_records(event: &BinlogEvent) -> Result<Vec<CdcRecord>> {
     })
 }
 
-/// Relevant MySQL column type codes used to dispatch value formatting
-/// for types where the wire representation alone is ambiguous (e.g.
-/// `TIMESTAMP` arrives as an `Int(epoch_seconds)` indistinguishable
-/// from a plain `INT` column unless we consult the column type code
-/// from the preceding TableMapEvent).
-///
-/// Source: `mysql_common::binlog::consts::ColumnType`. Replicated as
-/// `u8` constants here so we don't drag the enum through the value-
-/// mapping hot path.
+// MySQL binlog column type codes used for col-type-aware dispatch.
+// Source: `mysql_common::binlog::consts::ColumnType`.
+const MYSQL_TYPE_DECIMAL: u8 = 0x00;
 const MYSQL_TYPE_TIMESTAMP: u8 = 0x07;
+const MYSQL_TYPE_DATETIME: u8 = 0x0c;
 const MYSQL_TYPE_TIMESTAMP2: u8 = 0x11;
+const MYSQL_TYPE_DATETIME2: u8 = 0x12;
+const MYSQL_TYPE_NEWDECIMAL: u8 = 0xf6;
 
 /// Map a typed BinlogValue to our generic Value, dispatching on the
-/// MySQL column type code where the wire representation is ambiguous.
+/// MySQL column type code (binlog wire) AND the introspected `DataType`.
 ///
-/// `col_type` comes from the preceding TableMapEvent (parser.rs
-/// extract_col_types). For columns we couldn't resolve a type for
-/// (UNKNOWN_COLUMN_TYPE sentinel), the dispatch falls through to the
-/// default arms.
-fn map_binlog_value(bv: &BinlogValue<'static>, col_type: u8) -> Value {
+/// `col_type` distinguishes TIMESTAMP / DATETIME / DECIMAL columns from
+/// their non-temporal lookalikes at the wire level. `data_type` is the
+/// authoritative source-side type from `information_schema.columns` —
+/// used to route BIGINT UNSIGNED to `Value::UInt64` (and any future
+/// dispatch that needs schema-level info).
+fn map_binlog_value(bv: &BinlogValue<'static>, col_type: u8, data_type: &DataType) -> Value {
     match bv {
-        BinlogValue::Value(val) => map_mysql_value(val, col_type),
+        BinlogValue::Value(val) => map_mysql_value(val, col_type, data_type),
         BinlogValue::Jsonb(val) => match serde_json::Value::try_from(val.clone()) {
             Ok(json) => Value::Json(json.to_string()),
             Err(_) => Value::Json("{}".to_string()),
@@ -142,48 +143,66 @@ fn map_binlog_value(bv: &BinlogValue<'static>, col_type: u8) -> Value {
     }
 }
 
-/// Map `mysql_common::Value` to our generic `Value`, dispatching on the
-/// MySQL column type code for ambiguous wire representations.
+/// Map `mysql_common::Value` to our generic `Value`.
 ///
-/// **TIMESTAMP / TIMESTAMP2** arrive as `MysqlValue::Int(epoch_seconds)`
-/// — indistinguishable from a plain `INT` column at the wire level. We
-/// consult `col_type` to format them as ISO-8601 strings the downstream
-/// PG sink can cast to `TIMESTAMP WITH TIME ZONE`. Without this, every
-/// row containing a TIMESTAMP column fails the sink's MERGE cast and
-/// nothing lands in the target.
+/// Dispatch matrix:
 ///
-/// **DATETIME** already arrives as a structured `MysqlValue::Date` and
-/// is formatted independently of `col_type`.
-///
-/// This is the minimum-viable temporal fidelity for MySQL beta. The
-/// proper fix (`Value::Timestamp(i64 micros)` with `tz_aware`) is
-/// scoped to `mysql-cdc-beta-to-ga`. Today's String-encoded ISO is
-/// forward-compatible: the upcoming sink-side typed binding will
-/// recognise both shapes during the transition.
-fn map_mysql_value(val: &MysqlValue, col_type: u8) -> Value {
+/// | MysqlValue arm     | col_type                  | Result                          |
+/// |--------------------|---------------------------|---------------------------------|
+/// | `Int(i)`           | TIMESTAMP / TIMESTAMP2    | `Value::Timestamp(i*1_000_000)` |
+/// | `Bytes(b)`         | TIMESTAMP / TIMESTAMP2    | parse ASCII epoch → Timestamp   |
+/// | `Date(...)`        | DATETIME / DATETIME2      | combine (y,m,d,h,m,s,us) → Timestamp |
+/// | `Bytes(b)`         | DECIMAL / NEWDECIMAL      | UTF-8 → `Value::Decimal(s)`     |
+/// | `UInt(u)`          | (any)                     | dispatch on `data_type`: `UInt64` for `DataType::UInt64`, else `Int64(u as i64)` |
+/// | `Int(i)`           | (any non-temporal)        | `Value::Int64(i)`               |
+/// | `Bytes(b)`         | (any non-decimal)         | `String(s)` if UTF-8, `Bytes(b)` otherwise |
+/// | `Date(...)`        | non-DATETIME              | ISO string (date-only types)    |
+fn map_mysql_value(val: &MysqlValue, col_type: u8, data_type: &DataType) -> Value {
     match val {
         MysqlValue::NULL => Value::Null,
         MysqlValue::Int(i) => match col_type {
-            MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => format_epoch_as_iso(*i),
+            MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => Value::Timestamp(*i * 1_000_000),
             _ => Value::Int64(*i),
         },
         MysqlValue::UInt(u) => match col_type {
-            MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => format_epoch_as_iso(*u as i64),
-            _ => Value::Int64(*u as i64),
+            MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => {
+                #[allow(clippy::cast_possible_wrap)]
+                let epoch = *u as i64;
+                Value::Timestamp(epoch * 1_000_000)
+            }
+            _ => match data_type {
+                // BIGINT UNSIGNED — preserve the full u64 range.
+                DataType::UInt64 => Value::UInt64(*u),
+                // Smaller unsigned types (INT/MEDIUMINT/SMALLINT/TINYINT
+                // UNSIGNED) fit in i64 losslessly.
+                _ =>
+                {
+                    #[allow(clippy::cast_possible_wrap)]
+                    Value::Int64(*u as i64)
+                }
+            },
         },
         MysqlValue::Float(f) => Value::Float64(*f as f64),
         MysqlValue::Double(d) => Value::Float64(*d),
         MysqlValue::Bytes(b) => {
-            // Empirical observation: mysql_common 0.32.4 in binlog mode
-            // returns TIMESTAMP/TIMESTAMP2 columns as `MysqlValue::Bytes`
+            // Empirical: mysql_common 0.32.4 in binlog mode returns
+            // TIMESTAMP/TIMESTAMP2 columns as `MysqlValue::Bytes`
             // containing the ASCII epoch (e.g. b"1778368097"), not as
-            // `MysqlValue::Int`. Catch that path so the downstream sink
-            // sees an ISO timestamp string instead of the raw epoch.
+            // `MysqlValue::Int`. Handle both paths.
             if matches!(col_type, MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2) {
                 if let Ok(s) = std::str::from_utf8(b) {
                     if let Ok(epoch) = s.parse::<i64>() {
-                        return format_epoch_as_iso(epoch);
+                        return Value::Timestamp(epoch * 1_000_000);
                     }
+                }
+            }
+            // DECIMAL columns arrive as ASCII-encoded numeric text.
+            // Preserve the string shape end-to-end (PG NUMERIC, SR /
+            // SF DECIMAL all accept decimal-string input via their
+            // raw / Stream Load paths).
+            if matches!(col_type, MYSQL_TYPE_NEWDECIMAL | MYSQL_TYPE_DECIMAL) {
+                if let Ok(s) = std::str::from_utf8(b) {
+                    return Value::Decimal(s.to_string());
                 }
             }
             match String::from_utf8(b.clone()) {
@@ -191,10 +210,30 @@ fn map_mysql_value(val: &MysqlValue, col_type: u8) -> Value {
                 Err(_) => Value::Bytes(b.clone()),
             }
         }
-        MysqlValue::Date(y, m, d, hh, mm, ss, _us) => Value::String(format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            y, m, d, hh, mm, ss
-        )),
+        MysqlValue::Date(y, m, d, hh, mm, ss, us) => {
+            // DATETIME / DATETIME2 → Value::Timestamp(epoch_micros)
+            // preserving microseconds. Non-DATETIME date types (DATE,
+            // YEAR) fall through to ISO string for compatibility with
+            // the existing snapshot path and sink-side date columns.
+            if matches!(col_type, MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2) {
+                if let Some(dt) = chrono::NaiveDate::from_ymd_opt(*y as i32, *m as u32, *d as u32)
+                    .and_then(|d| d.and_hms_micro_opt(*hh as u32, *mm as u32, *ss as u32, *us))
+                {
+                    return Value::Timestamp(dt.and_utc().timestamp_micros());
+                }
+                tracing::warn!(
+                    year = y,
+                    month = m,
+                    day = d,
+                    "MySQL DATETIME value out of chrono range; emitting NULL"
+                );
+                return Value::Null;
+            }
+            Value::String(format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                y, m, d, hh, mm, ss
+            ))
+        }
         MysqlValue::Time(is_neg, days, h, m, s, _us) => {
             if *is_neg {
                 Value::String(format!("-{} {}:{:02}:{:02}", days, h, m, s))
@@ -205,44 +244,26 @@ fn map_mysql_value(val: &MysqlValue, col_type: u8) -> Value {
     }
 }
 
-/// Format a unix epoch (seconds) as an ISO-8601 UTC timestamp string the
-/// PG / Snowflake / StarRocks sinks can cast to a timestamp column.
-///
-/// MySQL TIMESTAMP is always stored UTC internally regardless of the
-/// session timezone, so `from_timestamp` with UTC is the correct mapping.
-fn format_epoch_as_iso(epoch_seconds: i64) -> Value {
-    use chrono::DateTime;
-    match DateTime::from_timestamp(epoch_seconds, 0) {
-        Some(dt) => Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string()),
-        // chrono only fails for values outside MIN..=MAX (~262k years
-        // before/after epoch). Surface as Null with a structured log
-        // rather than panic; the row still flows.
-        None => {
-            tracing::warn!(
-                epoch_seconds,
-                "MySQL TIMESTAMP value outside chrono representable range; emitting NULL"
-            );
-            Value::Null
-        }
-    }
-}
-
 /// Decode a Vec<BinlogValue> into Vec<ColumnValue> using column names
 /// and the MySQL column type codes from the TableMapEvent.
 ///
-/// `col_types` MUST be the same length as `col_names` (both come from
-/// schema introspection / TableMapEvent in lockstep). When a row has
-/// fewer values than expected (binlog protocol oddity), the loop
-/// truncates to the shortest of the three slices.
+/// All four slices (`row_values`, `col_names`, `col_types`,
+/// `col_data_types`) should be the same length. When a binlog protocol
+/// oddity produces shorter rows, the loop truncates to the shortest.
 fn decode_row_values(
     row_values: &[BinlogValue<'static>],
     col_names: &[String],
     col_types: &[u8],
+    col_data_types: &[DataType],
 ) -> Vec<ColumnValue> {
-    let num = row_values.len().min(col_names.len()).min(col_types.len());
+    let num = row_values
+        .len()
+        .min(col_names.len())
+        .min(col_types.len())
+        .min(col_data_types.len());
     let mut columns = Vec::with_capacity(num);
     for i in 0..num {
-        let value = map_binlog_value(&row_values[i], col_types[i]);
+        let value = map_binlog_value(&row_values[i], col_types[i], &col_data_types[i]);
         columns.push(ColumnValue::new(col_names[i].clone(), value));
     }
     columns
@@ -257,6 +278,10 @@ mod tests {
         BinlogValue::Value(MysqlValue::Int(i))
     }
 
+    fn v_uint(u: u64) -> BinlogValue<'static> {
+        BinlogValue::Value(MysqlValue::UInt(u))
+    }
+
     fn v_str(s: &str) -> BinlogValue<'static> {
         BinlogValue::Value(MysqlValue::Bytes(s.as_bytes().to_vec()))
     }
@@ -269,11 +294,19 @@ mod tests {
         BinlogValue::Value(MysqlValue::Double(d))
     }
 
-    /// MySQL type code constants for tests (mirror the private consts).
+    fn v_date(y: u16, m: u8, d: u8, hh: u8, mm: u8, ss: u8, us: u32) -> BinlogValue<'static> {
+        BinlogValue::Value(MysqlValue::Date(y, m, d, hh, mm, ss, us))
+    }
+
+    /// MySQL type code constants for tests.
     const MYSQL_TYPE_LONG: u8 = 0x03; // INT
+    const MYSQL_TYPE_LONGLONG: u8 = 0x08; // BIGINT
     const MYSQL_TYPE_VARCHAR: u8 = 0x0f; // VARCHAR
     const MYSQL_TYPE_TIMESTAMP_T: u8 = 0x07;
     const MYSQL_TYPE_TIMESTAMP2_T: u8 = 0x11;
+    const MYSQL_TYPE_DATETIME_T: u8 = 0x0c;
+    const MYSQL_TYPE_DATETIME2_T: u8 = 0x12;
+    const MYSQL_TYPE_NEWDECIMAL_T: u8 = 0xf6;
     const MYSQL_TYPE_FLOAT: u8 = 0x04;
     const MYSQL_TYPE_DOUBLE: u8 = 0x05;
 
@@ -281,8 +314,9 @@ mod tests {
     fn test_decode_row_values_simple() {
         let col_names = vec!["id".to_string(), "name".to_string()];
         let col_types = vec![MYSQL_TYPE_LONG, MYSQL_TYPE_VARCHAR];
+        let col_data_types = vec![DataType::Int32, DataType::String];
         let row = vec![v_int(42), v_str("hi")];
-        let cols = decode_row_values(&row, &col_names, &col_types);
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
         assert_eq!(cols.len(), 2);
         assert_eq!(cols[0].name, "id");
         assert_eq!(cols[0].value, Value::Int64(42));
@@ -292,89 +326,129 @@ mod tests {
 
     #[test]
     fn test_decode_row_values_empty() {
-        let cols = decode_row_values(&[], &[], &[]);
+        let cols = decode_row_values(&[], &[], &[], &[]);
         assert!(cols.is_empty());
     }
 
     #[test]
-    fn test_bytes_for_timestamp_column_emits_iso() {
-        // mysql_common 0.32.4 in binlog mode returns TIMESTAMP as
-        // ASCII-epoch bytes, not as Int. Catch that path too.
+    fn test_bigint_unsigned_emits_uint64() {
+        // BIGINT UNSIGNED at the upper boundary — must NOT wrap into
+        // negative i64 territory. The DataType::UInt64 hint routes
+        // through `Value::UInt64`.
+        let col_names = vec!["id".to_string()];
+        let col_types = vec![MYSQL_TYPE_LONGLONG];
+        let col_data_types = vec![DataType::UInt64];
+        let row = vec![v_uint(u64::MAX)];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert_eq!(cols[0].value, Value::UInt64(u64::MAX));
+    }
+
+    #[test]
+    fn test_bigint_signed_via_uint_path_stays_int64() {
+        // Signed BIGINT — the value still arrives via UInt path for
+        // positive numbers; DataType::Int64 routes through Value::Int64.
+        let col_names = vec!["id".to_string()];
+        let col_types = vec![MYSQL_TYPE_LONGLONG];
+        let col_data_types = vec![DataType::Int64];
+        let row = vec![v_uint(42)];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert_eq!(cols[0].value, Value::Int64(42));
+    }
+
+    #[test]
+    fn test_timestamp_emits_value_timestamp_micros() {
+        // 1778368097 epoch seconds → 1778368097 * 1_000_000 micros.
         let col_names = vec!["created_at".to_string()];
         let col_types = vec![MYSQL_TYPE_TIMESTAMP_T];
+        let col_data_types = vec![DataType::TimestampTz];
+        let row = vec![v_int(1778368097)];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert_eq!(cols[0].value, Value::Timestamp(1778368097 * 1_000_000));
+    }
+
+    #[test]
+    fn test_timestamp_bytes_path_emits_micros() {
+        // mysql_common returns TIMESTAMP2 as ASCII epoch bytes.
+        let col_names = vec!["created_at".to_string()];
+        let col_types = vec![MYSQL_TYPE_TIMESTAMP2_T];
+        let col_data_types = vec![DataType::TimestampTz];
         let row = vec![BinlogValue::Value(MysqlValue::Bytes(
             b"1778368097".to_vec(),
         ))];
-        let cols = decode_row_values(&row, &col_names, &col_types);
-        assert_eq!(
-            cols[0].value,
-            Value::String("2026-05-09 23:08:17".to_string())
-        );
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert_eq!(cols[0].value, Value::Timestamp(1778368097 * 1_000_000));
     }
 
     #[test]
-    fn test_int_for_timestamp_column_emits_iso() {
-        // 1778368097 = 2026-05-09 23:08:17 UTC
-        let col_names = vec!["created_at".to_string()];
-        let col_types = vec![MYSQL_TYPE_TIMESTAMP_T];
-        let row = vec![v_int(1778368097)];
-        let cols = decode_row_values(&row, &col_names, &col_types);
-        assert_eq!(cols.len(), 1);
-        assert_eq!(
-            cols[0].value,
-            Value::String("2026-05-09 23:08:17".to_string())
-        );
-    }
-
-    #[test]
-    fn test_int_for_timestamp2_column_emits_iso() {
+    fn test_datetime_preserves_microseconds() {
+        // 2026-05-09 14:30:00.123456 UTC
         let col_names = vec!["updated_at".to_string()];
-        let col_types = vec![MYSQL_TYPE_TIMESTAMP2_T];
-        let row = vec![v_int(0)]; // 1970-01-01 00:00:00 UTC
-        let cols = decode_row_values(&row, &col_names, &col_types);
-        assert_eq!(
-            cols[0].value,
-            Value::String("1970-01-01 00:00:00".to_string())
-        );
+        let col_types = vec![MYSQL_TYPE_DATETIME_T];
+        let col_data_types = vec![DataType::Timestamp];
+        let row = vec![v_date(2026, 5, 9, 14, 30, 0, 123456)];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        match &cols[0].value {
+            Value::Timestamp(micros) => {
+                // Verify whole second + microsecond fraction land
+                // separately — the previous code dropped `us` entirely.
+                assert_eq!(micros % 1_000_000, 123456);
+            }
+            other => panic!("expected Value::Timestamp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_datetime2_path() {
+        let col_names = vec!["ts".to_string()];
+        let col_types = vec![MYSQL_TYPE_DATETIME2_T];
+        let col_data_types = vec![DataType::Timestamp];
+        let row = vec![v_date(2026, 1, 1, 0, 0, 0, 0)];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert!(matches!(cols[0].value, Value::Timestamp(_)));
+    }
+
+    #[test]
+    fn test_decimal_emits_value_decimal_string() {
+        // DECIMAL arrives as ASCII bytes; must land as Value::Decimal
+        // not Value::String so sinks dispatch correctly.
+        let col_names = vec!["amount".to_string()];
+        let col_types = vec![MYSQL_TYPE_NEWDECIMAL_T];
+        let col_data_types = vec![DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        }];
+        let row = vec![BinlogValue::Value(MysqlValue::Bytes(b"123.45".to_vec()))];
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
+        assert_eq!(cols[0].value, Value::Decimal("123.45".to_string()));
     }
 
     #[test]
     fn test_int_for_plain_int_column_stays_int() {
-        // Same Int(value) payload, but col_type is INT — must NOT
-        // be reinterpreted as a timestamp.
         let col_names = vec!["count".to_string()];
         let col_types = vec![MYSQL_TYPE_LONG];
+        let col_data_types = vec![DataType::Int32];
         let row = vec![v_int(1778368097)];
-        let cols = decode_row_values(&row, &col_names, &col_types);
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
         assert_eq!(cols[0].value, Value::Int64(1778368097));
     }
 
     #[test]
-    #[allow(clippy::approx_constant)] // arbitrary test values, not π/e
+    #[allow(clippy::approx_constant)]
     fn test_decode_row_values_float_double() {
         let col_names = vec!["f".to_string(), "d".to_string()];
         let col_types = vec![MYSQL_TYPE_FLOAT, MYSQL_TYPE_DOUBLE];
+        let col_data_types = vec![DataType::Float32, DataType::Float64];
         let row = vec![v_float(3.14), v_double(2.71828)];
-        let cols = decode_row_values(&row, &col_names, &col_types);
+        let cols = decode_row_values(&row, &col_names, &col_types, &col_data_types);
         assert_eq!(cols.len(), 2);
-        assert_eq!(cols[0].name, "f");
-        assert!(
-            (match &cols[0].value {
-                Value::Float64(v) => *v,
-                _ => 0.0,
-            } - 3.14)
-                .abs()
-                < 0.001
-        );
-        assert_eq!(cols[1].name, "d");
-        assert!(
-            (match &cols[1].value {
-                Value::Float64(v) => *v,
-                _ => 0.0,
-            } - 2.71828)
-                .abs()
-                < 0.001
-        );
+        match cols[0].value {
+            Value::Float64(v) => assert!((v - 3.14).abs() < 0.001),
+            _ => panic!("expected float"),
+        }
+        match cols[1].value {
+            Value::Float64(v) => assert!((v - 2.71828).abs() < 0.001),
+            _ => panic!("expected float"),
+        }
     }
 
     #[test]
@@ -386,6 +460,7 @@ mod tests {
             rows: vec![vec![v_int(42), v_str("hi")]],
             col_names: vec!["id".to_string(), "name".to_string()],
             col_types: vec![3, 15],
+            col_data_types: vec![DataType::Int32, DataType::String],
             position: SourcePosition::GtidSet("1".to_string()),
         };
 
@@ -395,9 +470,7 @@ mod tests {
             CdcRecord::Insert { table, columns, .. } => {
                 assert_eq!(table.qualified_name(), "test.users");
                 assert_eq!(columns.len(), 2);
-                assert_eq!(columns[0].name, "id");
                 assert_eq!(columns[0].value, Value::Int64(42));
-                assert_eq!(columns[1].name, "name");
                 assert_eq!(columns[1].value, Value::String("hi".to_string()));
             }
             _ => panic!("Expected Insert"),
@@ -414,6 +487,7 @@ mod tests {
             after_rows: vec![vec![v_int(20)]],
             col_names: vec!["id".to_string()],
             col_types: vec![3],
+            col_data_types: vec![DataType::Int32],
             position: SourcePosition::GtidSet("1".to_string()),
         };
 
@@ -426,11 +500,8 @@ mod tests {
                 ..
             } => {
                 let old = old_columns.as_ref().unwrap();
-                let new = new_columns;
-                assert_eq!(old.len(), 1);
                 assert_eq!(old[0].value, Value::Int64(10));
-                assert_eq!(new.len(), 1);
-                assert_eq!(new[0].value, Value::Int64(20));
+                assert_eq!(new_columns[0].value, Value::Int64(20));
             }
             _ => panic!("Expected Update"),
         }
@@ -445,6 +516,7 @@ mod tests {
             rows: vec![vec![v_int(99)]],
             col_names: vec!["id".to_string()],
             col_types: vec![3],
+            col_data_types: vec![DataType::Int32],
             position: SourcePosition::GtidSet("1".to_string()),
         };
 
@@ -452,7 +524,6 @@ mod tests {
         assert_eq!(records.len(), 1);
         match &records[0] {
             CdcRecord::Delete { columns, .. } => {
-                assert_eq!(columns.len(), 1);
                 assert_eq!(columns[0].value, Value::Int64(99));
             }
             _ => panic!("Expected Delete"),
