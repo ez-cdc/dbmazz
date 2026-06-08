@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    Iceberg,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "iceberg" => Ok(SinkType::Iceberg),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, iceberg",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::Iceberg => write!(f, "iceberg"),
         }
     }
 }
@@ -169,6 +172,23 @@ pub struct PostgresSinkConfig {
     pub schema: String,
     /// Job name for raw table and metadata tracking (defaults to slot_name)
     pub job_name: String,
+}
+
+/// Iceberg sink configuration (S3-compatible object store + Iceberg catalog)
+#[derive(Debug, Clone, Default)]
+pub struct IcebergSinkConfig {
+    pub bucket: String,
+    pub prefix: String,
+    pub region: String,
+    pub endpoint: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub role_arn: String,
+    pub force_path_style: bool,
+    pub catalog_uri: String,
+    pub warehouse: String,
+    pub flush_files: usize,
+    pub flush_bytes: u64,
 }
 
 /// Generic sink configuration
@@ -189,6 +209,7 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    Iceberg(IcebergSinkConfig),
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -339,7 +360,7 @@ impl Config {
         // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
         // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
         let sink_url = match sink_type {
-            SinkType::Snowflake => optional_env("SINK_URL", ""),
+            SinkType::Snowflake | SinkType::Iceberg => optional_env("SINK_URL", ""),
             _ => required_env("SINK_URL")?,
         };
 
@@ -359,6 +380,7 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            SinkType::Iceberg => SinkSpecificConfig::Iceberg(IcebergSinkConfig::default()),
         };
 
         let sink = SinkConfig {
@@ -468,6 +490,9 @@ impl Config {
             }
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
+            }
+            SinkType::Iceberg => {
+                info!("Sink: Iceberg (bucket: {}, prefix: {})", self.sink.database, "(from env)");
             }
         }
 

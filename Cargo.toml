@@ -18,6 +18,12 @@ sink-snowflake = [
     "dep:jsonwebtoken", "dep:rsa", "dep:pem", "dep:sha2",
     "dep:aws-sigv4", "dep:aws-credential-types", "dep:uuid",
 ]
+# S3/Iceberg sink (opt-in, not in default)
+sink-iceberg = [
+    "dep:aws-sdk-s3", "dep:aws-config",
+    "dep:iceberg", "dep:arrow", "dep:parquet",
+    "dep:uuid",
+]
 
 [dependencies]
 # Materialize fork with full support for logical replication
@@ -71,6 +77,11 @@ sha2 = { version = "0.10", optional = true }
 aws-sigv4 = { version = "1.2", optional = true }
 aws-credential-types = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+
+# --- Optional: Iceberg sink ---
+aws-sdk-s3 = { version = "1.135", optional = true }
+aws-config = { version = "1.5", optional = true }
+iceberg = { version = "0.9", optional = true }
 
 # --- Optional: MySQL source ---
 mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }

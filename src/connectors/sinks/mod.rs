@@ -30,6 +30,8 @@ pub(crate) mod schema_evolution;
 pub mod postgres;
 #[cfg(feature = "sink-snowflake")]
 pub mod snowflake;
+#[cfg(feature = "sink-iceberg")]
+pub mod iceberg;
 #[cfg(feature = "sink-starrocks")]
 pub mod starrocks;
 
@@ -41,6 +43,8 @@ use self::postgres::PostgresSink;
 use self::snowflake::SnowflakeSink;
 #[cfg(feature = "sink-starrocks")]
 use self::starrocks::StarRocksSink;
+#[cfg(feature = "sink-iceberg")]
+use self::iceberg::IcebergSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::{Sink, SinkMode};
 
@@ -69,6 +73,11 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
         #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
+        #[cfg(feature = "sink-iceberg")]
+        SinkType::Iceberg => {
+            let sink = IcebergSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         #[allow(unreachable_patterns)]
