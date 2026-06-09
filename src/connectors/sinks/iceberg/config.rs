@@ -6,8 +6,8 @@
 //! Parses S3-compatible object store and Iceberg catalog configuration
 //! from environment variables.
 
-use anyhow::{anyhow, Result};
 use crate::config::SinkConfig;
+use anyhow::{anyhow, Result};
 
 const DEFAULT_PREFIX: &str = "ez-cdc";
 const DEFAULT_REGION: &str = "us-east-1";
@@ -50,7 +50,14 @@ impl std::fmt::Debug for IcebergSinkConfig {
             .field("prefix", &self.prefix)
             .field("region", &self.region)
             .field("endpoint", &self.endpoint)
-            .field("access_key_id", &if self.access_key_id.is_empty() { "(not set)" } else { "[REDACTED]" })
+            .field(
+                "access_key_id",
+                &if self.access_key_id.is_empty() {
+                    "(not set)"
+                } else {
+                    "[REDACTED]"
+                },
+            )
             .field("secret_access_key", &"[REDACTED]")
             .field("role_arn", &self.role_arn)
             .field("force_path_style", &self.force_path_style)
@@ -62,57 +69,36 @@ impl std::fmt::Debug for IcebergSinkConfig {
     }
 }
 
+impl Default for IcebergSinkConfig {
+    fn default() -> Self {
+        Self {
+            bucket: String::new(),
+            prefix: DEFAULT_PREFIX.to_string(),
+            region: DEFAULT_REGION.to_string(),
+            endpoint: String::new(),
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            role_arn: String::new(),
+            force_path_style: false,
+            catalog_uri: String::new(),
+            warehouse: String::new(),
+            flush_files: DEFAULT_FLUSH_FILES,
+            flush_bytes: DEFAULT_FLUSH_BYTES,
+        }
+    }
+}
+
 impl IcebergSinkConfig {
-    /// Creates IcebergSinkConfig from generic SinkConfig + env vars.
+    /// Creates IcebergSinkConfig from a generic SinkConfig by extracting
+    /// the pre-built config from `SinkSpecificConfig::Iceberg(...)`.
     pub fn from_sink_config(config: &SinkConfig) -> Result<Self> {
-        let bucket = std::env::var("S3_BUCKET")
-            .map_err(|_| anyhow!("S3_BUCKET must be set"))?;
-
-        let prefix = std::env::var("S3_PREFIX")
-            .unwrap_or_else(|_| DEFAULT_PREFIX.to_string());
-
-        let region = std::env::var("S3_REGION")
-            .unwrap_or_else(|_| DEFAULT_REGION.to_string());
-
-        let endpoint = std::env::var("S3_ENDPOINT").unwrap_or_default();
-        let access_key_id = std::env::var("S3_ACCESS_KEY_ID").unwrap_or_default();
-        let secret_access_key = std::env::var("S3_SECRET_ACCESS_KEY").unwrap_or_default();
-        let role_arn = std::env::var("S3_ROLE_ARN").unwrap_or_default();
-
-        let force_path_style = std::env::var("S3_FORCE_PATH_STYLE")
-            .unwrap_or_else(|_| "false".to_string())
-            .to_lowercase() == "true";
-
-        let catalog_uri = std::env::var("ICEBERG_CATALOG_URI").unwrap_or_default();
-
-        // Build warehouse path: s3://bucket/prefix/warehouse
-        let warehouse = std::env::var("ICEBERG_WAREHOUSE")
-            .unwrap_or_else(|_| format!("s3://{}/{}/warehouse", bucket, prefix));
-
-        let flush_files: usize = std::env::var("ICEBERG_FLUSH_FILES")
-            .unwrap_or_else(|_| DEFAULT_FLUSH_FILES.to_string())
-            .parse()
-            .unwrap_or(DEFAULT_FLUSH_FILES);
-
-        let flush_bytes: u64 = std::env::var("ICEBERG_FLUSH_BYTES")
-            .unwrap_or_else(|_| DEFAULT_FLUSH_BYTES.to_string())
-            .parse()
-            .unwrap_or(DEFAULT_FLUSH_BYTES);
-
-        Ok(Self {
-            bucket,
-            prefix,
-            region,
-            endpoint,
-            access_key_id,
-            secret_access_key,
-            role_arn,
-            force_path_style,
-            catalog_uri,
-            warehouse,
-            flush_files,
-            flush_bytes,
-        })
+        match &config.specific {
+            crate::config::SinkSpecificConfig::Iceberg(cfg) => Ok(cfg.clone()),
+            _ => Err(anyhow!(
+                "Expected Iceberg sink config, got {:?}",
+                config.sink_type
+            )),
+        }
     }
 
     /// Returns the S3 staging prefix for in-flight files.
@@ -133,15 +119,20 @@ mod tests {
 
     #[test]
     fn test_config_from_sink_config() {
-        std::env::set_var("S3_BUCKET", "test-bucket");
-        std::env::set_var("S3_PREFIX", "test-prefix");
-        std::env::set_var("S3_REGION", "us-west-2");
-        std::env::set_var("S3_ENDPOINT", "http://minio:9000");
-        std::env::set_var("S3_ACCESS_KEY_ID", "minioadmin");
-        std::env::set_var("S3_SECRET_ACCESS_KEY", "minioadmin");
-        std::env::set_var("S3_FORCE_PATH_STYLE", "true");
-        std::env::set_var("ICEBERG_CATALOG_URI", "http://catalog:8181");
-        std::env::set_var("ICEBERG_FLUSH_FILES", "50");
+        let expected = IcebergSinkConfig {
+            bucket: "test-bucket".to_string(),
+            prefix: "test-prefix".to_string(),
+            region: "us-west-2".to_string(),
+            endpoint: "http://minio:9000".to_string(),
+            access_key_id: "minioadmin".to_string(),
+            secret_access_key: "minioadmin".to_string(),
+            role_arn: String::new(),
+            force_path_style: true,
+            catalog_uri: "http://catalog:8181".to_string(),
+            warehouse: "s3://test-bucket/test-prefix/warehouse".to_string(),
+            flush_files: 50,
+            flush_bytes: DEFAULT_FLUSH_BYTES,
+        };
 
         let sink_config = SinkConfig {
             sink_type: SinkType::Iceberg,
@@ -150,7 +141,7 @@ mod tests {
             database: "test_db".to_string(),
             user: "".to_string(),
             password: "".to_string(),
-            specific: SinkSpecificConfig::Iceberg(IcebergSinkConfig::default()),
+            specific: SinkSpecificConfig::Iceberg(expected.clone()),
         };
 
         let config = IcebergSinkConfig::from_sink_config(&sink_config).unwrap();
@@ -162,16 +153,6 @@ mod tests {
         assert_eq!(config.catalog_uri, "http://catalog:8181");
         assert_eq!(config.flush_files, 50);
         assert_eq!(config.flush_bytes, DEFAULT_FLUSH_BYTES);
-
-        std::env::remove_var("S3_BUCKET");
-        std::env::remove_var("S3_PREFIX");
-        std::env::remove_var("S3_REGION");
-        std::env::remove_var("S3_ENDPOINT");
-        std::env::remove_var("S3_ACCESS_KEY_ID");
-        std::env::remove_var("S3_SECRET_ACCESS_KEY");
-        std::env::remove_var("S3_FORCE_PATH_STYLE");
-        std::env::remove_var("ICEBERG_CATALOG_URI");
-        std::env::remove_var("ICEBERG_FLUSH_FILES");
     }
 
     #[test]
@@ -191,7 +172,10 @@ mod tests {
             flush_bytes: 100_000_000,
         };
 
-        assert_eq!(config.staging_prefix("public.users"), "ez-cdc/_staging/public.users/");
+        assert_eq!(
+            config.staging_prefix("public.users"),
+            "ez-cdc/_staging/public.users/"
+        );
         assert_eq!(config.data_prefix("public.users"), "ez-cdc/public.users/");
     }
 }

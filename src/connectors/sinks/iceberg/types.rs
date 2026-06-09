@@ -13,31 +13,31 @@ use crate::core::record::DataType;
 use crate::core::traits::SourceColumn;
 
 /// Maps a CDC DataType to an Apache Iceberg type.
-pub fn cdc_to_iceberg_type(dt: &DataType) -> Result<iceberg::spec::types::Type> {
-    use iceberg::spec::types::Type as IcebergType;
+pub fn cdc_to_iceberg_type(dt: &DataType) -> Result<iceberg::spec::Type> {
+    use iceberg::spec::PrimitiveType;
+    use iceberg::spec::Type as IcebergType;
     match dt {
-        DataType::Boolean => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Boolean)),
-        DataType::Int16 | DataType::Int32 => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Int)),
-        DataType::Int64 => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Long)),
-        DataType::Float32 => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Float)),
-        DataType::Float64 => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Double)),
-        DataType::Decimal(precision, scale) => {
-            Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Decimal {
-                precision: *precision,
-                scale: *scale,
+        DataType::Boolean => Ok(IcebergType::Primitive(PrimitiveType::Boolean)),
+        DataType::Int16 | DataType::Int32 => Ok(IcebergType::Primitive(PrimitiveType::Int)),
+        DataType::Int64 => Ok(IcebergType::Primitive(PrimitiveType::Long)),
+        DataType::UInt64 => Ok(IcebergType::Primitive(PrimitiveType::Long)),
+        DataType::Float32 => Ok(IcebergType::Primitive(PrimitiveType::Float)),
+        DataType::Float64 => Ok(IcebergType::Primitive(PrimitiveType::Double)),
+        DataType::Decimal { precision, scale } => {
+            Ok(IcebergType::Primitive(PrimitiveType::Decimal {
+                precision: *precision as u32,
+                scale: *scale as u32,
             }))
         }
-        DataType::String | DataType::Json => {
-            Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::String))
+        DataType::String | DataType::Text | DataType::Json | DataType::Jsonb => {
+            Ok(IcebergType::Primitive(PrimitiveType::String))
         }
-        DataType::Uuid => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Uuid)),
-        DataType::Date => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Date)),
-        DataType::Time => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Time)),
-        DataType::Timestamp => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::TimestampTz)),
-        DataType::Bytes => Ok(IcebergType::Primitive(iceberg::spec::types::PrimitiveType::Binary)),
-        DataType::Unchanged | DataType::Null => {
-            Err(anyhow!("Cannot map Unchanged/Null to an Iceberg type"))
-        }
+        DataType::Uuid => Ok(IcebergType::Primitive(PrimitiveType::Uuid)),
+        DataType::Date => Ok(IcebergType::Primitive(PrimitiveType::Date)),
+        DataType::Time => Ok(IcebergType::Primitive(PrimitiveType::Time)),
+        DataType::Timestamp => Ok(IcebergType::Primitive(PrimitiveType::Timestamp)),
+        DataType::TimestampTz => Ok(IcebergType::Primitive(PrimitiveType::Timestamptz)),
+        DataType::Bytes => Ok(IcebergType::Primitive(PrimitiveType::Binary)),
     }
 }
 
@@ -48,24 +48,23 @@ pub fn cdc_to_arrow_type(dt: &DataType) -> Result<ArrowType> {
         DataType::Int16 => Ok(ArrowType::Int16),
         DataType::Int32 => Ok(ArrowType::Int32),
         DataType::Int64 => Ok(ArrowType::Int64),
+        DataType::UInt64 => Ok(ArrowType::UInt64),
         DataType::Float32 => Ok(ArrowType::Float32),
         DataType::Float64 => Ok(ArrowType::Float64),
-        DataType::Decimal(p, s) => {
-            // Arrow decimal: precision, scale
-            Ok(ArrowType::Decimal256(*p as u8, *s as i8))
+        DataType::Decimal { .. } => {
+            // Decimal values are passed as strings from CDC layer;
+            // store as Utf8 in Arrow/Parquet to match StringBuilder in the builder.
+            Ok(ArrowType::Utf8)
         }
-        DataType::String | DataType::Json => Ok(ArrowType::Utf8),
+        DataType::String | DataType::Text | DataType::Json | DataType::Jsonb => Ok(ArrowType::Utf8),
         DataType::Uuid => Ok(ArrowType::Utf8), // UUID stored as string in Parquet
         DataType::Date => Ok(ArrowType::Date64),
         DataType::Time => Ok(ArrowType::Time64(arrow::datatypes::TimeUnit::Microsecond)),
-        DataType::Timestamp => Ok(ArrowType::Timestamp(
+        DataType::Timestamp | DataType::TimestampTz => Ok(ArrowType::Timestamp(
             arrow::datatypes::TimeUnit::Microsecond,
             Some("UTC".into()),
         )),
         DataType::Bytes => Ok(ArrowType::Binary),
-        DataType::Unchanged | DataType::Null => {
-            Err(anyhow!("Cannot map Unchanged/Null to an Arrow type"))
-        }
     }
 }
 
@@ -81,7 +80,7 @@ pub fn build_arrow_schema(columns: &[SourceColumn]) -> Result<ArrowSchema> {
 }
 
 /// Returns a human-readable string representation of an Iceberg type.
-pub fn iceberg_type_to_string(t: &iceberg::spec::types::Type) -> String {
+pub fn iceberg_type_to_string(t: &iceberg::spec::Type) -> String {
     // Simple display helper
     format!("{:?}", t)
 }
@@ -93,7 +92,7 @@ mod tests {
 
     #[test]
     fn test_cdc_to_iceberg_basic_types() {
-        use iceberg::spec::types::{PrimitiveType, Type as IcebergType};
+        use iceberg::spec::{PrimitiveType, Type as IcebergType};
 
         assert!(matches!(
             cdc_to_iceberg_type(&DataType::Boolean).unwrap(),
@@ -125,14 +124,22 @@ mod tests {
         ));
         assert!(matches!(
             cdc_to_iceberg_type(&DataType::Timestamp).unwrap(),
-            IcebergType::Primitive(PrimitiveType::TimestampTz)
+            IcebergType::Primitive(PrimitiveType::Timestamp)
+        ));
+        assert!(matches!(
+            cdc_to_iceberg_type(&DataType::TimestampTz).unwrap(),
+            IcebergType::Primitive(PrimitiveType::Timestamptz)
         ));
     }
 
     #[test]
     fn test_cdc_to_iceberg_decimal() {
-        use iceberg::spec::types::{PrimitiveType, Type as IcebergType};
-        let t = cdc_to_iceberg_type(&DataType::Decimal(10, 2)).unwrap();
+        use iceberg::spec::{PrimitiveType, Type as IcebergType};
+        let t = cdc_to_iceberg_type(&DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        })
+        .unwrap();
         match t {
             IcebergType::Primitive(PrimitiveType::Decimal { precision, scale }) => {
                 assert_eq!(precision, 10);
@@ -144,11 +151,26 @@ mod tests {
 
     #[test]
     fn test_cdc_to_arrow_basic_types() {
-        assert!(matches!(cdc_to_arrow_type(&DataType::Boolean).unwrap(), ArrowType::Boolean));
-        assert!(matches!(cdc_to_arrow_type(&DataType::Int32).unwrap(), ArrowType::Int32));
-        assert!(matches!(cdc_to_arrow_type(&DataType::Int64).unwrap(), ArrowType::Int64));
-        assert!(matches!(cdc_to_arrow_type(&DataType::String).unwrap(), ArrowType::Utf8));
-        assert!(matches!(cdc_to_arrow_type(&DataType::Timestamp).unwrap(), ArrowType::Timestamp(..)));
+        assert!(matches!(
+            cdc_to_arrow_type(&DataType::Boolean).unwrap(),
+            ArrowType::Boolean
+        ));
+        assert!(matches!(
+            cdc_to_arrow_type(&DataType::Int32).unwrap(),
+            ArrowType::Int32
+        ));
+        assert!(matches!(
+            cdc_to_arrow_type(&DataType::Int64).unwrap(),
+            ArrowType::Int64
+        ));
+        assert!(matches!(
+            cdc_to_arrow_type(&DataType::String).unwrap(),
+            ArrowType::Utf8
+        ));
+        assert!(matches!(
+            cdc_to_arrow_type(&DataType::Timestamp).unwrap(),
+            ArrowType::Timestamp(..)
+        ));
     }
 
     #[test]

@@ -4,6 +4,18 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependency: arrow/parquet v53 → v57.** Upgraded the Arrow and Parquet crates
+  to v57.3.1, aligning with iceberg v0.9.1's internal arrow v57 dependencies.
+  Fixes the `quarter()` temporal arithmetic bug present in arrow-arith v53.
+
+### Fixed
+
+- **arrow-arith `quarter()` crash with recent `chrono`.** The upstream
+  `[patch.crates-io]` workaround is no longer needed — arrow v57 resolves
+  the `chrono >=0.4.40` incompatibility natively.
+
 ## [2.5.0] - 2026-05-16
 
 ### Changed

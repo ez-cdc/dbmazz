@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use std::env;
 use tracing::info;
 
+use crate::connectors::sinks::iceberg::config::IcebergSinkConfig;
+
 // =============================================================================
 // Source Configuration
 // =============================================================================
@@ -172,23 +174,6 @@ pub struct PostgresSinkConfig {
     pub schema: String,
     /// Job name for raw table and metadata tracking (defaults to slot_name)
     pub job_name: String,
-}
-
-/// Iceberg sink configuration (S3-compatible object store + Iceberg catalog)
-#[derive(Debug, Clone, Default)]
-pub struct IcebergSinkConfig {
-    pub bucket: String,
-    pub prefix: String,
-    pub region: String,
-    pub endpoint: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub role_arn: String,
-    pub force_path_style: bool,
-    pub catalog_uri: String,
-    pub warehouse: String,
-    pub flush_files: usize,
-    pub flush_bytes: u64,
 }
 
 /// Generic sink configuration
@@ -380,7 +365,41 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
-            SinkType::Iceberg => SinkSpecificConfig::Iceberg(IcebergSinkConfig::default()),
+            SinkType::Iceberg => {
+                let bucket = std::env::var("S3_BUCKET").with_context(|| "S3_BUCKET must be set")?;
+                let prefix = optional_env("S3_PREFIX", "ez-cdc");
+                let region = optional_env("S3_REGION", "us-east-1");
+                let endpoint = optional_env("S3_ENDPOINT", "");
+                let access_key_id = optional_env("S3_ACCESS_KEY_ID", "");
+                let secret_access_key = optional_env("S3_SECRET_ACCESS_KEY", "");
+                let role_arn = optional_env("S3_ROLE_ARN", "");
+                let force_path_style = optional_env("S3_FORCE_PATH_STYLE", "false") == "true";
+                let catalog_uri = optional_env("ICEBERG_CATALOG_URI", "");
+                let warehouse = optional_env(
+                    "ICEBERG_WAREHOUSE",
+                    &format!("s3://{}/{}/warehouse", bucket, prefix),
+                );
+                let flush_files: usize = optional_env("ICEBERG_FLUSH_FILES", "20")
+                    .parse()
+                    .unwrap_or(20);
+                let flush_bytes: u64 = optional_env("ICEBERG_FLUSH_BYTES", "104857600")
+                    .parse()
+                    .unwrap_or(104_857_600);
+                SinkSpecificConfig::Iceberg(IcebergSinkConfig {
+                    bucket,
+                    prefix,
+                    region,
+                    endpoint,
+                    access_key_id,
+                    secret_access_key,
+                    role_arn,
+                    force_path_style,
+                    catalog_uri,
+                    warehouse,
+                    flush_files,
+                    flush_bytes,
+                })
+            }
         };
 
         let sink = SinkConfig {
@@ -492,7 +511,10 @@ impl Config {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
             }
             SinkType::Iceberg => {
-                info!("Sink: Iceberg (bucket: {}, prefix: {})", self.sink.database, "(from env)");
+                info!(
+                    "Sink: Iceberg (bucket: {}, prefix: {})",
+                    self.sink.database, "(from env)"
+                );
             }
         }
 

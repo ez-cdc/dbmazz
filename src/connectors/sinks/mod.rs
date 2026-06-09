@@ -26,25 +26,25 @@
 
 pub(crate) mod schema_evolution;
 
+#[cfg(feature = "sink-iceberg")]
+pub mod iceberg;
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
 #[cfg(feature = "sink-snowflake")]
 pub mod snowflake;
-#[cfg(feature = "sink-iceberg")]
-pub mod iceberg;
 #[cfg(feature = "sink-starrocks")]
 pub mod starrocks;
 
 use anyhow::Result;
 
+#[cfg(feature = "sink-iceberg")]
+use self::iceberg::IcebergSink;
 #[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
 #[cfg(feature = "sink-snowflake")]
 use self::snowflake::SnowflakeSink;
 #[cfg(feature = "sink-starrocks")]
 use self::starrocks::StarRocksSink;
-#[cfg(feature = "sink-iceberg")]
-use self::iceberg::IcebergSink;
 use crate::config::{SinkConfig, SinkType};
 use crate::core::{Sink, SinkMode};
 

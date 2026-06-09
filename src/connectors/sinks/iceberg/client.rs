@@ -8,7 +8,7 @@
 //! override for S3-compatible stores (MinIO, GCS, LocalStack).
 
 use anyhow::{Context, Result};
-use aws_config::meta::region::RegionProviderChain;
+use aws_config::sts::AssumeRoleProvider;
 use aws_sdk_s3::config::{Credentials, Region};
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3InnerClient;
@@ -20,6 +20,7 @@ use super::config::IcebergSinkConfig;
 const MAX_DELETE_KEYS: usize = 1000;
 
 /// S3-compatible object store client.
+#[derive(Clone)]
 pub struct S3Client {
     client: S3InnerClient,
     bucket: String,
@@ -42,29 +43,30 @@ impl S3Client {
     pub async fn new(config: &IcebergSinkConfig) -> Result<Self> {
         let region = Region::new(config.region.clone());
 
-        // Build credentials provider
-        let creds_provider = if !config.access_key_id.is_empty() && !config.secret_access_key.is_empty()
-        {
-            Some(Credentials::new(
+        let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
+            .region(region)
+            .force_path_style(config.force_path_style);
+
+        if !config.access_key_id.is_empty() && !config.secret_access_key.is_empty() {
+            s3_config_builder = s3_config_builder.credentials_provider(Credentials::new(
                 &config.access_key_id,
                 &config.secret_access_key,
                 None,
                 None,
                 "static",
-            ))
+            ));
         } else if !config.role_arn.is_empty() {
-            // We'll use the default chain which the SDK handles natively
-            None
-        } else {
-            None
-        };
-
-        let mut s3_config_builder = aws_sdk_s3::config::Builder::new()
-            .region(region)
-            .force_path_style(config.force_path_style);
-
-        if let Some(creds) = creds_provider {
-            s3_config_builder = s3_config_builder.credentials_provider(creds);
+            // Use STS AssumeRoleProvider for proper role assumption.
+            // Use static keys or default chain when role_arn is not set
+            // Role assumption via STS is handled by the AWS SDK's default chain
+            // For explicit STS, use AssumeRoleProvider which requires owned strings
+            let role_arn = config.role_arn.clone();
+            let region_str = config.region.clone();
+            let provider = AssumeRoleProvider::builder(&role_arn)
+                .region(Region::new(region_str))
+                .build()
+                .await;
+            s3_config_builder = s3_config_builder.credentials_provider(provider);
         }
 
         // Use custom endpoint if provided
@@ -84,8 +86,12 @@ impl S3Client {
     }
 
     /// Returns the full S3 key for a given path.
-    fn full_key(&self, key: &str) -> String {
-        format!("{}/{}", self.prefix.trim_end_matches('/'), key.trim_start_matches('/'))
+    pub(crate) fn full_key(&self, key: &str) -> String {
+        format!(
+            "{}/{}",
+            self.prefix.trim_end_matches('/'),
+            key.trim_start_matches('/')
+        )
     }
 
     /// Upload a single object to S3.
@@ -103,11 +109,7 @@ impl S3Client {
     }
 
     /// Upload an object from a byte stream.
-    pub async fn put_object_stream(
-        &self,
-        key: &str,
-        body: ByteStream,
-    ) -> Result<()> {
+    pub async fn put_object_stream(&self, key: &str, body: ByteStream) -> Result<()> {
         let full_key = self.full_key(key);
         self.client
             .put_object()
@@ -116,7 +118,12 @@ impl S3Client {
             .body(body)
             .send()
             .await
-            .with_context(|| format!("Failed to upload stream to s3://{}/{}", self.bucket, full_key))?;
+            .with_context(|| {
+                format!(
+                    "Failed to upload stream to s3://{}/{}",
+                    self.bucket, full_key
+                )
+            })?;
         Ok(())
     }
 
@@ -127,19 +134,24 @@ impl S3Client {
         let mut token = None;
 
         loop {
-            let mut req = self.client.list_objects_v2().bucket(&self.bucket).prefix(&full_prefix);
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&full_prefix);
             if let Some(t) = token {
                 req = req.continuation_token(t);
             }
 
-            let resp = req.send().await
+            let resp = req
+                .send()
+                .await
                 .with_context(|| format!("Failed to list s3://{}/{}", self.bucket, full_prefix))?;
 
-            if let Some(contents) = resp.contents() {
-                for obj in contents {
-                    if let Some(key) = obj.key() {
-                        keys.push(key.to_string());
-                    }
+            let contents = resp.contents();
+            for obj in contents {
+                if let Some(key) = obj.key() {
+                    keys.push(key.to_string());
                 }
             }
 
@@ -177,7 +189,13 @@ impl S3Client {
                 )
                 .send()
                 .await
-                .with_context(|| format!("Failed to delete {} objects from {}", chunk.len(), self.bucket))?;
+                .with_context(|| {
+                    format!(
+                        "Failed to delete {} objects from {}",
+                        chunk.len(),
+                        self.bucket
+                    )
+                })?;
         }
         Ok(())
     }
@@ -185,14 +203,24 @@ impl S3Client {
     /// Check if an object exists in S3.
     pub async fn object_exists(&self, key: &str) -> Result<bool> {
         let full_key = self.full_key(key);
-        match self.client.head_object().bucket(&self.bucket).key(&full_key).send().await {
+        match self
+            .client
+            .head_object()
+            .bucket(&self.bucket)
+            .key(&full_key)
+            .send()
+            .await
+        {
             Ok(_) => Ok(true),
             Err(e) => {
                 let service_err = e.into_service_error();
                 if service_err.is_not_found() {
                     Ok(false)
                 } else {
-                    Err(anyhow::anyhow!("Failed to check object existence: {}", service_err))
+                    Err(anyhow::anyhow!(
+                        "Failed to check object existence: {}",
+                        service_err
+                    ))
                 }
             }
         }
@@ -203,7 +231,31 @@ impl S3Client {
         let check_key = format!("_dbmazz_check_{}", uuid::Uuid::new_v4());
         let body = Bytes::from("ok");
         self.put_object(&check_key, body).await?;
-        self.delete_objects(&[self.full_key(&check_key)]).await?;
+        // put_object already applies self.full_key internally;
+        // pass the raw check_key to avoid double-prefixing.
+        self.delete_objects(&[check_key]).await?;
+        Ok(())
+    }
+
+    /// Copy an object within the bucket (e.g. from staging to data prefix).
+    pub(crate) async fn copy_object(&self, source_key: &str, dest_key: &str) -> Result<()> {
+        let source_full = self.full_key(source_key);
+        let dest_full = self.full_key(dest_key);
+        let copy_source = format!("{}/{}", self.bucket, source_full);
+
+        self.client
+            .copy_object()
+            .bucket(&self.bucket)
+            .copy_source(copy_source)
+            .key(&dest_full)
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to copy s3://{}/{} -> s3://{}/{}",
+                    self.bucket, source_full, self.bucket, dest_full
+                )
+            })?;
         Ok(())
     }
 

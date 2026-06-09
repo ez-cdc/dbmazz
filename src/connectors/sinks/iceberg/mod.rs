@@ -19,7 +19,6 @@ pub mod client;
 pub mod commit;
 pub mod config;
 pub mod parquet_writer;
-pub mod schema_evolution;
 pub mod setup;
 pub mod types;
 
@@ -34,16 +33,52 @@ use tracing::info;
 use crate::config::SinkConfig;
 use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
 use crate::core::traits::{SourceTableSchema, StageFormat};
-use crate::core::{CdcRecord, LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult};
+use crate::core::{
+    CdcRecord, DataType, LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult,
+};
 
 use self::catalog::IcebergCatalog;
-pub use self::config::IcebergSinkConfig;
 use self::client::S3Client;
 use self::commit::{CommitManager, StagedFiles};
-use self::schema_evolution::apply_schema_evolution;
+pub use self::config::IcebergSinkConfig;
+
+/// A single table's schema difference for `apply_schema_evolution`.
+pub struct TableDiff {
+    pub table_name: String,
+    pub new_columns: Vec<(String, DataType)>,
+}
+
+/// Apply schema evolution diffs to an Iceberg table via the catalog.
+pub async fn apply_schema_evolution(catalog: &IcebergCatalog, diffs: &[TableDiff]) -> Result<()> {
+    for diff in diffs {
+        let parts: Vec<&str> = diff.table_name.splitn(2, '.').collect();
+        let (namespace, table) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            ("default", parts[0])
+        };
+
+        for (col_name, col_type) in &diff.new_columns {
+            catalog
+                .add_column(namespace, table, col_name, col_type)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to add column '{}' to '{}.{}'",
+                        col_name, namespace, table
+                    )
+                })?;
+            info!(
+                "Schema evolution: added column {}.{}.{} ({:?})",
+                namespace, table, col_name, col_type
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Shared schema state — keyed by `<schema>.<table>`.
-pub(crate) type SchemaState = Arc<RwLock<HashMap<String, Vec<SourceTableSchema>>>>;
+pub(crate) type SchemaState = Arc<RwLock<HashMap<String, SourceTableSchema>>>;
 
 /// Default flush thresholds
 const DEFAULT_FLUSH_FILES: usize = 20;
@@ -52,7 +87,7 @@ const DEFAULT_FLUSH_BYTES: u64 = 100 * 1024 * 1024; // 100 MB
 /// Iceberg sink connector implementing the Sink trait.
 pub struct IcebergSink {
     config: IcebergSinkConfig,
-    mode: SinkMode,
+    _mode: SinkMode,
     s3_client: Option<S3Client>,
     catalog: Option<IcebergCatalog>,
     commit_manager: Option<CommitManager>,
@@ -89,7 +124,7 @@ impl IcebergSink {
 
         Ok(Self {
             config: ice_config,
-            mode,
+            _mode: mode,
             s3_client: None,
             catalog: None,
             commit_manager: None,
@@ -127,24 +162,27 @@ impl IcebergSink {
     async fn ensure_commit_manager(&mut self) -> Result<&mut CommitManager> {
         if self.commit_manager.is_none() {
             let s3 = self.ensure_s3_client().await?;
-            // Can't move S3Client out — need to clone or wrap in Arc
-            // For now we use a simplified approach
-            self.commit_manager = Some(CommitManager::new(
-                S3Client::new(&self.config).await?,
-                self.config.clone(),
-            ));
+            self.commit_manager = Some(CommitManager::new(s3.clone(), self.config.clone()));
         }
         Ok(self.commit_manager.as_mut().unwrap())
     }
 
     /// Flush staged files for all tables.
     async fn flush_all_staged(&mut self) -> Result<()> {
-        let cm = self.ensure_commit_manager().await?;
-        for (_table_name, staged) in self.staged_tables.iter_mut() {
+        // Initialize lazy fields first (each takes &mut self separately)
+        self.ensure_catalog().await?;
+        self.ensure_commit_manager().await?;
+
+        let mut staged_tables = std::mem::take(&mut self.staged_tables);
+        let cat = self.catalog.as_ref().unwrap();
+        let cm = self.commit_manager.as_mut().unwrap();
+
+        for staged in staged_tables.values_mut() {
             if !staged.is_empty() {
-                cm.commit_staged_files(staged).await?;
+                cm.commit_staged_files(staged, cat).await?;
             }
         }
+        self.staged_tables = staged_tables;
         Ok(())
     }
 
@@ -186,10 +224,13 @@ impl Sink for IcebergSink {
 
         // Validate catalog connectivity if configured
         if !self.config.catalog_uri.is_empty() {
-            let catalog = IcebergCatalog::new(&self.config)
+            let _catalog = IcebergCatalog::new(&self.config)
                 .await
                 .context("Failed to create Iceberg catalog for validation")?;
-            info!("Iceberg catalog connection validated via {}", self.config.catalog_uri);
+            info!(
+                "Iceberg catalog connection validated via {}",
+                self.config.catalog_uri
+            );
         }
 
         info!("Iceberg sink connection validated");
@@ -208,10 +249,7 @@ impl Sink for IcebergSink {
         {
             let mut state = self.schema_state.write().await;
             for src in source_schemas {
-                state.insert(
-                    format!("{}.{}", src.schema, src.name),
-                    vec![src.clone()],
-                );
+                state.insert(format!("{}.{}", src.schema, src.name), src.clone());
             }
         }
 
@@ -224,20 +262,31 @@ impl Sink for IcebergSink {
             return Ok(SinkResult::default());
         }
 
+        let snapshot = self.schema_state.read().await.clone();
         let _s3 = self.ensure_s3_client().await?;
         let catalog = self.ensure_catalog().await?;
+        let (new_working, pending_diffs) = compute_schema_evolution_plan(&snapshot, &records);
 
-        // Phase 1 — schema evolution pre-pass
-        let snapshot = self.schema_state.read().await.clone();
-        let plan = schema_evolution::compute_schema_evolution_plan(&snapshot, &records);
+        if !pending_diffs.is_empty() {
+            // Convert from shared SchemaDiff to Iceberg TableDiff
+            let table_diffs: Vec<TableDiff> = pending_diffs
+                .iter()
+                .map(|(table_ref, diff)| TableDiff {
+                    table_name: table_ref.qualified_name(),
+                    new_columns: diff
+                        .added
+                        .iter()
+                        .map(|col| (col.name.clone(), col.data_type.clone()))
+                        .collect(),
+                })
+                .collect();
 
-        if !plan.pending_diffs.is_empty() {
-            apply_schema_evolution(catalog, &plan.pending_diffs)
+            apply_schema_evolution(catalog, &table_diffs)
                 .await
                 .context("Iceberg schema evolution failed")?;
 
             let mut state = self.schema_state.write().await;
-            *state = plan.working;
+            *state = new_working;
         }
 
         // Phase 2 — data writes
@@ -246,7 +295,13 @@ impl Sink for IcebergSink {
         // Group records by table
         let mut table_records: HashMap<String, Vec<CdcRecord>> = HashMap::new();
         for record in records {
-            let table = record.table_name().to_string();
+            let table = match &record {
+                CdcRecord::Insert { table, .. } => table.qualified_name(),
+                CdcRecord::Update { table, .. } => table.qualified_name(),
+                CdcRecord::Delete { table, .. } => table.qualified_name(),
+                CdcRecord::SchemaChange { table, .. } => table.qualified_name(),
+                _ => continue,
+            };
             table_records.entry(table).or_default().push(record);
         }
 
@@ -257,7 +312,7 @@ impl Sink for IcebergSink {
             // Get current schema for this table
             let state = self.schema_state.read().await;
             let columns = match state.get(table_name) {
-                Some(cols) if !cols.is_empty() => cols[0].columns.clone(),
+                Some(schema) => schema.columns.clone(),
                 _ => {
                     // Derive columns from records
                     derive_columns(table_recs)
@@ -296,17 +351,35 @@ impl Sink for IcebergSink {
             staged.add_file(file_name, data_count, file_size, false);
 
             total_records += data_count;
-            total_bytes += file_size as u64;
+            total_bytes += file_size;
         }
 
         // Flush if thresholds reached for any table
-        for (_table_name, staged) in self.staged_tables.iter_mut() {
-            if staged.file_count() >= self.flush_threshold_files
-                || staged.total_bytes >= self.flush_threshold_bytes
-            {
-                let cm = self.ensure_commit_manager().await?;
-                cm.commit_staged_files(staged).await?;
+        let flush_keys: Vec<String> = self
+            .staged_tables
+            .iter()
+            .filter(|(_, staged)| {
+                staged.file_count() >= self.flush_threshold_files
+                    || staged.total_bytes >= self.flush_threshold_bytes
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        if !flush_keys.is_empty() {
+            // Initialize lazy fields first (each takes &mut self separately)
+            self.ensure_catalog().await?;
+            self.ensure_commit_manager().await?;
+
+            let mut staged_tables = std::mem::take(&mut self.staged_tables);
+            let cat = self.catalog.as_ref().unwrap();
+            let cm = self.commit_manager.as_mut().unwrap();
+
+            for table_name in &flush_keys {
+                if let Some(staged) = staged_tables.get_mut(table_name) {
+                    cm.commit_staged_files(staged, cat).await?;
+                }
             }
+            self.staged_tables = staged_tables;
         }
 
         Ok(SinkResult {
@@ -322,6 +395,27 @@ impl Sink for IcebergSink {
 
         info!("Iceberg sink closed");
         Ok(())
+    }
+}
+
+/// Infer `DataType` from a `Value`.
+fn infer_data_type(value: &crate::core::record::Value) -> crate::core::record::DataType {
+    use crate::core::record::Value as V;
+    match value {
+        V::Null | V::Unchanged => crate::core::record::DataType::String,
+        V::Bool(_) => crate::core::record::DataType::Boolean,
+        V::Int64(_) => crate::core::record::DataType::Int64,
+        V::UInt64(_) => crate::core::record::DataType::UInt64,
+        V::Float64(_) => crate::core::record::DataType::Float64,
+        V::String(_) => crate::core::record::DataType::String,
+        V::Bytes(_) => crate::core::record::DataType::Bytes,
+        V::Json(_) => crate::core::record::DataType::Json,
+        V::Timestamp(_) => crate::core::record::DataType::Timestamp,
+        V::Decimal(_) => crate::core::record::DataType::Decimal {
+            precision: 38,
+            scale: 0,
+        },
+        V::Uuid(_) => crate::core::record::DataType::Uuid,
     }
 }
 
@@ -342,7 +436,7 @@ fn derive_columns(records: &[CdcRecord]) -> Vec<crate::core::traits::SourceColum
             if seen.insert(col.name.clone()) {
                 columns.push(crate::core::traits::SourceColumn {
                     name: col.name.clone(),
-                    data_type: col.data_type.clone(),
+                    data_type: infer_data_type(&col.value),
                     nullable: true,
                     pg_type_id: None,
                 });
@@ -356,31 +450,26 @@ fn derive_columns(records: &[CdcRecord]) -> Vec<crate::core::traits::SourceColum
 mod tests {
     use super::*;
     use crate::config::{SinkConfig, SinkSpecificConfig, SinkType};
-    use crate::core::record::{CdcRecord, Column};
     use crate::core::position::SourcePosition;
+    use crate::core::record::TableRef;
+    use crate::core::record::{CdcRecord, ColumnValue, Value};
 
     #[test]
     fn test_derive_columns_from_records() {
-        let records = vec![
-            CdcRecord::Insert {
-                table: "public.users".to_string(),
-                columns: vec![
-                    Column {
-                        name: "id".to_string(),
-                        data_type: crate::core::record::DataType::Int32,
-                        value: Some(serde_json::Value::Number(1.into())),
-                        old_value: None,
-                    },
-                    Column {
-                        name: "name".to_string(),
-                        data_type: crate::core::record::DataType::String,
-                        value: Some(serde_json::Value::String("Alice".to_string())),
-                        old_value: None,
-                    },
-                ],
-                position: SourcePosition::default(),
-            },
-        ];
+        let records = vec![CdcRecord::Insert {
+            table: TableRef::new(Some("public".to_string()), "users".to_string()),
+            columns: vec![
+                ColumnValue {
+                    name: "id".to_string(),
+                    value: Value::Int64(1),
+                },
+                ColumnValue {
+                    name: "name".to_string(),
+                    value: Value::String("Alice".to_string()),
+                },
+            ],
+            position: SourcePosition::Offset(0),
+        }];
 
         let cols = derive_columns(&records);
         assert_eq!(cols.len(), 2);
