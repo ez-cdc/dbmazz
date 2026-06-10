@@ -30,6 +30,9 @@ All notable changes to dbmazz will be documented here.
 - **Dependency: arrow/parquet v53 → v57**, required by `iceberg` 0.9. The
   Snowflake sink (the other arrow consumer) compiles and passes its test
   suite against v57; no behavior change expected.
+- **MSRV: 1.91.1 → 1.92**, required by `iceberg-catalog-rest` 0.9.1.
+  Builds without the `sink-iceberg` feature still compile on 1.91.1, but
+  the declared `rust-version` now reflects the full feature set.
 
 ## [2.5.0] - 2026-05-16
 
