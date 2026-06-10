@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    Iceberg,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "iceberg" => Ok(SinkType::Iceberg),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, iceberg",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::Iceberg => write!(f, "iceberg"),
         }
     }
 }
@@ -189,6 +192,8 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    #[cfg(feature = "sink-iceberg")]
+    Iceberg(crate::connectors::sinks::iceberg::IcebergSinkConfig),
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -337,9 +342,10 @@ impl Config {
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
         // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
-        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
+        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT) and Iceberg (uses
+        // ICEBERG_CATALOG_URI instead).
         let sink_url = match sink_type {
-            SinkType::Snowflake => optional_env("SINK_URL", ""),
+            SinkType::Snowflake | SinkType::Iceberg => optional_env("SINK_URL", ""),
             _ => required_env("SINK_URL")?,
         };
 
@@ -359,6 +365,15 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            #[cfg(feature = "sink-iceberg")]
+            SinkType::Iceberg => SinkSpecificConfig::Iceberg(
+                crate::connectors::sinks::iceberg::IcebergSinkConfig::from_env(&sink_database)?,
+            ),
+            #[cfg(not(feature = "sink-iceberg"))]
+            SinkType::Iceberg => anyhow::bail!(
+                "Sink type 'iceberg' is not compiled in this build. \
+                 Rebuild with --features sink-iceberg"
+            ),
         };
 
         let sink = SinkConfig {
@@ -468,6 +483,9 @@ impl Config {
             }
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
+            }
+            SinkType::Iceberg => {
+                info!("Sink: Iceberg (namespace: {})", self.sink.database);
             }
         }
 

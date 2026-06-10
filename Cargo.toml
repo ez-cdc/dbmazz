@@ -1,6 +1,6 @@
 [package]
 name = "dbmazz"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 license = "Elastic-2.0"
 # Minimum Supported Rust Version.
@@ -17,6 +17,11 @@ sink-snowflake = [
     "dep:reqwest", "dep:arrow", "dep:parquet",
     "dep:jsonwebtoken", "dep:rsa", "dep:pem", "dep:sha2",
     "dep:aws-sigv4", "dep:aws-credential-types", "dep:uuid",
+]
+# --- Optional: S3/Iceberg sink (opt-in, not in default) ---
+sink-iceberg = [
+    "dep:iceberg", "dep:iceberg-catalog-rest", "dep:iceberg-storage-opendal",
+    "dep:arrow", "dep:parquet", "dep:uuid",
 ]
 
 [dependencies]
@@ -62,8 +67,9 @@ openssl-sys = { version = "0.9", features = ["vendored"], optional = true }
 
 # --- Optional: Snowflake sink ---
 reqwest = { version = "0.11.24", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
-arrow = { version = "53", default-features = false, features = ["json"], optional = true }
-parquet = { version = "53", default-features = false, features = ["snap", "arrow"], optional = true }
+# v57 required by iceberg 0.9; Snowflake sink verified against it (was v53)
+arrow = { version = "57", default-features = false, features = ["json"], optional = true }
+parquet = { version = "57", default-features = false, features = ["snap", "arrow"], optional = true }
 jsonwebtoken = { version = "9", optional = true }
 rsa = { version = "0.9", optional = true }
 pem = { version = "3", optional = true }
@@ -71,6 +77,11 @@ sha2 = { version = "0.10", optional = true }
 aws-sigv4 = { version = "1.2", optional = true }
 aws-credential-types = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+
+# --- Optional: S3/Iceberg sink ---
+iceberg = { version = "0.9", optional = true }
+iceberg-catalog-rest = { version = "0.9", optional = true }
+iceberg-storage-opendal = { version = "0.9", features = ["opendal-s3"], optional = true }
 
 # --- Optional: MySQL source ---
 mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }

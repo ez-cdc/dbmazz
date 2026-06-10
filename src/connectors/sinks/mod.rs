@@ -12,6 +12,7 @@
 //! - **StarRocks**: OLAP database with Stream Load API support
 //! - **PostgreSQL**: Relational database via raw table + MERGE (PG >= 15)
 //! - **Snowflake**: Cloud data warehouse via Parquet stage + COPY INTO + MERGE
+//! - **Iceberg**: Apache Iceberg tables on S3 via REST catalog (append-only changelog)
 //!
 //! ## Usage
 //!
@@ -26,6 +27,8 @@
 
 pub(crate) mod schema_evolution;
 
+#[cfg(feature = "sink-iceberg")]
+pub mod iceberg;
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
 #[cfg(feature = "sink-snowflake")]
@@ -35,6 +38,8 @@ pub mod starrocks;
 
 use anyhow::Result;
 
+#[cfg(feature = "sink-iceberg")]
+use self::iceberg::IcebergSink;
 #[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
 #[cfg(feature = "sink-snowflake")]
@@ -69,6 +74,11 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
         #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
+        #[cfg(feature = "sink-iceberg")]
+        SinkType::Iceberg => {
+            let sink = IcebergSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         #[allow(unreachable_patterns)]
