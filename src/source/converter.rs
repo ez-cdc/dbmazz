@@ -12,6 +12,7 @@ use crate::core::record::{CdcRecord, ColumnDef, ColumnValue, DataType, TableRef,
 use crate::pipeline::schema_cache::{SchemaCache, TableSchema};
 use crate::source::parser::{CdcMessage, TupleData};
 use crate::utils::{normalize_timestamptz, parse_pg_array, strip_money_symbol};
+use tracing::warn;
 
 /// Convert a CdcMessage (pgoutput) to a CdcRecord (generic).
 /// Returns None for messages that don't produce records (Unknown, LogicalMessage).
@@ -59,7 +60,10 @@ pub fn convert_message(
         }
 
         CdcMessage::Insert { relation_id, tuple } => {
-            let schema = schema_cache.get(*relation_id)?;
+            let schema = schema_cache.get(*relation_id).or_else(|| {
+                warn!("Converter: schema cache miss for Insert relation_id={}", relation_id);
+                None
+            })?;
             let columns = tuple_to_column_values(tuple, schema);
 
             Some(CdcRecord::Insert {

@@ -206,7 +206,7 @@ impl CdcEngine {
             }
         };
         if let Err(e) = sink.setup(&source_schemas).await {
-            self.halt_on_setup_error(&format!("Sink setup failed: {}", e))
+            self.halt_on_setup_error(&format!("Sink setup failed: {:#}", e))
                 .await;
         }
         info!("  [OK] Sink setup complete");

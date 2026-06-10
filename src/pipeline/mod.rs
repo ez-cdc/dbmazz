@@ -132,8 +132,11 @@ impl Pipeline {
         let records = std::mem::take(batch);
         let record_count = records.len();
 
+        info!("Pipeline: flushing batch of {} records at LSN 0x{:X}", record_count, lsn);
+
         match self.sink.write_batch(records).await {
             Ok(result) => {
+                info!("Pipeline: flush_batch succeeded: {} records written", result.records_written);
                 // Update metric for batches sent
                 if let Some(state) = &self.shared_state {
                     state.increment_batches();
@@ -168,7 +171,7 @@ impl Pipeline {
             }
             Err(e) => {
                 // CRITICAL: Sink failure (StarRocks down, network error, etc.)
-                error!("CRITICAL: Sink write_batch failed: {}", e);
+                error!("CRITICAL: Sink write_batch failed: {:#}", e);
                 error!(
                     "CRITICAL: Batch details: {} events, LSN 0x{:X}",
                     record_count, lsn
