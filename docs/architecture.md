@@ -190,6 +190,13 @@ src/
 │       │   ├── merge_generator.rs   Dynamic MERGE SQL generation
 │       │   ├── setup.rs             DDL: raw table, metadata, target tables
 │       │   └── types.rs             PG → PG type mapping
+│       ├── oracle/                  Oracle sink
+│       │   ├── mod.rs               OracleSink (MERGE via kubo/rust-oracle)
+│       │   ├── merge_generator.rs   MERGE SQL generation (Oracle dialect)
+│       │   ├── schema_tracking.rs   Schema state cache
+│       │   ├── setup.rs             DDL: metadata table, target tables
+│       │   ├── types.rs             DataType → Oracle type mapping
+│       │   └── README.md            Connector documentation
 │       └── snowflake/               Snowflake sink
 │           ├── mod.rs               SnowflakeSink (Parquet → PUT → COPY INTO → MERGE)
 │           ├── client.rs            HTTP client (password + JWT auth, SQL execution)
