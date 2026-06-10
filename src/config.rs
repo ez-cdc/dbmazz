@@ -72,20 +72,20 @@ pub struct SourceConfig {
 
 impl SourceConfig {
     /// Returns the PostgreSQL-specific source config.
-    /// Panics if source_type is not Postgres.
-    pub fn postgres(&self) -> &PostgresSourceConfig {
+    /// Returns error if source_type is not Postgres.
+    pub fn postgres(&self) -> Result<&PostgresSourceConfig> {
         self.postgres
             .as_ref()
-            .expect("PostgresSourceConfig must be set for Postgres source")
+            .ok_or_else(|| anyhow::anyhow!("PostgresSourceConfig must be set for Postgres source"))
     }
 
     /// Returns the MySQL-specific source config.
-    /// Panics if source_type is not Mysql.
+    /// Returns error if source_type is not Mysql.
     #[allow(dead_code)]
-    pub fn mysql(&self) -> &MysqlSourceConfig {
+    pub fn mysql(&self) -> Result<&MysqlSourceConfig> {
         self.mysql
             .as_ref()
-            .expect("MysqlSourceConfig must be set for Mysql source")
+            .ok_or_else(|| anyhow::anyhow!("MysqlSourceConfig must be set for Mysql source"))
     }
 }
 
@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    Oracle,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "oracle" => Ok(SinkType::Oracle),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, oracle",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::Oracle => write!(f, "oracle"),
         }
     }
 }
@@ -168,6 +171,15 @@ pub struct PostgresSinkConfig {
     /// Target schema (default: "public")
     pub schema: String,
     /// Job name for raw table and metadata tracking (defaults to slot_name)
+    pub job_name: String,
+}
+
+/// Oracle target-specific sink configuration
+#[derive(Debug, Clone)]
+pub struct OracleSinkConfig {
+    /// Target schema/owner name in Oracle (defaults to uppercase of database user)
+    pub schema: String,
+    /// Job name for metadata tracking (defaults to slot_name)
     pub job_name: String,
 }
 
@@ -189,6 +201,7 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    Oracle(OracleSinkConfig),
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -211,6 +224,14 @@ impl SinkConfig {
         match &self.specific {
             SinkSpecificConfig::Postgres(pg) => Ok(pg),
             _ => anyhow::bail!("PostgresSinkConfig is required for postgres sink"),
+        }
+    }
+
+    /// Returns the Oracle-specific config, or an error if this is not an Oracle sink.
+    pub fn oracle_config(&self) -> Result<&OracleSinkConfig> {
+        match &self.specific {
+            SinkSpecificConfig::Oracle(oc) => Ok(oc),
+            _ => anyhow::bail!("OracleSinkConfig is required for oracle sink"),
         }
     }
 }
@@ -343,7 +364,12 @@ impl Config {
             _ => required_env("SINK_URL")?,
         };
 
-        let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
+        let port_default = match sink_type {
+            SinkType::StarRocks | SinkType::Postgres => 9030,
+            SinkType::Snowflake => 443,
+            SinkType::Oracle => 1521,
+        };
+        let sink_port: u16 = optional_env("SINK_PORT", &port_default.to_string()).parse().unwrap_or(port_default);
 
         let sink_database = required_env("SINK_DATABASE")?;
 
@@ -359,6 +385,10 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            SinkType::Oracle => SinkSpecificConfig::Oracle(OracleSinkConfig {
+                schema: optional_env("SINK_SCHEMA", ""),
+                job_name: slot_name.clone(),
+            }),
         };
 
         let sink = SinkConfig {
@@ -469,6 +499,9 @@ impl Config {
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
             }
+            SinkType::Oracle => {
+                info!("Sink: Oracle (db: {})", self.sink.database);
+            }
         }
 
         info!(
@@ -536,8 +569,8 @@ mod tests {
         // Test new nested structure
         assert_eq!(config.source.url, "postgres://localhost/testdb");
         assert_eq!(config.source.source_type, SourceType::Postgres);
-        assert_eq!(config.source.postgres().slot_name, "test_slot");
-        assert_eq!(config.source.postgres().publication_name, "test_pub");
+        assert_eq!(config.source.postgres().unwrap().slot_name, "test_slot");
+        assert_eq!(config.source.postgres().unwrap().publication_name, "test_pub");
         assert_eq!(config.sink.url, "starrocks.local");
         assert_eq!(config.sink.sink_type, SinkType::StarRocks);
         assert_eq!(config.sink.port, 9030);
@@ -547,8 +580,8 @@ mod tests {
 
         // Verify source fields are accessible via nested config
         assert_eq!(config.source.url, "postgres://localhost/testdb");
-        assert_eq!(config.source.postgres().slot_name, "test_slot");
-        assert_eq!(config.source.postgres().publication_name, "test_pub");
+        assert_eq!(config.source.postgres().unwrap().slot_name, "test_slot");
+        assert_eq!(config.source.postgres().unwrap().publication_name, "test_pub");
         assert_eq!(config.source.tables, vec!["table1", "table2"]);
 
         clear_env_vars();
@@ -568,8 +601,8 @@ mod tests {
         // Check defaults
         assert_eq!(config.source.source_type, SourceType::Postgres);
         assert_eq!(config.sink.sink_type, SinkType::StarRocks);
-        assert_eq!(config.source.postgres().slot_name, "dbmazz_slot");
-        assert_eq!(config.source.postgres().publication_name, "dbmazz_pub");
+        assert_eq!(config.source.postgres().unwrap().slot_name, "dbmazz_slot");
+        assert_eq!(config.source.postgres().unwrap().publication_name, "dbmazz_pub");
         assert_eq!(config.sink.port, 9030);
         assert_eq!(config.sink.user, "root");
         assert_eq!(config.sink.password, "");
@@ -685,8 +718,8 @@ mod tests {
 
         // Source
         assert_eq!(config.source.url, "postgres://localhost/db");
-        assert_eq!(config.source.postgres().slot_name, "my_slot");
-        assert_eq!(config.source.postgres().publication_name, "my_pub");
+        assert_eq!(config.source.postgres().unwrap().slot_name, "my_slot");
+        assert_eq!(config.source.postgres().unwrap().publication_name, "my_pub");
         assert_eq!(config.source.tables, vec!["orders", "items"]);
 
         // Sink
@@ -753,7 +786,7 @@ mod tests {
         assert_eq!(config.source.url, "mysql://localhost/testdb");
         assert!(config.source.postgres.is_none());
 
-        let mysql = config.source.mysql();
+        let mysql = config.source.mysql().unwrap();
         assert_eq!(mysql.server_id, 6000);
         assert!(!mysql.gtid_enabled);
 

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use bytes::{Buf, Bytes};
 use futures_util::SinkExt;
 use tokio::sync::mpsc;
-use tracing::error;
+use tracing::{error, info};
 
 use crate::control::state::SharedState;
 use crate::pipeline::schema_cache::SchemaCache;

@@ -67,7 +67,7 @@ use self::postgres::PostgresSource;
 pub async fn create_source(config: &SourceConfig) -> Result<Box<dyn Source>> {
     match config.source_type {
         SourceType::Postgres => {
-            let pg = config.postgres();
+            let pg = config.postgres()?;
             let source = PostgresSource::new(
                 &config.url,
                 pg.slot_name.clone(),
@@ -78,7 +78,7 @@ pub async fn create_source(config: &SourceConfig) -> Result<Box<dyn Source>> {
         }
         #[cfg(feature = "mysql-source")]
         SourceType::Mysql => {
-            let mysql_cfg = config.mysql();
+            let mysql_cfg = config.mysql()?;
             let source = MysqlSource::new(&config.url, mysql_cfg).await?;
             Ok(Box::new(source))
         }

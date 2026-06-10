@@ -12,6 +12,8 @@ default = ["sink-starrocks", "sink-postgres", "sink-snowflake"]
 sink-starrocks = ["dep:curl", "dep:mysql_async", "dep:openssl-sys"]
 # --- Optional: MySQL source ---
 mysql-source = ["dep:mysql_async", "dep:mysql_common", "mysql_async?/binlog"]
+# --- Optional: Oracle sink ---
+oracle-sink = ["dep:oracle"]
 sink-postgres = []
 sink-snowflake = [
     "dep:reqwest", "dep:arrow", "dep:parquet",
@@ -74,6 +76,9 @@ uuid = { version = "1", features = ["v4"], optional = true }
 
 # --- Optional: MySQL source ---
 mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }
+
+# --- Optional: Oracle sink ---
+oracle = { version = "0.6", features = ["chrono"], optional = true }
 
 [dev-dependencies]
 serial_test = "3.0"

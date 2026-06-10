@@ -23,11 +23,11 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, or `snowflake`. |
-| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). |
+| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, `snowflake`, or `oracle`. |
+| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Oracle: `//host:1521/service_name`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). |
 | `SINK_PORT` | `9030` | Additional port when needed (e.g., StarRocks MySQL protocol port for DDL). |
 | `SINK_DATABASE` | — (required) | Target database name. |
-| `SINK_SCHEMA` | `public` | Target schema (PostgreSQL) or `PUBLIC` (Snowflake). StarRocks does not use this. |
+| `SINK_SCHEMA` | `public` | Target schema (PostgreSQL) or database (Oracle) or `PUBLIC` (Snowflake). StarRocks does not use this. |
 | `SINK_USER` | `root` | Authentication username. |
 | `SINK_PASSWORD` | *(empty)* | Authentication password. |
 
@@ -89,6 +89,14 @@ loud with an actionable error message if they are missing.
 | Warehouse + role + database configured via env vars | dbmazz uses these for COPY INTO / MERGE | See `SINK_SNOWFLAKE_*` env vars above |
 | Target tables created by the operator | dbmazz does not create tables; CLUSTER BY, transient/permanent, and other Snowflake-specific decisions are operator-owned | `CREATE TABLE ...` ahead of time |
 | Key-pair JWT auth (recommended over password) | Lower auth-related rotation overhead; `SINK_SNOWFLAKE_PRIVATE_KEY_PATH` env var | See [Snowflake key-pair auth docs](https://docs.snowflake.com/en/user-guide/key-pair-auth) |
+
+### Oracle (sink)
+
+| Requirement | Why | How to satisfy |
+|---|---|---|
+| Oracle Instant Client (Basic Light) at runtime | The `oracle` (kubo/rust-oracle) crate wraps ODPI-C, which loads `libclntsh.so` via `dlopen` | Use the `dbmazz-oracle` Docker image (bundles Instant Client). On bare metal, install Oracle Instant Client and set `LD_LIBRARY_PATH`. |
+| Target schema must exist | The sink creates tables within the target schema but does not create the schema | `CREATE USER <schema> IDENTIFIED BY <password>; GRANT CONNECT, RESOURCE TO <schema>;` |
+| Oracle tables created by dbmazz | The Oracle sink **does** create target tables if they don't exist (mirroring source schemas with Oracle-compatible column types) | No action needed — the sink handles DDL automatically during `setup()` |
 
 ### PostgreSQL (sink)
 

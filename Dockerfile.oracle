@@ -1,0 +1,80 @@
+# syntax=docker/dockerfile:1.6
+#
+# Multi-stage build for dbmazz with oracle-sink feature.
+#
+# This Dockerfile compiles dbmazz with the oracle-sink feature and includes
+# Oracle Instant Client in the runtime stage for libclntsh.so (needed by
+# the oracle crate at runtime via dlopen).
+#
+# Usage:
+#   docker build -t dbmazz-oracle:dev -f Dockerfile.oracle .
+#
+# For multi-arch builds (slower — QEMU emulates the Rust compiler):
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t dbmazz-oracle:dev -f Dockerfile.oracle .
+#
+# Security: runs as non-root user (uid 65532), HEALTHCHECK configured.
+# Binary: dynamically linked against glibc (debian:bookworm-slim).
+
+FROM rust:bookworm AS builder
+WORKDIR /app
+
+# ---- Layer 0: system dependencies for compilation ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl-dev unzip curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---- Layer 1: fetch dependencies (cached unless Cargo.toml/lock changes) ----
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && touch src/lib.rs
+RUN cargo fetch --locked
+
+# ---- Layer 2: real source + real build ----
+COPY src/ src/
+RUN cargo build --release --features oracle-sink --locked
+
+# ====================================================================
+# Runtime stage
+# ====================================================================
+FROM debian:bookworm-slim
+
+# Install runtime deps: ca-certificates, curl (healthcheck), libaio1 (OCI)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl libaio1 unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --uid 65532 dbmazz
+
+# Download and install Oracle Instant Client Basic Light (provides libclntsh.so)
+# Multi-arch: detects arm64 vs x86_64 at build time with uname -m
+# Docs: https://www.oracle.com/database/technologies/instant-client.html
+RUN arch=$(uname -m); \
+    case "$arch" in \
+        aarch64|arm64) \
+            url="https://download.oracle.com/otn_software/linux/instantclient/2326200/instantclient-basiclite-linux.arm64-23.26.2.0.0.zip"; \
+            dir="instantclient_23_26" ;; \
+        *) \
+            url="https://download.oracle.com/otn_software/linux/instantclient/2326200/instantclient-basiclite-linux.x64-23.26.2.0.0dbru.zip"; \
+            dir="instantclient_23_26" ;; \
+    esac; \
+    echo "Downloading Oracle Instant Client for $arch from $url"; \
+    curl -fsSL "$url" -o /tmp/ic.zip \
+    && unzip -q /tmp/ic.zip -d /opt/oracle \
+    && rm /tmp/ic.zip \
+    && ln -s "/opt/oracle/${dir}" /opt/oracle/instantclient \
+    && echo "/opt/oracle/instantclient" > /etc/ld.so.conf.d/oracle-instantclient.conf \
+    && ldconfig
+
+# Copy the compiled binary from builder
+COPY --from=builder /app/target/release/dbmazz /usr/local/bin/dbmazz
+
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient:${LD_LIBRARY_PATH}
+
+USER dbmazz
+
+EXPOSE 50051
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=30s --retries=3 \
+  CMD curl -sf http://127.0.0.1:50051/api/v1/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/dbmazz"]

@@ -158,7 +158,7 @@ impl ReplicationLoop for PgReplicationLoop {
         let mut snapshot_trigger_rx = shared_state.subscribe_snapshot_trigger();
         let mut iteration = 0u64;
 
-        let slot_name = config.source.postgres().slot_name.clone();
+        let slot_name = config.source.postgres()?.slot_name.clone();
         let flush_size = config.flush_size;
 
         loop {
@@ -273,7 +273,7 @@ impl ReplicationLoop for PgReplicationLoop {
         } else {
             crate::engine::setup::cleanup_postgres_resources(
                 &config.source.url,
-                &config.source.postgres().slot_name,
+                &config.source.postgres()?.slot_name,
             )
             .await
             .map_err(|e| warn!("Cleanup warning: {}", e))

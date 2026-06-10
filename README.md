@@ -122,6 +122,7 @@ Full Docker reference (env vars, healthcheck, persisting state, build-from-sourc
 | PostgreSQL 12+ | **StarRocks 3.2+** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed, schema evolution requires per-table `fast_schema_evolution=true` |
 | PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
 | PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported; requires `ALTER TABLE` privilege on target schema |
+| PostgreSQL 12+ | **Oracle 12c+** | ✅ Stable | Direct MERGE (upsert) to Oracle tables via `oracle` crate (kubo/rust-oracle). See [`src/connectors/sinks/oracle/README.md`](src/connectors/sinks/oracle/README.md). |
 | PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
 | MySQL 5.7+ / 8.0+ | All sinks | ✅ Stable | Binlog-based with GTID-aware checkpointing, BIGINT UNSIGNED, microsecond DATETIME, non-integer PK support, cursor-based snapshot chunker. See [`docs/mysql-source.md`](docs/mysql-source.md). |
 
@@ -135,9 +136,10 @@ Adding a new sink is intentionally small: implement a 6-method `Sink` trait and 
 PostgreSQL (source)               dbmazz                          Sink (target)
 ┌──────────────┐               ┌────────────────────┐          ┌──────────────┐
 │  WAL         │   logical     │ WAL Handler        │          │ StarRocks    │
-│  (INSERT,    │   replication │   │                │          │ PostgreSQL   │
-│   UPDATE,    │ ────────────▶ │   ▼                │          │ Snowflake    │
-│   DELETE)    │   (pgoutput)  │ source/converter   │          │              │
+│  (INSERT,    │   replication │   │                │          │ Oracle       │
+│   UPDATE,    │ ────────────▶ │   ▼                │          │ PostgreSQL   │
+│   DELETE)    │   (pgoutput)  │ source/converter   │          │ Snowflake    │
+│              │               │   │                │          │              │
 │              │               │   │                │          │              │
 │              │               │   ▼                │          │              │
 │              │               │ Pipeline           │  write   │              │

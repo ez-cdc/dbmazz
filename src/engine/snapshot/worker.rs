@@ -94,7 +94,7 @@ pub async fn run_snapshot(
     }
     let sink_pool = Arc::new(tokio::sync::Mutex::new(sink_pool));
 
-    let slot_name = config.source.postgres().slot_name.clone();
+    let slot_name = config.source.postgres()?.slot_name.clone();
     let tables = config.source.tables.clone();
     let chunk_size = config.snapshot_chunk_size;
 
@@ -237,7 +237,10 @@ pub async fn run_snapshot(
         let table_meta = Arc::clone(&table_meta);
 
         join_set.spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("snapshot worker: semaphore closed unexpectedly");
 
             // Respect pause flag: wait until resumed before processing.
             // Check AFTER acquiring the semaphore so paused tasks hold permits
@@ -378,6 +381,9 @@ async fn process_chunk(
         .context("failed to emit LW watermark")?;
 
     // Step 2: SELECT rows for this chunk
+    // SAFETY: SQL identifiers are escaped via quote_ident() (doubles " → "").
+    // SQL values use PostgreSQL parameterized queries ($1, $2). The format!()
+    // on the next line builds only identifier placeholders, never values.
     let col_names = &meta.col_names;
 
     // Build SELECT with all columns cast to ::text for universal type handling
