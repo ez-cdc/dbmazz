@@ -221,7 +221,7 @@ cargo fmt -- --check
 cargo clippy -- -D warnings
 ```
 
-Requires Rust 1.91.1+. System deps: `musl-tools`, `pkg-config`, `perl`, `make`.
+Requires Rust 1.92+ (1.91.1 if building without the `sink-iceberg` feature). System deps: `musl-tools`, `pkg-config`, `perl`, `make`.
 
 ### Contributing a new sink
 

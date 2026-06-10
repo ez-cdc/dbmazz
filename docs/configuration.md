@@ -23,8 +23,8 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, or `snowflake`. |
-| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). |
+| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, `snowflake`, or `iceberg` (the latter requires a build with `--features sink-iceberg`). |
+| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). For Iceberg: ignored (use `ICEBERG_CATALOG_URI`). |
 | `SINK_PORT` | `9030` | Additional port when needed (e.g., StarRocks MySQL protocol port for DDL). |
 | `SINK_DATABASE` | — (required) | Target database name. |
 | `SINK_SCHEMA` | `public` | Target schema (PostgreSQL) or `PUBLIC` (Snowflake). StarRocks does not use this. |
@@ -43,6 +43,27 @@ every option documented inline. The default location is
 | `SINK_SNOWFLAKE_MERGE_INTERVAL_MS` | `30000` | Normalizer MERGE polling interval in ms. |
 | `SINK_SNOWFLAKE_FLUSH_FILES` | `20` | Trigger `COPY INTO` after accumulating this many staged Parquet files. For e2e testing, set to `1` for immediate flush. |
 | `SINK_SNOWFLAKE_FLUSH_BYTES` | `104857600` | Trigger `COPY INTO` after accumulating this many bytes (default 100 MB). Whichever threshold (files or bytes) is reached first wins. |
+
+## Sink (Iceberg-specific)
+
+Requires a binary built with the opt-in `sink-iceberg` cargo feature. The
+target namespace is `SINK_DATABASE`; `SINK_URL`, `SINK_PORT`, `SINK_USER`,
+and `SINK_PASSWORD` are unused.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ICEBERG_CATALOG_URI` | — (required) | Iceberg REST catalog endpoint, e.g. `http://lakekeeper:8181/catalog`. |
+| `ICEBERG_WAREHOUSE` | — (required) | Warehouse location or identifier passed to the catalog, e.g. `s3://warehouse/`. |
+| `ICEBERG_COMMIT_RETRIES` | `3` | Retries (with table refresh + backoff) for snapshot commits on transient catalog failures. |
+| `S3_REGION` | *(unset)* | S3 region for data file I/O. |
+| `S3_ENDPOINT` | *(unset)* | Custom S3 endpoint (MinIO, LocalStack). |
+| `S3_ACCESS_KEY_ID` | *(unset)* | Static access key. Falls back to ambient credentials when unset. |
+| `S3_SECRET_ACCESS_KEY` | *(unset)* | Static secret key. |
+| `S3_PATH_STYLE` | `false` | Path-style addressing (`true` required for MinIO). |
+
+See `src/connectors/sinks/iceberg/README.md` for the changelog data model
+(`_cdc_op` / `_cdc_position` / `_cdc_ts`), type mappings, and maintenance
+duties (snapshot expiry is operator-owned).
 
 ## Pipeline / batching
 
@@ -97,6 +118,15 @@ loud with an actionable error message if they are missing.
 | PostgreSQL 15+ | dbmazz uses `MERGE` (added in PG 15) | Upgrade |
 | `CREATE` privilege on target database | dbmazz creates `_dbmazz` schema, raw table, metadata, schema-tracking, and target tables | `GRANT CREATE ON DATABASE <db> TO <role>` |
 | (Existing PG sink behavior) target tables created by dbmazz | The PG sink **does** create target tables if they don't exist (legacy behavior; not symmetric with SR/SF) | No action needed |
+
+### Iceberg
+
+| Requirement | Why | How to satisfy |
+|---|---|---|
+| Iceberg REST catalog | The sink only speaks the REST catalog protocol (Lakekeeper, Polaris, Nessie, Tabular, Glue REST endpoint) | Deploy/point to a REST catalog; Hive Metastore and native Glue are not supported |
+| S3 (or compatible) bucket reachable from the worker | Parquet data files are written directly by dbmazz | Bucket + credentials with read/write on the warehouse prefix |
+| Snapshot expiry / compaction owned by the operator | Each flushed batch commits one Iceberg snapshot per touched table; metadata grows until expired | Schedule `expire_snapshots` / compaction via Spark, Trino, or your catalog's maintenance |
+| Consumers materialize current state | Tables are append-only changelogs (`_cdc_op`/`_cdc_position`/`_cdc_ts`), not upserted copies | Dedup by primary key + max `_cdc_position`, dropping `D` rows |
 
 ## Observability
 

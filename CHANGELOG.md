@@ -4,6 +4,36 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **S3/Iceberg sink (`SINK_TYPE=iceberg`)** behind the opt-in cargo feature
+  `sink-iceberg` (not in default builds). Streams CDC as an **append-only
+  changelog** into Apache Iceberg tables via a REST catalog (Lakekeeper,
+  Polaris, Nessie, Tabular, Glue REST): every INSERT/UPDATE/DELETE becomes
+  one row carrying the source columns plus `_cdc_op`, `_cdc_position`, and
+  `_cdc_ts` metadata columns. Tables are auto-created (format V2,
+  unpartitioned, spec-compliant field-ids) and each flushed batch commits
+  one Iceberg snapshot per touched table **before** the LSN is confirmed —
+  no staging window, no data-loss gap on crash. Type mapping is strict and
+  exhaustive (`UInt64` → `decimal(20,0)`, `NUMERIC` → `decimal(p,s)`,
+  `UUID` → `uuid`); unparseable or mismatched values fail the batch instead
+  of being coerced. New env vars: `ICEBERG_CATALOG_URI`,
+  `ICEBERG_WAREHOUSE`, `ICEBERG_COMMIT_RETRIES`, `S3_REGION`,
+  `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`,
+  `S3_PATH_STYLE`. Schema evolution is not auto-applied in this version
+  (counted in `schema_evolution_skipped` and WARN-logged); snapshot
+  expiry/compaction is operator-owned. See
+  `src/connectors/sinks/iceberg/README.md`.
+
+### Changed
+
+- **Dependency: arrow/parquet v53 → v57**, required by `iceberg` 0.9. The
+  Snowflake sink (the other arrow consumer) compiles and passes its test
+  suite against v57; no behavior change expected.
+- **MSRV: 1.91.1 → 1.92**, required by `iceberg-catalog-rest` 0.9.1.
+  Builds without the `sink-iceberg` feature still compile on 1.91.1, but
+  the declared `rust-version` now reflects the full feature set.
+
 ## [2.5.0] - 2026-05-16
 
 ### Changed

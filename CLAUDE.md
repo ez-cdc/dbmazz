@@ -161,7 +161,7 @@ cargo fmt -- --check
 cargo clippy -- -D warnings
 ```
 
-Requires Rust 1.91.1+.
+Requires Rust 1.92+ (1.91.1 if building without the `sink-iceberg` feature).
 
 ## Code Conventions
 
