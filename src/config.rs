@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    ApacheIceberg,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "apache_iceberg" | "apacheiceberg" => Ok(SinkType::ApacheIceberg),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, apache_iceberg",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::ApacheIceberg => write!(f, "apache_iceberg"),
         }
     }
 }
@@ -189,6 +192,7 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    ApacheIceberg,
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -337,15 +341,20 @@ impl Config {
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
         // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
-        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
+        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT) and ApacheIceberg (has its own URL).
         let sink_url = match sink_type {
             SinkType::Snowflake => optional_env("SINK_URL", ""),
+            SinkType::ApacheIceberg => required_env("SINK_URL")?,
             _ => required_env("SINK_URL")?,
         };
 
-        let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
+        // ApacheIceberg uses SINK_NAMESPACE instead of SINK_DATABASE.
+        let sink_database = match sink_type {
+            SinkType::ApacheIceberg => required_env("SINK_NAMESPACE")?,
+            _ => required_env("SINK_DATABASE")?,
+        };
 
-        let sink_database = required_env("SINK_DATABASE")?;
+        let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
 
         let sink_user = optional_env("SINK_USER", "root");
 
@@ -359,6 +368,7 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            SinkType::ApacheIceberg => SinkSpecificConfig::ApacheIceberg,
         };
 
         let sink = SinkConfig {
@@ -468,6 +478,9 @@ impl Config {
             }
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
+            }
+            SinkType::ApacheIceberg => {
+                info!("Sink: Apache Iceberg (namespace: {})", self.sink.database);
             }
         }
 

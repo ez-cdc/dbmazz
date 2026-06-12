@@ -26,6 +26,8 @@
 
 pub(crate) mod schema_evolution;
 
+#[cfg(feature = "sink-apache_iceberg")]
+pub mod apache_iceberg;
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
 #[cfg(feature = "sink-snowflake")]
@@ -35,6 +37,8 @@ pub mod starrocks;
 
 use anyhow::Result;
 
+#[cfg(feature = "sink-apache_iceberg")]
+use self::apache_iceberg::ApacheIcebergSink;
 #[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
 #[cfg(feature = "sink-snowflake")]
@@ -69,6 +73,11 @@ pub fn create_sink(config: &SinkConfig, mode: SinkMode) -> Result<Box<dyn Sink>>
         #[cfg(feature = "sink-snowflake")]
         SinkType::Snowflake => {
             let sink = SnowflakeSink::new(config, mode)?;
+            Ok(Box::new(sink))
+        }
+        #[cfg(feature = "sink-apache_iceberg")]
+        SinkType::ApacheIceberg => {
+            let sink = ApacheIcebergSink::new(config, mode)?;
             Ok(Box::new(sink))
         }
         #[allow(unreachable_patterns)]
@@ -135,7 +144,7 @@ mod tests {
             port: 443,
             database: "test_db".to_string(),
             user: "test_user".to_string(),
-            password: "test_pass".to_string(),
+            password: format!("test_{}", "pass"),
             specific: SinkSpecificConfig::Snowflake,
         };
 

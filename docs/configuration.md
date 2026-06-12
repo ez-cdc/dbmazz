@@ -23,8 +23,8 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, or `snowflake`. |
-| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). |
+| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, `snowflake`, or `apache_iceberg`. |
+| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). For Apache Iceberg: `http://host:8181` (REST catalog). |
 | `SINK_PORT` | `9030` | Additional port when needed (e.g., StarRocks MySQL protocol port for DDL). |
 | `SINK_DATABASE` | — (required) | Target database name. |
 | `SINK_SCHEMA` | `public` | Target schema (PostgreSQL) or `PUBLIC` (Snowflake). StarRocks does not use this. |
@@ -43,6 +43,13 @@ every option documented inline. The default location is
 | `SINK_SNOWFLAKE_MERGE_INTERVAL_MS` | `30000` | Normalizer MERGE polling interval in ms. |
 | `SINK_SNOWFLAKE_FLUSH_FILES` | `20` | Trigger `COPY INTO` after accumulating this many staged Parquet files. For e2e testing, set to `1` for immediate flush. |
 | `SINK_SNOWFLAKE_FLUSH_BYTES` | `104857600` | Trigger `COPY INTO` after accumulating this many bytes (default 100 MB). Whichever threshold (files or bytes) is reached first wins. |
+
+## Sink (Apache Iceberg-specific)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SINK_WAREHOUSE` | — (required) | Iceberg warehouse path, e.g. `file:///tmp/warehouse` or `s3://my-bucket/warehouse`. |
+| `SINK_ICEBERG_PREFIX` | `v1` | REST catalog API prefix appended to `SINK_URL`. |
 
 ## Pipeline / batching
 

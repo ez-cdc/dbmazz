@@ -1,0 +1,7 @@
+[target.aarch64-apple-darwin]
+linker = "/usr/bin/cc"
+
+[env]
+CC = "/usr/bin/cc"
+AR = "/usr/bin/ar"
+RANLIB = "/usr/bin/ranlib"

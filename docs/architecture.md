@@ -200,6 +200,12 @@ src/
 │           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
 │           └── types.rs             PG → Snowflake type mapping
+│       └── apache_iceberg/          Apache Iceberg sink
+│           ├── mod.rs               ApacheIcebergSink (Parquet → REST catalog commit)
+│           ├── config.rs            ApacheIcebergSinkConfig (catalog URL, warehouse, namespace)
+│           ├── types.rs             PG → Iceberg type mapping
+│           ├── setup.rs             DDL: namespace creation, table creation via REST API
+│           └── schema_evolution.rs  ADD COLUMN via Iceberg schema commit
 ├── control/                         HTTP control plane (axum)
 │   ├── mod.rs                       Router + server startup
 │   ├── state.rs                     SharedState (metrics, dedup, control)
