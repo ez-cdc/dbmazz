@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, NaiveTime};
 use tiberius::Client as TiberiusClient;
 use tiberius::Config as TiberiusConfig;
 use tiberius::ToSql;
@@ -34,9 +34,7 @@ use tracing::{info, warn};
 
 use crate::config::SinkConfig;
 use crate::connectors::sinks::schema_evolution::compute_schema_evolution_plan;
-use crate::core::record::{
-    CdcRecord, ColumnValue, DataType, TableRef, Value,
-};
+use crate::core::record::{CdcRecord, ColumnValue, DataType, TableRef, Value};
 use crate::core::traits::{
     LoadingModel, Sink, SinkCapabilities, SinkMode, SinkResult, SourceTableSchema,
 };
@@ -59,6 +57,7 @@ type SchemaState = HashMap<String, SourceTableSchema>;
 /// Each null variant carries the correct TDS type so SQL Server doesn't
 /// reject it with "Operand type clash" when the column expects e.g.
 /// DATETIME2 (naively sending `Option<i32>` as int NULL).
+#[allow(dead_code)]
 enum ParamOwned {
     Bool(bool),
     I16(i16),
@@ -68,6 +67,8 @@ enum ParamOwned {
     String(String),
     Bytes(Vec<u8>),
     DateTime(NaiveDateTime),
+    /// TIME value (NaiveTime for tiberius TIME type compatibility)
+    Time(NaiveTime),
     /// Typed nulls — these MUST match the target column type.
     NullBool,
     NullI16,
@@ -77,6 +78,7 @@ enum ParamOwned {
     NullString,
     NullBytes,
     NullDateTime,
+    NullTime,
 }
 
 impl ParamOwned {
@@ -91,6 +93,7 @@ impl ParamOwned {
             Self::String(ref v) => v as &dyn ToSql,
             Self::Bytes(ref v) => v as &dyn ToSql,
             Self::DateTime(ref v) => v as &dyn ToSql,
+            Self::Time(ref v) => v as &dyn ToSql,
             Self::NullBool => {
                 static NULL: Option<bool> = None;
                 &NULL as &dyn ToSql
@@ -123,6 +126,10 @@ impl ParamOwned {
                 static NULL: Option<NaiveDateTime> = None;
                 &NULL as &dyn ToSql
             }
+            Self::NullTime => {
+                static NULL: Option<NaiveTime> = None;
+                &NULL as &dyn ToSql
+            }
         }
     }
 }
@@ -146,7 +153,7 @@ fn value_to_param_owned(value: &Value, data_type: Option<&DataType>) -> ParamOwn
         },
         Value::Bool(b) => ParamOwned::Bool(*b),
         Value::Int64(i) => ParamOwned::I64(*i),
-        Value::UInt64(u) => ParamOwned::I64(*u as i64),
+        Value::UInt64(u) => ParamOwned::String(u.to_string()),
         Value::Float64(f) => ParamOwned::F64(*f),
         Value::String(s) => ParamOwned::String(s.clone()),
         Value::Bytes(b) => ParamOwned::Bytes(b.clone()),
@@ -156,7 +163,9 @@ fn value_to_param_owned(value: &Value, data_type: Option<&DataType>) -> ParamOwn
             // so tiberius sends a DATETIME2-compatible wire type instead of
             // BIGINT (which clashes with DATETIME2 columns).
             ParamOwned::DateTime(
-                NaiveDateTime::from_timestamp_micros(*ts).unwrap_or_default(),
+                DateTime::from_timestamp_micros(*ts)
+                    .unwrap_or_default()
+                    .naive_utc(),
             )
         }
         Value::Decimal(d) => ParamOwned::String(d.clone()),
@@ -227,7 +236,7 @@ fn value_byte_estimate(value: &Value) -> u64 {
 
 // ---------------------------------------------------------------------------
 // SqlServerSink
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------------
 
 /// SQL Server sink — writes CDC records to a target SQL Server database
 /// using direct parameterized T-SQL MERGE statements.
@@ -249,6 +258,7 @@ pub struct SqlServerSink {
     /// Lazy connection — established on connect()
     client: Option<TiberiusClient<tokio_util::compat::Compat<TcpStream>>>,
     /// Sink operating mode
+    #[allow(dead_code)]
     mode: SinkMode,
     /// In-memory schema cache keyed by `<schema>.<table>`.
     /// Updated after each successful schema-evolution batch.
@@ -281,16 +291,16 @@ impl SqlServerSink {
     }
 
     /// Get or establish connection to target SQL Server.
-    async fn connect(&mut self) -> Result<&mut TiberiusClient<tokio_util::compat::Compat<TcpStream>>> {
+    async fn connect(
+        &mut self,
+    ) -> Result<&mut TiberiusClient<tokio_util::compat::Compat<TcpStream>>> {
         if self.client.is_none() {
             let mut tiberius_config = TiberiusConfig::new();
             tiberius_config.host(&self.url);
             tiberius_config.port(self.port);
             tiberius_config.database(&self.database);
-            tiberius_config.authentication(tiberius::AuthMethod::sql_server(
-                &self.user,
-                &self.password,
-            ));
+            tiberius_config
+                .authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
 
             let tcp = TcpStream::connect(format!("{}:{}", self.url, self.port))
                 .await
@@ -354,10 +364,8 @@ impl Sink for SqlServerSink {
         tiberius_config.host(&self.url);
         tiberius_config.port(self.port);
         tiberius_config.database(&self.database);
-        tiberius_config.authentication(tiberius::AuthMethod::sql_server(
-            &self.user,
-            &self.password,
-        ));
+        tiberius_config
+            .authentication(tiberius::AuthMethod::sql_server(&self.user, &self.password));
 
         let tcp = TcpStream::connect(format!("{}:{}", self.url, self.port))
             .await
@@ -428,300 +436,303 @@ impl Sink for SqlServerSink {
             .await
             .context("SqlServerSink: failed to begin transaction")?;
 
-        // ── Step 4: Apply schema evolution DDL ──
-        for (table_ref, diff) in &pending_diffs {
-            for added in &diff.added {
-                let target_schema = &schema;
-                let quoted = Self::quoted_table(target_schema, &table_ref.name);
-                let col_name = Self::quote_ident(&added.name);
-                let col_type = types::data_type_to_sqlserver(&added.data_type);
+        // ── Steps 4-6: Execute within transaction ──
+        // (wrapped in async block so any ? triggers ROLLBACK instead of
+        //  leaving an uncommitted/open transaction on the SQL Server)
+        let tx_result: Result<(usize, u64)> = {
+            async {
+                // ── Step 4: Apply schema evolution DDL ──
+                for (table_ref, diff) in &pending_diffs {
+                    for added in &diff.added {
+                        let target_schema = &schema;
+                        let quoted = Self::quoted_table(target_schema, &table_ref.name);
+                        let col_name = Self::quote_ident(&added.name);
+                        let col_type = types::data_type_to_sqlserver(&added.data_type);
 
-                let mut alter_sql = String::with_capacity(128);
-                alter_sql.push_str("ALTER TABLE ");
-                alter_sql.push_str(&quoted);
-                alter_sql.push_str(" ADD ");
-                alter_sql.push_str(&col_name);
-                alter_sql.push(' ');
-                alter_sql.push_str(col_type);
+                        let mut alter_sql = String::with_capacity(128);
+                        alter_sql.push_str("ALTER TABLE ");
+                        alter_sql.push_str(&quoted);
+                        alter_sql.push_str(" ADD ");
+                        alter_sql.push_str(&col_name);
+                        alter_sql.push(' ');
+                        alter_sql.push_str(col_type);
 
-                if added.nullable {
-                    alter_sql.push_str(" NULL");
-                } else {
-                    alter_sql.push_str(" NULL"); // New columns must be nullable on existing tables
+                        if added.nullable {
+                            alter_sql.push_str(" NULL");
+                        } else {
+                            alter_sql.push_str(" NULL"); // New columns must be nullable on existing tables
+                        }
+
+                        client.simple_query(&alter_sql).await.with_context(|| {
+                            format!(
+                                "SqlServerSink: failed to add column {}.{}",
+                                target_schema, added.name
+                            )
+                        })?;
+
+                        info!(
+                            "Schema evolution: added column [{}.{}] {} to {}",
+                            target_schema, added.name, col_type, quoted
+                        );
+                    }
                 }
 
-                client
-                    .simple_query(&alter_sql)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "SqlServerSink: failed to add column {}.{}",
-                            target_schema, added.name
-                        )
-                    })?;
-
-                info!(
-                    "Schema evolution: added column [{}.{}] {} to {}",
-                    target_schema, added.name, col_type, quoted
-                );
-            }
-        }
-
-        // ── Step 5: Group data records by table ──
-        // Only INSERT, UPDATE, DELETE records are data records.
-        let mut data_records: Vec<(&TableRef, &CdcRecord)> = Vec::new();
-        for record in &records {
-            match record {
-                CdcRecord::Insert { table, .. }
-                | CdcRecord::Update { table, .. }
-                | CdcRecord::Delete { table, .. } => {
-                    data_records.push((table, record));
+                // ── Step 5: Group data records by table ──
+                // Only INSERT, UPDATE, DELETE records are data records.
+                let mut data_records: Vec<(&TableRef, &CdcRecord)> = Vec::new();
+                for record in &records {
+                    match record {
+                        CdcRecord::Insert { table, .. }
+                        | CdcRecord::Update { table, .. }
+                        | CdcRecord::Delete { table, .. } => {
+                            data_records.push((table, record));
+                        }
+                        _ => {} // Skip Begin, Commit, Heartbeat, SchemaChange
+                    }
                 }
-                _ => {} // Skip Begin, Commit, Heartbeat, SchemaChange
-            }
-        }
 
-        // Group by table qualified key (owned String keeps group keys alive).
-        let mut by_table: HashMap<String, Vec<&CdcRecord>> = HashMap::new();
-        for (table, record) in &data_records {
-            let src_schema = table.schema.as_deref().unwrap_or("public");
-            let qn = format!("{}.{}", src_schema, table.name);
-            by_table.entry(qn).or_default().push(record);
-        }
-
-        // ── Step 6: Execute MERGE/DELETE per table group ──
-        let mut records_written: usize = 0;
-        let mut bytes_written: u64 = 0;
-
-        for (qn, group) in &by_table {
-            // Extract table ref from the first record in the group
-            let first_table = match group.first() {
-                Some(CdcRecord::Insert { table, .. })
-                | Some(CdcRecord::Update { table, .. })
-                | Some(CdcRecord::Delete { table, .. }) => table,
-                _ => continue,
-            };
-
-            // Look up schema info from the updated schema state.
-            let table_schema = match new_schema_state.get(qn.as_str()) {
-                Some(s) => s,
-                None => {
-                    warn!(
-                        "SqlServerSink: no schema found for {}, skipping group",
-                        qn
-                    );
-                    continue;
+                // Group by table qualified key (owned String keeps group keys alive).
+                let mut by_table: HashMap<String, Vec<&CdcRecord>> = HashMap::new();
+                for (table, record) in &data_records {
+                    let src_schema = table.schema.as_deref().unwrap_or("public");
+                    let qn = format!("{}.{}", src_schema, table.name);
+                    by_table.entry(qn).or_default().push(record);
                 }
-            };
 
-            let pk_cols: Vec<String> = table_schema.primary_keys.clone();
+                // ── Step 6: Execute MERGE/DELETE per table group ──
+                let mut records_written: usize = 0;
+                let mut bytes_written: u64 = 0;
 
-            let quoted_schema = Self::quote_ident(&schema);
-            let quoted_table = Self::quote_ident(&first_table.name);
+                for (qn, group) in &by_table {
+                    // Extract table ref from the first record in the group
+                    let first_table = match group.first() {
+                        Some(CdcRecord::Insert { table, .. })
+                        | Some(CdcRecord::Update { table, .. })
+                        | Some(CdcRecord::Delete { table, .. }) => table,
+                        _ => continue,
+                    };
 
-            for record in group {
-                match record {
-                    CdcRecord::Insert { columns, .. } => {
-                        // Identify unchanged columns (PG TOAST).
-                        let unchanged: Vec<String> = columns
-                            .iter()
-                            .filter(|cv| cv.value.is_unchanged())
-                            .map(|cv| cv.name.clone())
-                            .collect();
+                    // Look up schema info from the updated schema state.
+                    let table_schema = match new_schema_state.get(qn.as_str()) {
+                        Some(s) => s,
+                        None => {
+                            warn!("SqlServerSink: no schema found for {}, skipping group", qn);
+                            continue;
+                        }
+                    };
 
-                        // Collect non-unchanged column values for parameter binding.
-                        let data_cols: Vec<&ColumnValue> = columns
-                            .iter()
-                            .filter(|cv| !cv.value.is_unchanged())
-                            .collect();
+                    let pk_cols: Vec<String> = table_schema.primary_keys.clone();
 
-                        // Build ColumnInfo for non-unchanged columns (same order as data_cols).
-                        let merge_cols: Vec<merge_generator::ColumnInfo> = data_cols
-                            .iter()
-                            .map(|cv| {
-                                let dt = table_schema
-                                    .columns
+                    let quoted_schema = Self::quote_ident(&schema);
+                    let quoted_table = Self::quote_ident(&first_table.name);
+
+                    for record in group {
+                        match record {
+                            CdcRecord::Insert { columns, .. } => {
+                                // Identify unchanged columns (PG TOAST).
+                                let unchanged: Vec<String> = columns
                                     .iter()
-                                    .find(|c| c.name == cv.name)
-                                    .map(|c| c.data_type.clone())
-                                    .unwrap_or(DataType::String);
-                                merge_generator::ColumnInfo {
-                                    name: cv.name.clone(),
-                                    data_type: dt,
-                                }
-                            })
-                            .collect();
+                                    .filter(|cv| cv.value.is_unchanged())
+                                    .map(|cv| cv.name.clone())
+                                    .collect();
 
-                        let pk_for_merge: Vec<String> = pk_cols.clone();
-                        let (sql, _) = merge_generator::generate_merge(
-                            &quoted_table,
-                            &quoted_schema,
-                            &merge_cols,
-                            &pk_for_merge,
-                            &unchanged,
-                        );
-
-                        // Build params from data columns only (unchanged excluded).
-                        let col_types: Vec<DataType> =
-                            merge_cols.iter().map(|ci| ci.data_type.clone()).collect();
-                        let owned_params = build_params(&data_cols, &col_types);
-                        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(|p| p.as_ref()).collect();
-                        let table_name = first_table.name.clone();
-                        let sch = schema.clone();
-
-                        // Log the MERGE SQL and param count for debugging
-                        tracing::debug!(
-                            "SqlServerSink: MERGE SQL ({} params): {}",
-                            param_refs.len(),
-                            sql
-                        );
-
-                        client
-                            .execute(&sql, &param_refs)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "SqlServerSink: MERGE failed for {}.{}",
-                                    sch, table_name
-                                )
-                            })?;
-
-                        // Log MERGE success
-                        tracing::debug!(
-                            "SqlServerSink: MERGE success for {}.{} ({}/{} params)",
-                            sch, table_name,
-                            param_refs.len(),
-                            // param_count from generate_merge — we don't store it
-                            "(from generate_merge)",
-                        );
-
-                        records_written += 1;
-                        for cv in columns {
-                            bytes_written =
-                                bytes_written.saturating_add(value_byte_estimate(&cv.value));
-                        }
-                    }
-                    CdcRecord::Update { new_columns, .. } => {
-                        // Identify unchanged columns (PG TOAST).
-                        let unchanged: Vec<String> = new_columns
-                            .iter()
-                            .filter(|cv| cv.value.is_unchanged())
-                            .map(|cv| cv.name.clone())
-                            .collect();
-
-                        // Collect non-unchanged column values for parameter binding.
-                        let data_cols: Vec<&ColumnValue> = new_columns
-                            .iter()
-                            .filter(|cv| !cv.value.is_unchanged())
-                            .collect();
-
-                        // Build ColumnInfo for non-unchanged columns (same order as data_cols).
-                        let merge_cols: Vec<merge_generator::ColumnInfo> = data_cols
-                            .iter()
-                            .map(|cv| {
-                                let dt = table_schema
-                                    .columns
+                                // Collect non-unchanged column values for parameter binding.
+                                let data_cols: Vec<&ColumnValue> = columns
                                     .iter()
-                                    .find(|c| c.name == cv.name)
-                                    .map(|c| c.data_type.clone())
-                                    .unwrap_or(DataType::String);
-                                merge_generator::ColumnInfo {
-                                    name: cv.name.clone(),
-                                    data_type: dt,
+                                    .filter(|cv| !cv.value.is_unchanged())
+                                    .collect();
+
+                                // Build ColumnInfo for non-unchanged columns (same order as data_cols).
+                                let merge_cols: Vec<merge_generator::ColumnInfo> = data_cols
+                                    .iter()
+                                    .map(|cv| {
+                                        let dt = table_schema
+                                            .columns
+                                            .iter()
+                                            .find(|c| c.name == cv.name)
+                                            .map(|c| c.data_type.clone())
+                                            .unwrap_or(DataType::String);
+                                        merge_generator::ColumnInfo {
+                                            name: cv.name.clone(),
+                                            data_type: dt,
+                                        }
+                                    })
+                                    .collect();
+
+                                let pk_for_merge: Vec<String> = pk_cols.clone();
+                                let (sql, _) = merge_generator::generate_merge(
+                                    &quoted_table,
+                                    &quoted_schema,
+                                    &merge_cols,
+                                    &pk_for_merge,
+                                    &unchanged,
+                                );
+
+                                // Build params from data columns only (unchanged excluded).
+                                let col_types: Vec<DataType> =
+                                    merge_cols.iter().map(|ci| ci.data_type.clone()).collect();
+                                let owned_params = build_params(&data_cols, &col_types);
+                                let param_refs: Vec<&dyn ToSql> =
+                                    owned_params.iter().map(|p| p.as_ref()).collect();
+                                let table_name = first_table.name.clone();
+                                let sch = schema.clone();
+
+                                // Log the MERGE SQL and param count for debugging
+                                tracing::debug!(
+                                    "SqlServerSink: MERGE SQL ({} params): {}",
+                                    param_refs.len(),
+                                    sql
+                                );
+
+                                client
+                                    .execute(&sql, &param_refs)
+                                    .await
+                                    .context("SqlServerSink: MERGE failed")?;
+
+                                // Log MERGE success
+                                tracing::debug!(
+                                    "SqlServerSink: MERGE success for {}.{} ({}/{} params)",
+                                    sch,
+                                    table_name,
+                                    param_refs.len(),
+                                    // param_count from generate_merge — we don't store it
+                                    "(from generate_merge)",
+                                );
+
+                                records_written += 1;
+                                for cv in columns {
+                                    bytes_written = bytes_written
+                                        .saturating_add(value_byte_estimate(&cv.value));
                                 }
-                            })
-                            .collect();
+                            }
+                            CdcRecord::Update { new_columns, .. } => {
+                                // Identify unchanged columns (PG TOAST).
+                                let unchanged: Vec<String> = new_columns
+                                    .iter()
+                                    .filter(|cv| cv.value.is_unchanged())
+                                    .map(|cv| cv.name.clone())
+                                    .collect();
 
-                        let pk_for_merge: Vec<String> = pk_cols.clone();
-                        let (sql, _) = merge_generator::generate_merge(
-                            &quoted_table,
-                            &quoted_schema,
-                            &merge_cols,
-                            &pk_for_merge,
-                            &unchanged,
-                        );
+                                // Collect non-unchanged column values for parameter binding.
+                                let data_cols: Vec<&ColumnValue> = new_columns
+                                    .iter()
+                                    .filter(|cv| !cv.value.is_unchanged())
+                                    .collect();
 
-                        let col_types: Vec<DataType> =
-                            merge_cols.iter().map(|ci| ci.data_type.clone()).collect();
-                        let owned_params = build_params(&data_cols, &col_types);
-                        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(|p| p.as_ref()).collect();
+                                // Build ColumnInfo for non-unchanged columns (same order as data_cols).
+                                let merge_cols: Vec<merge_generator::ColumnInfo> = data_cols
+                                    .iter()
+                                    .map(|cv| {
+                                        let dt = table_schema
+                                            .columns
+                                            .iter()
+                                            .find(|c| c.name == cv.name)
+                                            .map(|c| c.data_type.clone())
+                                            .unwrap_or(DataType::String);
+                                        merge_generator::ColumnInfo {
+                                            name: cv.name.clone(),
+                                            data_type: dt,
+                                        }
+                                    })
+                                    .collect();
 
-                        let table_name = first_table.name.clone();
-                        let sch = schema.clone();
+                                let pk_for_merge: Vec<String> = pk_cols.clone();
+                                let (sql, _) = merge_generator::generate_merge(
+                                    &quoted_table,
+                                    &quoted_schema,
+                                    &merge_cols,
+                                    &pk_for_merge,
+                                    &unchanged,
+                                );
 
-                        // Log the MERGE SQL and param count for debugging
-                        tracing::debug!(
-                            "SqlServerSink: MERGE SQL ({} params): {}",
-                            param_refs.len(),
-                            sql
-                        );
+                                let col_types: Vec<DataType> =
+                                    merge_cols.iter().map(|ci| ci.data_type.clone()).collect();
+                                let owned_params = build_params(&data_cols, &col_types);
+                                let param_refs: Vec<&dyn ToSql> =
+                                    owned_params.iter().map(|p| p.as_ref()).collect();
 
-                        client
-                            .execute(&sql, &param_refs)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "SqlServerSink: MERGE failed for {}.{}",
-                                    sch, table_name
-                                )
-                            })?;
+                                let table_name = first_table.name.clone();
+                                let sch = schema.clone();
 
-                        // Log MERGE success
-                        tracing::debug!(
-                            "SqlServerSink: MERGE success for {}.{} ({}/{} params)",
-                            sch, table_name,
-                            param_refs.len(),
-                            // param_count from generate_merge — we don't store it
-                            "(from generate_merge)",
-                        );
+                                // Log the MERGE SQL and param count for debugging
+                                tracing::debug!(
+                                    "SqlServerSink: MERGE SQL ({} params): {}",
+                                    param_refs.len(),
+                                    sql
+                                );
 
-                        records_written += 1;
-                        for cv in new_columns {
-                            bytes_written =
-                                bytes_written.saturating_add(value_byte_estimate(&cv.value));
+                                client
+                                    .execute(&sql, &param_refs)
+                                    .await
+                                    .context("SqlServerSink: MERGE failed")?;
+
+                                // Log MERGE success
+                                tracing::debug!(
+                                    "SqlServerSink: MERGE success for {}.{} ({}/{} params)",
+                                    sch,
+                                    table_name,
+                                    param_refs.len(),
+                                    // param_count from generate_merge — we don't store it
+                                    "(from generate_merge)",
+                                );
+
+                                records_written += 1;
+                                for cv in new_columns {
+                                    bytes_written = bytes_written
+                                        .saturating_add(value_byte_estimate(&cv.value));
+                                }
+                            }
+                            CdcRecord::Delete { columns, .. } => {
+                                let pk_cols_ref: Vec<String> = pk_cols.clone();
+                                let sql = merge_generator::generate_delete(
+                                    &quoted_table,
+                                    &quoted_schema,
+                                    &pk_cols_ref,
+                                );
+
+                                // Build params from PK columns only.
+                                let owned_params =
+                                    build_params_for_columns(columns, &pk_cols, table_schema);
+                                let param_refs: Vec<&dyn ToSql> =
+                                    owned_params.iter().map(|p| p.as_ref()).collect();
+
+                                client
+                                    .execute(&sql, &param_refs)
+                                    .await
+                                    .context("SqlServerSink: DELETE failed")?;
+
+                                records_written += 1;
+                                for cv in columns {
+                                    bytes_written = bytes_written
+                                        .saturating_add(value_byte_estimate(&cv.value));
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    CdcRecord::Delete { columns, .. } => {
-                        let pk_cols_ref: Vec<String> = pk_cols.clone();
-                        let sql = merge_generator::generate_delete(
-                            &quoted_table,
-                            &quoted_schema,
-                            &pk_cols_ref,
-                        );
-
-                        // Build params from PK columns only.
-                        let owned_params = build_params_for_columns(columns, &pk_cols, table_schema);
-                        let param_refs: Vec<&dyn ToSql> = owned_params.iter().map(|p| p.as_ref()).collect();
-
-                        let table_name = first_table.name.clone();
-                        let sch = schema.clone();
-
-                        client
-                            .execute(&sql, &param_refs)
-                            .await
-                            .with_context(|| {
-                                format!(
-                                    "SqlServerSink: DELETE failed for {}.{}",
-                                    sch, table_name
-                                )
-                            })?;
-
-                        records_written += 1;
-                        for cv in columns {
-                            bytes_written =
-                                bytes_written.saturating_add(value_byte_estimate(&cv.value));
-                        }
-                    }
-                    _ => {}
                 }
-            }
-        }
 
-        // ── Step 7: Commit transaction ──
-        client
-            .simple_query("COMMIT")
+                Ok((records_written, bytes_written))
+            }
             .await
-            .context("SqlServerSink: failed to commit transaction")?;
+        };
+
+        // ── Step 7: Commit or rollback based on transaction result ──
+        let (records_written, bytes_written) = match tx_result {
+            Ok(r) => {
+                client
+                    .simple_query("COMMIT")
+                    .await
+                    .context("SqlServerSink: failed to commit transaction")?;
+                r
+            }
+            Err(e) => {
+                // Best-effort rollback — ignore rollback error since the
+                // original error is what matters.
+                let _ = client.simple_query("ROLLBACK").await;
+                return Err(e);
+            }
+        };
 
         // ── Step 8: Update schema state ──
         self.schema_state = new_schema_state;

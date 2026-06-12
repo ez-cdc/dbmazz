@@ -15,6 +15,7 @@ use crate::core::traits::SourceColumn;
 /// Dispatch primary on `DataType` (source-agnostic). SQL Server has no
 /// equivalent of PG OID refinement, so this is a pure delegation to
 /// `data_type_to_sqlserver`.
+#[allow(dead_code)]
 pub fn column_type(col: &SourceColumn) -> &'static str {
     data_type_to_sqlserver(&col.data_type)
 }
@@ -33,7 +34,10 @@ pub fn data_type_to_sqlserver(dt: &DataType) -> &'static str {
         DataType::UInt64 => "NUMERIC(20, 0)",
         DataType::Float32 => "REAL",
         DataType::Float64 => "FLOAT(53)",
-        DataType::Decimal { precision: _, scale: _ } => {
+        DataType::Decimal {
+            precision: _,
+            scale: _,
+        } => {
             // Return default NUMERIC(38,0); the caller is expected to
             // format the full NUMERIC(p,s) string when precision/scale
             // are known at DDL generation time.
@@ -69,6 +73,7 @@ pub fn data_type_to_sqlserver(dt: &DataType) -> &'static str {
 /// The placeholder does not vary by Value variant — all values use the
 /// same `@P` convention.  The caller is responsible for numbering and
 /// binding the actual value through tiberius.
+#[allow(dead_code)]
 pub fn value_to_param(_value: &Value) -> &'static str {
     "@P"
 }

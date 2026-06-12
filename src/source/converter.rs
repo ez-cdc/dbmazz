@@ -158,13 +158,9 @@ fn convert_pg_value(text: &str, pg_type_id: u32) -> Value {
         // NUMERIC/DECIMAL - keep as string for precision
         1700 => Value::Decimal(text.to_string()),
         // Timestamp (no TZ) - parse to epoch microseconds
-        1114 => {
-            Value::Timestamp(parse_pg_timestamp_to_epoch_micros(text))
-        }
+        1114 => Value::Timestamp(parse_pg_timestamp_to_epoch_micros(text)),
         // TimestampTZ - normalize to UTC, then parse to epoch microseconds
-        1184 => {
-            Value::Timestamp(parse_pg_timestamptz_to_epoch_micros(text))
-        }
+        1184 => Value::Timestamp(parse_pg_timestamptz_to_epoch_micros(text)),
         // JSON/JSONB
         114 | 3802 => Value::Json(text.to_string()),
         // UUID

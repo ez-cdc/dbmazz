@@ -142,7 +142,10 @@ pub async fn create_target_table(
                       WHERE s.name = @P1 AND t.name = @P2";
 
     let stream = client
-        .query(check_sql, &[&schema as &dyn ToSql, &source.name as &dyn ToSql])
+        .query(
+            check_sql,
+            &[&schema as &dyn ToSql, &source.name as &dyn ToSql],
+        )
         .await
         .context("Failed to check table existence")?;
     let rows = stream.into_first_result().await?;
@@ -155,7 +158,7 @@ pub async fn create_target_table(
             s.push_str(schema);
             s.push_str("].[");
             s.push_str(&source.name);
-            s.push_str("]");
+            s.push(']');
             s
         };
 
@@ -177,15 +180,12 @@ pub async fn create_target_table(
             let mut alter = String::from("ALTER TABLE ");
             alter.push_str(&full_name);
             alter.push_str(" ADD [_dbmazz_synced_at] DATETIME2 NULL");
-            client
-                .execute(alter.as_str(), &[])
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to add _dbmazz_synced_at to [{}.{}]",
-                        schema, source.name
-                    )
-                })?;
+            client.execute(alter.as_str(), &[]).await.with_context(|| {
+                format!(
+                    "Failed to add _dbmazz_synced_at to [{}.{}]",
+                    schema, source.name
+                )
+            })?;
         }
 
         let stream = client
@@ -203,15 +203,12 @@ pub async fn create_target_table(
             let mut alter = String::from("ALTER TABLE ");
             alter.push_str(&full_name);
             alter.push_str(" ADD [_dbmazz_op_type] SMALLINT NULL");
-            client
-                .execute(alter.as_str(), &[])
-                .await
-                .with_context(|| {
-                    format!(
-                        "Failed to add _dbmazz_op_type to [{}.{}]",
-                        schema, source.name
-                    )
-                })?;
+            client.execute(alter.as_str(), &[]).await.with_context(|| {
+                format!(
+                    "Failed to add _dbmazz_op_type to [{}.{}]",
+                    schema, source.name
+                )
+            })?;
         }
 
         info!(
@@ -227,7 +224,10 @@ pub async fn create_target_table(
     for col in &source.columns {
         let sqlserver_type = types::data_type_to_sqlserver(&col.data_type);
         let nullable = if col.nullable { "NULL" } else { "NOT NULL" };
-        col_defs.push(format!("    [{}] {} {}", col.name, sqlserver_type, nullable));
+        col_defs.push(format!(
+            "    [{}] {} {}",
+            col.name, sqlserver_type, nullable
+        ));
     }
 
     // Add audit columns
@@ -259,12 +259,10 @@ pub async fn create_target_table(
     ddl.push_str(&pk_clause);
     ddl.push_str("\n)");
 
-    client.execute(ddl.as_str(), &[]).await.with_context(|| {
-        format!(
-            "Failed to create target table [{}.{}]",
-            schema, source.name
-        )
-    })?;
+    client
+        .execute(ddl.as_str(), &[])
+        .await
+        .with_context(|| format!("Failed to create target table [{}.{}]", schema, source.name))?;
 
     info!(
         "  [OK] Created table [{}].[{}] ({} columns, {} PKs)",

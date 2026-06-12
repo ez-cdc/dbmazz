@@ -164,11 +164,7 @@ pub fn generate_merge(
 /// * `table` — target table name (already quoted, e.g. `[orders]`)
 /// * `schema` — target schema (already quoted, e.g. `[dbo]`)
 /// * `pk_cols` — primary key column names (unquoted)
-pub fn generate_delete(
-    table: &str,
-    schema: &str,
-    pk_cols: &[String],
-) -> String {
+pub fn generate_delete(table: &str, schema: &str, pk_cols: &[String]) -> String {
     let mut sql = String::with_capacity(256);
 
     sql.push_str("DELETE FROM ");
@@ -178,14 +174,12 @@ pub fn generate_delete(
     sql.push_str(" WHERE ");
 
     let mut conditions = Vec::with_capacity(pk_cols.len());
-    let mut param_idx: usize = 1;
-    for pk in pk_cols {
+    for (param_idx, pk) in (1..).zip(pk_cols.iter()) {
         let pk_q = quote_identifier(pk);
         let mut cond = String::new();
         cond.push_str(&pk_q);
         cond.push_str(" = @P");
         cond.push_str(&param_idx.to_string());
-        param_idx += 1;
         conditions.push(cond);
     }
     sql.push_str(&conditions.join(" AND "));
@@ -230,9 +224,7 @@ mod tests {
 
         assert_eq!(param_count, 3, "Expected 3 params, got {}", param_count);
         assert!(sql.contains("MERGE INTO [dbo].[orders] AS target"));
-        assert!(sql.contains(
-            "USING (VALUES (@P1, @P2, @P3)) AS source ([id], [name], [amount])"
-        ));
+        assert!(sql.contains("USING (VALUES (@P1, @P2, @P3)) AS source ([id], [name], [amount])"));
         assert!(sql.contains("ON target.[id] = source.[id]"));
         assert!(sql.contains("WHEN MATCHED THEN"));
         assert!(sql.contains("UPDATE SET"));
@@ -250,8 +242,13 @@ mod tests {
 
     #[test]
     fn test_generate_merge_with_unchanged() {
-        let (sql, _) =
-            generate_merge("[orders]", "[dbo]", &test_columns(), &test_pk_cols(), &["amount".to_string()]);
+        let (sql, _) = generate_merge(
+            "[orders]",
+            "[dbo]",
+            &test_columns(),
+            &test_pk_cols(),
+            &["amount".to_string()],
+        );
 
         // name is still updated
         assert!(sql.contains("[name] = source.[name]"));
@@ -276,8 +273,13 @@ mod tests {
                 data_type: DataType::Text,
             },
         ];
-        let (sql, _) =
-            generate_merge("[blobs]", "[dbo]", &cols, &test_pk_cols(), &["payload".to_string()]);
+        let (sql, _) = generate_merge(
+            "[blobs]",
+            "[dbo]",
+            &cols,
+            &test_pk_cols(),
+            &["payload".to_string()],
+        );
 
         // Only PK exists in non-unchanged non-PK set — the SET clause should
         // still be valid (even if empty, the UPDATE SET header is present).
@@ -303,8 +305,7 @@ mod tests {
         ];
         let pks = vec!["order_id".to_string(), "item_id".to_string()];
 
-        let (sql, param_count) =
-            generate_merge("[order_items]", "[dbo]", &cols, &pks, &[]);
+        let (sql, param_count) = generate_merge("[order_items]", "[dbo]", &cols, &pks, &[]);
 
         assert_eq!(param_count, 3);
         assert!(sql.contains(

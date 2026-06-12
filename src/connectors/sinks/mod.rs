@@ -29,10 +29,10 @@ pub(crate) mod schema_evolution;
 
 #[cfg(feature = "sink-postgres")]
 pub mod postgres;
-#[cfg(feature = "sink-sqlserver")]
-pub mod sqlserver;
 #[cfg(feature = "sink-snowflake")]
 pub mod snowflake;
+#[cfg(feature = "sink-sqlserver")]
+pub mod sqlserver;
 #[cfg(feature = "sink-starrocks")]
 pub mod starrocks;
 
@@ -40,10 +40,10 @@ use anyhow::Result;
 
 #[cfg(feature = "sink-postgres")]
 use self::postgres::PostgresSink;
-#[cfg(feature = "sink-sqlserver")]
-use self::sqlserver::SqlServerSink;
 #[cfg(feature = "sink-snowflake")]
 use self::snowflake::SnowflakeSink;
+#[cfg(feature = "sink-sqlserver")]
+use self::sqlserver::SqlServerSink;
 #[cfg(feature = "sink-starrocks")]
 use self::starrocks::StarRocksSink;
 use crate::config::{SinkConfig, SinkType};
