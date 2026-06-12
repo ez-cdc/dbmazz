@@ -56,10 +56,9 @@ use self::types::TypeMapper;
 const DEFAULT_FLUSH_THRESHOLD_RECORDS: usize = 1;
 
 /// Default flush interval in milliseconds.
-/// Set to 0 so the engine falls back to its default (5 s), which is
-/// aggressive enough for development / testing yet configurable for
-/// production via the job config.
-const DEFAULT_FLUSH_INTERVAL_MS: u64 = 0;
+/// Matches the Snowflake sink's interval (30 s). This is aggressive enough
+/// for development/testing yet configurable for production via the job config.
+const DEFAULT_FLUSH_INTERVAL_MS: u64 = 30_000;
 
 // ---------------------------------------------------------------------------
 // Schema state
@@ -874,6 +873,7 @@ mod tests {
     use crate::config::{SinkConfig, SinkSpecificConfig, SinkType};
     use crate::core::position::SourcePosition;
     use crate::core::record::{ColumnValue, TableRef, Value};
+    use serial_test::serial;
 
     fn setup_iceberg_env() {
         std::env::set_var("SINK_WAREHOUSE", "file:///tmp/warehouse");
@@ -898,6 +898,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(iceberg)]
     fn test_sink_creation() {
         setup_iceberg_env();
         let config = test_config();
@@ -907,6 +908,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(iceberg)]
     fn test_capabilities() {
         setup_iceberg_env();
         let config = test_config();
@@ -930,6 +932,7 @@ mod tests {
     }
 
     #[test]
+    #[serial(iceberg)]
     fn test_name() {
         setup_iceberg_env();
         let config = test_config();
@@ -958,7 +961,7 @@ mod tests {
                 ColumnValue::new("id".to_string(), Value::Int64(1)),
                 ColumnValue::new("name".to_string(), Value::String("Alice".to_string())),
             ],
-            position: SourcePosition::default(),
+            position: SourcePosition::offset(0),
         }];
 
         let result = ApacheIcebergSink::records_to_parquet_bytes(&records, &type_mapper);
@@ -967,8 +970,9 @@ mod tests {
         assert!(!bytes.is_empty(), "Parquet output should not be empty");
 
         // Verify it's valid Parquet by trying to read it back.
+        use bytes::Bytes;
         use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes.as_slice());
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(&bytes));
         assert!(reader.is_ok(), "Should create Parquet reader");
     }
 }
