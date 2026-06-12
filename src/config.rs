@@ -136,6 +136,7 @@ pub enum SinkType {
     StarRocks,
     Postgres,
     Snowflake,
+    SqlServer,
 }
 
 impl SinkType {
@@ -144,8 +145,9 @@ impl SinkType {
             "starrocks" => Ok(SinkType::StarRocks),
             "postgres" | "postgresql" => Ok(SinkType::Postgres),
             "snowflake" => Ok(SinkType::Snowflake),
+            "sqlserver" | "sql_server" | "mssql" => Ok(SinkType::SqlServer),
             other => anyhow::bail!(
-                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake",
+                "Unsupported sink type: '{}'. Supported: starrocks, postgres, snowflake, sqlserver",
                 other
             ),
         }
@@ -158,6 +160,7 @@ impl std::fmt::Display for SinkType {
             SinkType::StarRocks => write!(f, "starrocks"),
             SinkType::Postgres => write!(f, "postgres"),
             SinkType::Snowflake => write!(f, "snowflake"),
+            SinkType::SqlServer => write!(f, "sqlserver"),
         }
     }
 }
@@ -168,6 +171,15 @@ pub struct PostgresSinkConfig {
     /// Target schema (default: "public")
     pub schema: String,
     /// Job name for raw table and metadata tracking (defaults to slot_name)
+    pub job_name: String,
+}
+
+/// SQL Server target-specific sink configuration
+#[derive(Debug, Clone)]
+pub struct SqlServerSinkConfig {
+    /// Target schema (default: "dbo")
+    pub schema: String,
+    /// Job name for metadata tracking (defaults to slot_name)
     pub job_name: String,
 }
 
@@ -189,6 +201,7 @@ pub enum SinkSpecificConfig {
     StarRocks,
     Postgres(PostgresSinkConfig),
     Snowflake,
+    SqlServer(SqlServerSinkConfig),
 }
 
 impl std::fmt::Debug for SinkConfig {
@@ -211,6 +224,14 @@ impl SinkConfig {
         match &self.specific {
             SinkSpecificConfig::Postgres(pg) => Ok(pg),
             _ => anyhow::bail!("PostgresSinkConfig is required for postgres sink"),
+        }
+    }
+
+    /// Returns the SQL Server-specific config, or an error if this is not a SqlServer sink.
+    pub fn sqlserver_config(&self) -> Result<&SqlServerSinkConfig> {
+        match &self.specific {
+            SinkSpecificConfig::SqlServer(ss) => Ok(ss),
+            _ => anyhow::bail!("SqlServerSinkConfig is required for sqlserver sink"),
         }
     }
 }
@@ -337,13 +358,21 @@ impl Config {
         let sink_type = SinkType::from_str(&sink_type_str)?;
 
         // SINK_URL is required for StarRocks/Postgres, but optional for Snowflake
-        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT).
+        // (auto-derived from SINK_SNOWFLAKE_ACCOUNT). SqlServer uses SINK_HOST.
         let sink_url = match sink_type {
             SinkType::Snowflake => optional_env("SINK_URL", ""),
+            SinkType::SqlServer => {
+                // SqlServer CLI writes SINK_HOST, not SINK_URL
+                required_env("SINK_HOST")?
+            }
             _ => required_env("SINK_URL")?,
         };
 
-        let sink_port: u16 = optional_env("SINK_PORT", "9030").parse().unwrap_or(9030);
+        let sink_port: u16 = match sink_type {
+            SinkType::SqlServer => optional_env("SINK_PORT", "1433").parse().unwrap_or(1433),
+            SinkType::Snowflake => optional_env("SINK_PORT", "443").parse().unwrap_or(443),
+            _ => optional_env("SINK_PORT", "9030").parse().unwrap_or(9030),
+        };
 
         let sink_database = required_env("SINK_DATABASE")?;
 
@@ -359,6 +388,10 @@ impl Config {
                 job_name: slot_name.clone(),
             }),
             SinkType::Snowflake => SinkSpecificConfig::Snowflake,
+            SinkType::SqlServer => SinkSpecificConfig::SqlServer(SqlServerSinkConfig {
+                schema: optional_env("SINK_SCHEMA", "dbo"),
+                job_name: slot_name.clone(),
+            }),
         };
 
         let sink = SinkConfig {
@@ -468,6 +501,9 @@ impl Config {
             }
             SinkType::Snowflake => {
                 info!("Sink: Snowflake (db: {})", self.sink.database);
+            }
+            SinkType::SqlServer => {
+                info!("Sink: SQL Server (db: {})", self.sink.database);
             }
         }
 

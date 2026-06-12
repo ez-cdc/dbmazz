@@ -10,7 +10,7 @@
 
 **Real-time PostgreSQL CDC in ~11 MB of RAM. One binary. No Kafka.**
 
-A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, or another PostgreSQL with sub-second replication lag — **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
+A single Rust daemon that streams PostgreSQL changes to StarRocks, Snowflake, SQL Server, or another PostgreSQL with sub-second replication lag — **23–360× lighter** than [Debezium standard deployments][deb-faq] and **727× lighter** than [Airbyte's minimum recommendation][air-deploy]. ([How we measured ↓](#-performance))
 
 Built and maintained by **[EZ-CDC](https://ez-cdc.com)**.
 
@@ -122,6 +122,7 @@ Full Docker reference (env vars, healthcheck, persisting state, build-from-sourc
 | PostgreSQL 12+ | **StarRocks 3.2+** | ✅ Stable | JSON Stream Load, partial-update for TOAST columns, audit columns auto-managed, schema evolution requires per-table `fast_schema_evolution=true` |
 | PostgreSQL 12+ | **PostgreSQL 15+** | ✅ Stable | Binary `COPY` → raw table → `MERGE` normalizer; supports hard delete |
 | PostgreSQL 12+ | **Snowflake** | ✅ Stable | Parquet → PUT (stage) → `COPY INTO` → background `MERGE`; JWT key-pair auth supported; requires `ALTER TABLE` privilege on target schema |
+| PostgreSQL 12+ | **SQL Server 2017+** (`sql_server`) | ✅ Stable | T-SQL bulk insert with batching via `INSERT` + `MERGE` normalizer; schema evolution via dynamic DDL; TOAST-like unchanged values detected and excluded from MERGE |
 | PostgreSQL 12+ | S3 / Iceberg | 🚧 Roadmap | Tracked in [issues](https://github.com/ez-cdc/dbmazz/issues) |
 | MySQL 5.7+ / 8.0+ | All sinks | ✅ Stable | Binlog-based with GTID-aware checkpointing, BIGINT UNSIGNED, microsecond DATETIME, non-integer PK support, cursor-based snapshot chunker. See [`docs/mysql-source.md`](docs/mysql-source.md). |
 
@@ -137,7 +138,7 @@ PostgreSQL (source)               dbmazz                          Sink (target)
 │  WAL         │   logical     │ WAL Handler        │          │ StarRocks    │
 │  (INSERT,    │   replication │   │                │          │ PostgreSQL   │
 │   UPDATE,    │ ────────────▶ │   ▼                │          │ Snowflake    │
-│   DELETE)    │   (pgoutput)  │ source/converter   │          │              │
+│   DELETE)    │   (pgoutput)  │ source/converter   │          │ SQL Server   │
 │              │               │   │                │          │              │
 │              │               │   ▼                │          │              │
 │              │               │ Pipeline           │  write   │              │
