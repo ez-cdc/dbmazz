@@ -23,8 +23,8 @@ every option documented inline. The default location is
 
 | Variable | Default | Description |
 |---|---|---|
-| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, or `snowflake`. |
-| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). |
+| `SINK_TYPE` | `starrocks` | Sink connector type: `starrocks`, `postgres`, `snowflake`, or `sql_server`. |
+| `SINK_URL` | — | Sink connection URL. For StarRocks: `http://host:8030` (FE HTTP). For PostgreSQL: `postgres://...`. For Snowflake: ignored (use `SINK_SNOWFLAKE_ACCOUNT`). For SQL Server: `sqlserver://host:1433;database=...` or `Server=host,1433;Database=...`. |
 | `SINK_PORT` | `9030` | Additional port when needed (e.g., StarRocks MySQL protocol port for DDL). |
 | `SINK_DATABASE` | — (required) | Target database name. |
 | `SINK_SCHEMA` | `public` | Target schema (PostgreSQL) or `PUBLIC` (Snowflake). StarRocks does not use this. |
@@ -43,6 +43,15 @@ every option documented inline. The default location is
 | `SINK_SNOWFLAKE_MERGE_INTERVAL_MS` | `30000` | Normalizer MERGE polling interval in ms. |
 | `SINK_SNOWFLAKE_FLUSH_FILES` | `20` | Trigger `COPY INTO` after accumulating this many staged Parquet files. For e2e testing, set to `1` for immediate flush. |
 | `SINK_SNOWFLAKE_FLUSH_BYTES` | `104857600` | Trigger `COPY INTO` after accumulating this many bytes (default 100 MB). Whichever threshold (files or bytes) is reached first wins. |
+
+## Sink (SQL Server-specific)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SINK_SQL_SERVER_TRUST_CERT` | `true` | Trust the server certificate without validation (useful for self-signed certs in dev). Set to `false` in production with a properly signed CA. |
+| `SINK_SQL_SERVER_ENCRYPT` | `true` | Require encryption for the connection (TLS). |
+| `SINK_SQL_SERVER_MERGE_INTERVAL_MS` | `30000` | Normalizer MERGE polling interval in ms. |
+| `SINK_SQL_SERVER_BATCH_SIZE` | `1000` | Number of rows per batch INSERT to the raw table. |
 
 ## Pipeline / batching
 
@@ -97,6 +106,14 @@ loud with an actionable error message if they are missing.
 | PostgreSQL 15+ | dbmazz uses `MERGE` (added in PG 15) | Upgrade |
 | `CREATE` privilege on target database | dbmazz creates `_dbmazz` schema, raw table, metadata, schema-tracking, and target tables | `GRANT CREATE ON DATABASE <db> TO <role>` |
 | (Existing PG sink behavior) target tables created by dbmazz | The PG sink **does** create target tables if they don't exist (legacy behavior; not symmetric with SR/SF) | No action needed |
+
+### SQL Server
+
+| Requirement | Why | How to satisfy |
+|---|---|---|
+| SQL Server 2017 or later | dbmazz uses `MERGE` (available since SQL Server 2008) and `ROW_NUMBER` for dedup; 2017+ is tested | Upgrade or use SQL Server 2017+ |
+| `CREATE TABLE` permission on target database | dbmazz creates `_dbmazz` schema, raw table, metadata, and target tables | `GRANT CREATE TABLE TO <user>` |
+| Target tables created by the operator (recommended) | dbmazz can create tables automatically, but operator-created tables give you control over indexes, partitioning, and filegroups | `CREATE TABLE ...` ahead of time |
 
 ## Observability
 

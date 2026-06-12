@@ -10,7 +10,7 @@ PostgreSQL (source)             dbmazz                          Sink (target)
 │ WAL          │   logical   │ WAL Handler        │          │ StarRocks    │
 │ (INSERT,     │  replication│   │                │          │ PostgreSQL   │
 │  UPDATE,     │ ──────────▶ │   ▼                │          │ Snowflake    │
-│  DELETE)     │  (pgoutput) │ source/converter   │          │ (+ future)   │
+│  DELETE)     │  (pgoutput) │ source/converter   │          │ SQL Server   │
 │              │             │   │                │          │              │
 │              │             │   ▼                │          │              │
 │              │             │ Pipeline           │  write   │              │
@@ -21,6 +21,18 @@ PostgreSQL (source)             dbmazz                          Sink (target)
 └──────────────┘             └────────────────────┘          └──────────────┘
                                    ~5 MB RAM
                                    <1s latency
+```
+
+### Sink connector modules
+
+Each sink is implemented as a submodule under `src/connectors/sinks/`:
+
+| Sink | Module | Feature flag | Type key |
+|---|---|---|---|
+| StarRocks | `starrocks` | (default) | `starrocks` |
+| PostgreSQL | `postgres` | `sink-postgres` | `postgres` |
+| Snowflake | `snowflake` | `sink-snowflake` | `snowflake` |
+| SQL Server | `sqlserver` | `sink-sqlserver` | `sql_server` |
 ```
 
 ## Data Flow — Step by Step
@@ -200,6 +212,10 @@ src/
 │           ├── merge_generator.rs   MERGE SQL with VARIANT extraction + TOAST
 │           ├── normalizer.rs        Async MERGE loop (raw table → target)
 │           └── types.rs             PG → Snowflake type mapping
+│       └── sqlserver/               SQL Server sink
+│           ├── mod.rs               SqlServerSink (batch INSERT → raw table → MERGE)
+│           ├── config.rs            SqlServerSinkConfig
+│           └── setup.rs             DDL: schema, raw table, target tables
 ├── control/                         HTTP control plane (axum)
 │   ├── mod.rs                       Router + server startup
 │   ├── state.rs                     SharedState (metrics, dedup, control)

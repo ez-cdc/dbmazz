@@ -4,6 +4,14 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **SQL Server sink (GA).** New sink connector that streams PostgreSQL changes to
+  Microsoft SQL Server 2017+. Uses batch INSERT to a raw staging table followed by
+  an async MERGE normalizer; supports hard deletes, schema evolution via dynamic
+  DDL, and TOAST-like unchanged value detection. Configurable via `SINK_TYPE=sql_server`
+  and `SINK_SQL_SERVER_*` environment variables.
+
 ## [2.5.0] - 2026-05-16
 
 ### Changed

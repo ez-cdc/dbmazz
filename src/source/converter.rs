@@ -11,7 +11,8 @@ use crate::core::position::SourcePosition;
 use crate::core::record::{CdcRecord, ColumnDef, ColumnValue, DataType, TableRef, Value};
 use crate::pipeline::schema_cache::{SchemaCache, TableSchema};
 use crate::source::parser::{CdcMessage, TupleData};
-use crate::utils::{normalize_timestamptz, parse_pg_array, strip_money_symbol};
+use crate::utils::{parse_pg_array, strip_money_symbol};
+use chrono::{DateTime, NaiveDateTime};
 
 /// Convert a CdcMessage (pgoutput) to a CdcRecord (generic).
 /// Returns None for messages that don't produce records (Unknown, LogicalMessage).
@@ -156,10 +157,14 @@ fn convert_pg_value(text: &str, pg_type_id: u32) -> Value {
         790 => Value::Decimal(strip_money_symbol(text)),
         // NUMERIC/DECIMAL - keep as string for precision
         1700 => Value::Decimal(text.to_string()),
-        // Timestamp (no TZ) - keep as-is
-        1114 => Value::String(text.to_string()),
-        // TimestampTZ - normalize to UTC
-        1184 => Value::String(normalize_timestamptz(text)),
+        // Timestamp (no TZ) - parse to epoch microseconds
+        1114 => {
+            Value::Timestamp(parse_pg_timestamp_to_epoch_micros(text))
+        }
+        // TimestampTZ - normalize to UTC, then parse to epoch microseconds
+        1184 => {
+            Value::Timestamp(parse_pg_timestamptz_to_epoch_micros(text))
+        }
         // JSON/JSONB
         114 | 3802 => Value::Json(text.to_string()),
         // UUID
@@ -204,6 +209,63 @@ pub fn pg_type_to_data_type(pg_type_id: u32) -> DataType {
         17 => DataType::Bytes,
         _ => DataType::String,
     }
+}
+
+/// Parse a PostgreSQL timestamp without timezone (YYYY-MM-DD HH:MM:SS.ffffff)
+/// to epoch microseconds.
+///
+/// PG timestamps without timezone are interpreted in the session timezone
+/// (typically UTC in a replicated context). We treat them as UTC.
+fn parse_pg_timestamp_to_epoch_micros(text: &str) -> i64 {
+    // Try with fractional seconds first, then without.
+    let dt = NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f")
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").ok());
+    match dt {
+        Some(ndt) => ndt.and_utc().timestamp_micros(),
+        None => 0,
+    }
+}
+
+/// Parse a PostgreSQL timestamptz (YYYY-MM-DD HH:MM:SS.ffffff±HH:MM or ±HH)
+/// to epoch microseconds (UTC).
+///
+/// PG sends timestamptz with a timezone offset. We parse it, convert to UTC,
+/// and return epoch microseconds.
+fn parse_pg_timestamptz_to_epoch_micros(text: &str) -> i64 {
+    // Try with full timezone offset first (±HH:MM).
+    let dt = DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%.f%:z")
+        .or_else(|_| DateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S%:z"))
+        .or_else(|_| {
+            // Try short offset like +05 (no colon)
+            let expanded = expand_short_offset(text);
+            DateTime::parse_from_str(&expanded, "%Y-%m-%d %H:%M:%S%.f%:z")
+                .or_else(|_| DateTime::parse_from_str(&expanded, "%Y-%m-%d %H:%M:%S%:z"))
+        });
+    match dt {
+        Ok(dt) => dt.timestamp_micros(),
+        Err(_) => {
+            // Fallback: try as UTC (no TZ info)
+            parse_pg_timestamp_to_epoch_micros(text)
+        }
+    }
+}
+
+/// Expand a short timezone offset (+05 → +05:00) for chrono parsing.
+fn expand_short_offset(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    if len >= 3 {
+        let sign_pos = len - 3;
+        let sign = bytes[sign_pos];
+        if (sign == b'+' || sign == b'-')
+            && bytes[sign_pos + 1].is_ascii_digit()
+            && bytes[sign_pos + 2].is_ascii_digit()
+        {
+            return format!("{}:00", text);
+        }
+    }
+    text.to_string()
 }
 
 #[cfg(test)]

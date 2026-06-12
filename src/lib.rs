@@ -4,7 +4,7 @@
 //! dbmazz — Change Data Capture daemon.
 //!
 //! Reads database write-ahead logs (WAL) and streams changes to supported
-//! sinks (StarRocks, PostgreSQL, Snowflake).
+//! sinks (StarRocks, PostgreSQL, Snowflake, SQL Server).
 //!
 //! This library crate is the core of dbmazz. The binary entrypoint
 //! in `main.rs` parses configuration and starts the engine.
