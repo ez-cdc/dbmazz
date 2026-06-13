@@ -4,6 +4,10 @@ All notable changes to dbmazz will be documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Apache Iceberg sink** (`sink-apache_iceberg`). Writes CDC data as Parquet files and commits new snapshots via the REST catalog protocol. Supports schema evolution (ADD COLUMN) and soft deletes via audit columns. Append-only; CoW mode planned. See `connectors/sinks/apache_iceberg/README.md`.
+
 ## [2.5.0] - 2026-05-16
 
 ### Changed

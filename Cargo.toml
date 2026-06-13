@@ -1,6 +1,6 @@
 [package]
 name = "dbmazz"
-version = "2.5.0"
+version = "2.6.0"
 edition = "2021"
 license = "Elastic-2.0"
 # Minimum Supported Rust Version.
@@ -17,6 +17,10 @@ sink-snowflake = [
     "dep:reqwest", "dep:arrow", "dep:parquet",
     "dep:jsonwebtoken", "dep:rsa", "dep:pem", "dep:sha2",
     "dep:aws-sigv4", "dep:aws-credential-types", "dep:uuid",
+]
+sink-apache_iceberg = [
+    "dep:reqwest", "dep:arrow", "dep:parquet",
+    "dep:uuid", "dep:object_store",
 ]
 
 [dependencies]
@@ -71,6 +75,7 @@ sha2 = { version = "0.10", optional = true }
 aws-sigv4 = { version = "1.2", optional = true }
 aws-credential-types = { version = "1.2", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+object_store = { version = "0.11", default-features = false, features = ["aws", "gcp", "azure"], optional = true }
 
 # --- Optional: MySQL source ---
 mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }
@@ -78,6 +83,7 @@ mysql_common = { version = "=0.32.4", features = ["binlog"], optional = true }
 [dev-dependencies]
 serial_test = "3.0"
 mysql_async = "0.34"
+temp-env = "0.3"
 
 [profile.release]
 debug = 1             # Line tables only (flamegraphs work, smaller binary)
