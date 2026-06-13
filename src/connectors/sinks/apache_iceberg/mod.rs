@@ -172,6 +172,16 @@ impl ApacheIcebergSink {
         let secret_access_key =
             std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_else(|_| "minioadmin".to_string());
 
+        // Warn if default dev credentials are being used (no env var set).
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err()
+            || std::env::var("AWS_SECRET_ACCESS_KEY").is_err()
+        {
+            warn!(
+                "iceberg_sink: using default MinIO dev credentials (minioadmin/minioadmin). \
+                 Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY env vars for production use."
+            );
+        }
+
         let store = Arc::new(
             AmazonS3Builder::new()
                 .with_endpoint(endpoint)
@@ -332,10 +342,13 @@ impl ApacheIcebergSink {
             );
 
             // Generate a unique snapshot-id for the Iceberg commit.
+            // Use nanosecond-precision timestamp to avoid collisions even
+            // at high throughput (two flushes in the same nanosecond are
+            // astronomically unlikely).
             let snapshot_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_millis() as i64;
+                .as_nanos() as i64;
 
             // ---------------------------------------------------------------
             // 4. Commit a new Iceberg snapshot via the REST catalog
@@ -419,26 +432,119 @@ impl ApacheIcebergSink {
             }
         }
 
-        // Build Arrow fields — we use Utf8 for everything as a universal
-        // representation. Iceberg's own schema enforces the real types at
-        // read time.
-        let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(column_names.len());
+        // Infer Arrow data types for each column by scanning records.
+        use crate::core::record::Value;
+        let mut column_types: Vec<ArrowDataType> = Vec::with_capacity(column_names.len());
         for col_name in &column_names {
-            arrow_fields.push(ArrowField::new(col_name, ArrowDataType::Utf8, true));
+            if col_name.starts_with("_dbmazz_") {
+                column_types.push(ArrowDataType::Utf8);
+                continue;
+            }
+            // Scan records for the first non-null, non-unchanged value and infer
+            // the Arrow type from the Value variant.
+            let mut inferred = ArrowDataType::Utf8;
+            'col_scan: for rec in records {
+                let cols = match rec {
+                    CdcRecord::Insert { columns, .. } => columns,
+                    CdcRecord::Update { new_columns, .. } => new_columns,
+                    CdcRecord::Delete { columns, .. } => columns,
+                    _ => continue,
+                };
+                if let Some(cv) = cols.iter().find(|c| c.name == *col_name) {
+                    if !cv.value.is_null() && !cv.value.is_unchanged() {
+                        inferred = match &cv.value {
+                            Value::Bool(_) => ArrowDataType::Boolean,
+                            Value::Int64(_) => ArrowDataType::Int64,
+                            Value::Float64(_) => ArrowDataType::Float64,
+                            _ => ArrowDataType::Utf8,
+                        };
+                        break 'col_scan;
+                    }
+                }
+            }
+            column_types.push(inferred);
+        }
+
+        // Build Arrow fields with inferred types.
+        let mut arrow_fields: Vec<ArrowField> = Vec::with_capacity(column_names.len());
+        for (col_name, dt) in column_names.iter().zip(column_types.iter()) {
+            arrow_fields.push(ArrowField::new(col_name, dt.clone(), true));
         }
         let arrow_schema = Arc::new(Schema::new(arrow_fields));
 
-        // Build column builders.
-        let num_rows = records.len();
-        let mut builders: Vec<StringBuilder> = Vec::with_capacity(column_names.len());
-        for _ in 0..column_names.len() {
-            builders.push(StringBuilder::with_capacity(num_rows, num_rows * 64));
+        // Typed column builder that dispatches to the correct Arrow builder.
+        enum TypedBuilder {
+            Boolean(BooleanBuilder),
+            Int64(Int64Builder),
+            Float64(Float64Builder),
+            Utf8(StringBuilder),
         }
 
-        // Helper: look up column index by name (unused but kept for completeness).
-        // Prefixed with underscore as it's unused but kept for completeness.
-        let _col_index =
-            |name: &str| -> Option<usize> { column_names.iter().position(|c| c == name) };
+        impl TypedBuilder {
+            fn with_capacity(dt: &ArrowDataType, num_rows: usize) -> Self {
+                match dt {
+                    ArrowDataType::Boolean => {
+                        TypedBuilder::Boolean(BooleanBuilder::with_capacity(num_rows))
+                    }
+                    ArrowDataType::Int64 => {
+                        TypedBuilder::Int64(Int64Builder::with_capacity(num_rows))
+                    }
+                    ArrowDataType::Float64 => {
+                        TypedBuilder::Float64(Float64Builder::with_capacity(num_rows))
+                    }
+                    _ => TypedBuilder::Utf8(StringBuilder::with_capacity(num_rows, num_rows * 64)),
+                }
+            }
+
+            fn append_null(&mut self) {
+                match self {
+                    TypedBuilder::Boolean(b) => b.append_null(),
+                    TypedBuilder::Int64(b) => b.append_null(),
+                    TypedBuilder::Float64(b) => b.append_null(),
+                    TypedBuilder::Utf8(b) => b.append_null(),
+                }
+            }
+
+            fn append_utf8(&mut self, val: &str) {
+                if let TypedBuilder::Utf8(b) = self {
+                    b.append_value(val);
+                }
+            }
+
+            fn append_bool(&mut self, val: bool) {
+                if let TypedBuilder::Boolean(b) = self {
+                    b.append_value(val);
+                }
+            }
+
+            fn append_i64(&mut self, val: i64) {
+                if let TypedBuilder::Int64(b) = self {
+                    b.append_value(val);
+                }
+            }
+
+            fn append_f64(&mut self, val: f64) {
+                if let TypedBuilder::Float64(b) = self {
+                    b.append_value(val);
+                }
+            }
+
+            fn finish(&mut self) -> ArrayRef {
+                match self {
+                    TypedBuilder::Boolean(b) => Arc::new(b.finish()),
+                    TypedBuilder::Int64(b) => Arc::new(b.finish()),
+                    TypedBuilder::Float64(b) => Arc::new(b.finish()),
+                    TypedBuilder::Utf8(b) => Arc::new(b.finish()),
+                }
+            }
+        }
+
+        // Build column builders.
+        let num_rows = records.len();
+        let mut builders: Vec<TypedBuilder> = Vec::with_capacity(column_names.len());
+        for dt in &column_types {
+            builders.push(TypedBuilder::with_capacity(dt, num_rows));
+        }
 
         // Helper: extract columns from a CdcRecord variant.
         fn extract_record_data(
@@ -464,30 +570,43 @@ impl ApacheIcebergSink {
             for (i, col_name) in column_names.iter().enumerate() {
                 match col_name.as_str() {
                     "_dbmazz_op_type" => {
-                        builders[i].append_value(op_type);
+                        builders[i].append_utf8(op_type);
                     }
                     "_dbmazz_is_deleted" => {
-                        builders[i].append_value(if is_deleted { "true" } else { "false" });
+                        builders[i].append_utf8(if is_deleted { "true" } else { "false" });
                     }
                     "_dbmazz_synced_at" => {
                         let now = chrono::Utc::now().to_rfc3339();
-                        builders[i].append_value(&now);
+                        builders[i].append_utf8(&now);
                     }
                     "_dbmazz_cdc_version" => {
-                        builders[i].append_value("1");
+                        builders[i].append_utf8("1");
                     }
                     _ => {
                         // Find the column value in the record.
                         let val = cols.iter().find(|c| c.name == *col_name);
                         match val {
                             Some(cv) => {
-                                // Null values: use append_null() (proper Arrow null)
-                                // rather than storing the string "null".
-                                if cv.value.is_null() {
+                                // Null or Unchanged (TOAST) values: use append_null()
+                                // rather than storing a misleading sentinel string.
+                                // Unchanged columns are filtered here to avoid
+                                // overwriting real values with NULL in append-only
+                                // Parquet snapshots.
+                                if cv.value.is_null() || cv.value.is_unchanged() {
                                     builders[i].append_null();
                                 } else {
-                                    let plain_str = type_mapper.value_to_parquet_string(&cv.value);
-                                    builders[i].append_value(&plain_str);
+                                    // Dispatch on the Value variant to use the
+                                    // correct typed builder method.
+                                    match &cv.value {
+                                        Value::Bool(b) => builders[i].append_bool(*b),
+                                        Value::Int64(n) => builders[i].append_i64(*n),
+                                        Value::Float64(f) => builders[i].append_f64(*f),
+                                        _ => {
+                                            let plain_str =
+                                                type_mapper.value_to_parquet_string(&cv.value);
+                                            builders[i].append_utf8(&plain_str);
+                                        }
+                                    }
                                 }
                             }
                             None => {
@@ -502,7 +621,7 @@ impl ApacheIcebergSink {
         // Build arrays and record batch.
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(column_names.len());
         for builder in &mut builders {
-            arrays.push(Arc::new(builder.finish()));
+            arrays.push(builder.finish());
         }
 
         let batch = RecordBatch::try_new(arrow_schema.clone(), arrays)
@@ -711,13 +830,12 @@ impl ApacheIcebergSink {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
 
-            warn!(
-                table = %table_name,
-                status = %status,
-                body = %body,
-                "iceberg_sink: commit snapshot returned non-success (data file written anyway)"
-            );
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "iceberg_sink: commit snapshot for table {} returned HTTP {}: {}",
+                table_name,
+                status,
+                body,
+            ));
         }
 
         info!(
@@ -726,6 +844,22 @@ impl ApacheIcebergSink {
             "iceberg_sink: snapshot committed successfully"
         );
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drop guard
+// ---------------------------------------------------------------------------
+
+impl Drop for ApacheIcebergSink {
+    fn drop(&mut self) {
+        if !self.pending_records.is_empty() {
+            warn!(
+                records = self.pending_records.len(),
+                "iceberg_sink: ApacheIcebergSink dropped with pending records — \
+                 close() was not called or flush failed; data may be lost"
+            );
+        }
     }
 }
 

@@ -71,7 +71,11 @@ impl TypeMapper {
             Value::Timestamp(ts) => serde_json::json!(ts),
             Value::Decimal(d) => serde_json::json!(d),
             Value::Uuid(u) => serde_json::json!(u),
-            Value::Unchanged => serde_json::Value::Null,
+            Value::Unchanged => {
+                // Should not reach here: Value::Unchanged is filtered upstream
+                // in records_to_parquet_bytes before type conversion.
+                serde_json::Value::Null
+            }
         }
     }
 

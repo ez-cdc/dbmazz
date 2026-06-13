@@ -8,6 +8,9 @@
 /skills-lock.json
 /Dockerfile.dev
 
+# Local Cargo config (macOS linker, etc.)
+.cargo/
+
 # Byproducts
 *.log
 *.tmp

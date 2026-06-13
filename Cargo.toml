@@ -8,7 +8,7 @@ license = "Elastic-2.0"
 rust-version = "1.91.1"
 
 [features]
-default = ["sink-starrocks", "sink-postgres", "sink-snowflake", "sink-apache_iceberg"]
+default = ["sink-starrocks", "sink-postgres", "sink-snowflake"]
 sink-starrocks = ["dep:curl", "dep:mysql_async", "dep:openssl-sys"]
 # --- Optional: MySQL source ---
 mysql-source = ["dep:mysql_async", "dep:mysql_common", "mysql_async?/binlog"]
